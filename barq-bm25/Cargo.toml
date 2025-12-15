@@ -1,5 +1,5 @@
 [package]
-name = "barq-core"
+name = "barq-bm25"
 version = "0.1.0"
 edition = "2021"
 authors = ["Barq DB Contributors"]
@@ -8,7 +8,5 @@ license = "Apache-2.0"
 [dependencies]
 thiserror.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 rayon.workspace = true
 barq-index = { path = "../barq-index" }
-barq-bm25 = { path = "../barq-bm25" }
