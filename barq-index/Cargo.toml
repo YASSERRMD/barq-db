@@ -9,3 +9,4 @@ license = "Apache-2.0"
 thiserror.workspace = true
 serde.workspace = true
 rayon.workspace = true
+rand = "0.8"
