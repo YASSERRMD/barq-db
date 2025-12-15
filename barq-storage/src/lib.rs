@@ -21,6 +21,9 @@ pub enum StorageError {
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),
 
+    #[error("object store error: {0}")]
+    ObjectStore(String),
+
     #[error("catalog error: {0}")]
     Catalog(#[from] CatalogError),
 
@@ -423,6 +426,22 @@ impl Storage {
         }
 
         Ok(())
+    }
+
+    /// Download a snapshot from an object store and restore it into the provided root.
+    pub fn restore_snapshot_from_object_store<Store: ObjectStore + 'static + Send + Sync>(
+        target_root: impl AsRef<Path>,
+        snapshot_dir: impl AsRef<Path>,
+        object_store: Store,
+        remote_prefix: impl AsRef<Path>,
+    ) -> Result<(), StorageError> {
+        let snapshot_dir = snapshot_dir.as_ref();
+        if snapshot_dir.exists() {
+            fs::remove_dir_all(snapshot_dir)?;
+        }
+        fs::create_dir_all(snapshot_dir)?;
+        object_store.download_dir(remote_prefix.as_ref(), snapshot_dir)?;
+        Self::restore_snapshot(target_root, snapshot_dir)
     }
 
     pub fn create_collection(&mut self, schema: CollectionSchema) -> Result<(), StorageError> {
@@ -852,6 +871,7 @@ mod tests {
     use super::*;
     use barq_core::{FieldSchema, FieldType, PayloadValue};
     use barq_index::{DistanceMetric, DocumentId, HnswParams, IndexType};
+    use std::path::Path;
 
     fn sample_schema(name: &str) -> CollectionSchema {
         CollectionSchema {
@@ -969,9 +989,7 @@ mod tests {
         let schema = sample_schema("upload");
         storage.create_collection(schema.clone()).unwrap();
         let doc = sample_document(1);
-        storage
-            .insert(&schema.name, doc.clone(), false)
-            .unwrap();
+        storage.insert(&schema.name, doc.clone(), false).unwrap();
 
         let snapshot_dir = tempfile::tempdir().unwrap();
         let upload_root = tempfile::tempdir().unwrap();
@@ -985,5 +1003,39 @@ mod tests {
         assert!(uploaded_dir.exists());
         assert!(uploaded_dir.join("snapshot.json").exists());
         assert!(uploaded_dir.join("tenants").exists());
+    }
+
+    #[test]
+    fn snapshot_can_be_restored_from_object_store() {
+        let root = tempfile::tempdir().unwrap();
+        let mut storage = Storage::open(root.path()).unwrap();
+        let schema = sample_schema("download");
+        storage.create_collection(schema.clone()).unwrap();
+        let doc = sample_document(5);
+        storage.insert(&schema.name, doc.clone(), false).unwrap();
+
+        let snapshot_dir = tempfile::tempdir().unwrap();
+        let upload_root = tempfile::tempdir().unwrap();
+        let object_store = LocalObjectStore::new(upload_root.path());
+        storage
+            .create_snapshot(snapshot_dir.path())
+            .expect("snapshot should succeed");
+        object_store
+            .upload_dir(snapshot_dir.path(), Path::new("snapshots/restore"))
+            .expect("upload should succeed");
+
+        let restore_root = tempfile::tempdir().unwrap();
+        Storage::restore_snapshot_from_object_store(
+            restore_root.path(),
+            tempfile::tempdir().unwrap().path(),
+            object_store,
+            Path::new("snapshots/restore"),
+        )
+        .expect("restore should succeed");
+
+        let mut restored = Storage::open(restore_root.path()).unwrap();
+        let results = restored.search(&schema.name, &doc.vector, 1, None).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, doc.id);
     }
 }
