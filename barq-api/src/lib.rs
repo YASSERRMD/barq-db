@@ -1,5 +1,9 @@
 use std::collections::HashMap;
+use std::fs::File;
 use std::future::Future;
+use std::io::BufReader;
+use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::{Arc, OnceLock, RwLock};
 
 use axum::{
@@ -9,8 +13,9 @@ use axum::{
     routing::{delete, get, post, put},
     Json, Router,
 };
+use axum_server::tls_rustls::RustlsConfig;
 use barq_bm25::Bm25Config;
-use barq_cluster::{ClusterConfig, ClusterError, ClusterRouter, ReadPreference};
+use barq_cluster::{ClusterConfig, ClusterError, ClusterRouter};
 use barq_core::{
     CollectionSchema, Document, FieldSchema, FieldType, Filter, HybridSearchResult, HybridWeights,
     PayloadValue, TenantId,
@@ -18,9 +23,13 @@ use barq_core::{
 use barq_index::{DistanceMetric, DocumentId, DocumentIdError, IndexType};
 use barq_storage::{Storage, TenantQuota, TenantUsageReport};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::server::WebPkiClientVerifier;
+use rustls::{self, RootCertStore};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{net::TcpListener, sync::Mutex, task::JoinHandle};
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Clone)]
@@ -29,6 +38,13 @@ struct AppState {
     auth: ApiAuth,
     metrics: PrometheusHandle,
     cluster: ClusterRouter,
+}
+
+#[derive(Debug, Clone)]
+pub struct TlsConfig {
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
+    pub client_ca_path: Option<PathBuf>,
 }
 
 impl AppState {
@@ -61,24 +77,140 @@ impl AppState {
     }
 }
 
+impl TlsConfig {
+    pub fn new(cert_path: impl Into<PathBuf>, key_path: impl Into<PathBuf>) -> Self {
+        Self {
+            cert_path: cert_path.into(),
+            key_path: key_path.into(),
+            client_ca_path: None,
+        }
+    }
+
+    pub fn with_client_ca(mut self, ca_path: impl Into<PathBuf>) -> Self {
+        self.client_ca_path = Some(ca_path.into());
+        self
+    }
+
+    pub fn validate(&self) -> Result<(), ApiError> {
+        if !self.cert_path.exists() {
+            return Err(ApiError::Tls("certificate path does not exist".into()));
+        }
+        if !self.key_path.exists() {
+            return Err(ApiError::Tls("private key path does not exist".into()));
+        }
+        if let Some(ca) = &self.client_ca_path {
+            if !ca.exists() {
+                return Err(ApiError::Tls("client CA path does not exist".into()));
+            }
+        }
+        Ok(())
+    }
+
+    fn load_certificates(&self) -> Result<Vec<CertificateDer<'static>>, ApiError> {
+        let cert_file = File::open(&self.cert_path)
+            .map_err(|err| ApiError::Tls(format!("failed to open cert: {}", err)))?;
+        let mut reader = BufReader::new(cert_file);
+        let certs = rustls_pemfile::certs(&mut reader)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| ApiError::Tls(format!("failed to parse cert: {}", err)))?;
+        if certs.is_empty() {
+            return Err(ApiError::Tls("no certificates found".into()));
+        }
+        Ok(certs)
+    }
+
+    fn load_private_key(&self) -> Result<PrivateKeyDer<'static>, ApiError> {
+        let key_file = File::open(&self.key_path)
+            .map_err(|err| ApiError::Tls(format!("failed to open key: {}", err)))?;
+        let mut reader = BufReader::new(key_file);
+        rustls_pemfile::private_key(&mut reader)
+            .map_err(|err| ApiError::Tls(format!("failed to parse key: {}", err)))?
+            .ok_or_else(|| ApiError::Tls("no private key found".into()))
+    }
+
+    fn load_client_ca(&self) -> Result<RootCertStore, ApiError> {
+        let mut store = RootCertStore::empty();
+        if let Some(path) = &self.client_ca_path {
+            let ca_file = File::open(path)
+                .map_err(|err| ApiError::Tls(format!("failed to open client CA: {}", err)))?;
+            let mut reader = BufReader::new(ca_file);
+            let certs = rustls_pemfile::certs(&mut reader)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|err| ApiError::Tls(format!("failed to parse client CA: {}", err)))?;
+            for cert in certs {
+                store
+                    .add(cert)
+                    .map_err(|err| ApiError::Tls(format!("invalid client CA: {}", err)))?;
+            }
+        }
+        Ok(store)
+    }
+
+    pub fn build_server_config(&self) -> Result<rustls::ServerConfig, ApiError> {
+        self.validate()?;
+        let certs = self.load_certificates()?;
+        let key = self.load_private_key()?;
+
+        let builder = rustls::ServerConfig::builder();
+        let server_config = if self.client_ca_path.is_some() {
+            let client_ca = self.load_client_ca()?;
+            let verifier = WebPkiClientVerifier::builder(client_ca.into())
+                .build()
+                .map_err(|err| ApiError::Tls(format!("invalid client verifier: {}", err)))?;
+            builder
+                .with_client_cert_verifier(verifier)
+                .with_single_cert(certs, key)
+                .map_err(|err| ApiError::Tls(format!("invalid tls config: {}", err)))?
+        } else {
+            builder
+                .with_no_client_auth()
+                .with_single_cert(certs, key)
+                .map_err(|err| ApiError::Tls(format!("invalid tls config: {}", err)))?
+        };
+
+        Ok(server_config)
+    }
+
+    pub async fn into_rustls_config(&self) -> Result<RustlsConfig, ApiError> {
+        let server_config = self.build_server_config()?;
+        Ok(RustlsConfig::from_config(Arc::new(server_config)))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ApiRole {
     Admin,
-    ReadWrite,
-    ReadOnly,
+    Ops,
+    TenantAdmin,
+    Writer,
+    Reader,
 }
 
 impl ApiRole {
-    fn allows(&self, required: &ApiRole) -> bool {
-        matches!(
-            (self, required),
-            (ApiRole::Admin, _)
-                | (ApiRole::ReadWrite, ApiRole::ReadOnly)
-                | (ApiRole::ReadWrite, ApiRole::ReadWrite)
-                | (ApiRole::ReadOnly, ApiRole::ReadOnly)
-        )
+    fn allows(&self, required: &ApiPermission) -> bool {
+        match (self, required) {
+            (ApiRole::Admin, _) => true,
+            (ApiRole::Ops, ApiPermission::Ops) => true,
+            (ApiRole::TenantAdmin, ApiPermission::TenantAdmin)
+            | (ApiRole::TenantAdmin, ApiPermission::Write)
+            | (ApiRole::TenantAdmin, ApiPermission::Read) => true,
+            (ApiRole::Writer, ApiPermission::Write) | (ApiRole::Writer, ApiPermission::Read) => {
+                true
+            }
+            (ApiRole::Reader, ApiPermission::Read) => true,
+            _ => false,
+        }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApiPermission {
+    Admin,
+    Ops,
+    TenantAdmin,
+    Write,
+    Read,
 }
 
 #[derive(Debug, Clone)]
@@ -87,10 +219,21 @@ struct ApiKey {
     role: ApiRole,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct ApiAuth {
     keys: Arc<RwLock<HashMap<String, ApiKey>>>,
     require_keys: bool,
+    jwt_verifier: Option<Arc<dyn JwtVerifier>>,
+}
+
+impl std::fmt::Debug for ApiAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiAuth")
+            .field("keys", &"<redacted>")
+            .field("require_keys", &self.require_keys)
+            .field("jwt_verifier", &self.jwt_verifier.is_some())
+            .finish()
+    }
 }
 
 impl ApiAuth {
@@ -108,14 +251,20 @@ impl ApiAuth {
         guard.insert(key.into(), ApiKey { tenant, role });
     }
 
+    pub fn with_jwt_verifier(mut self, verifier: Arc<dyn JwtVerifier>) -> Self {
+        self.jwt_verifier = Some(verifier);
+        self
+    }
+
     fn authenticate(
         &self,
         headers: &HeaderMap,
-        required: ApiRole,
+        required: ApiPermission,
         path_tenant: Option<&TenantId>,
     ) -> Result<ApiIdentity, ApiError> {
         let guard = self.keys.read().expect("auth lock poisoned");
-        let fallback_allowed = !self.require_keys && guard.is_empty();
+        let fallback_allowed =
+            !self.require_keys && guard.is_empty() && self.jwt_verifier.is_none();
         let requested_header_tenant = tenant_header(headers);
         if fallback_allowed {
             let tenant = path_tenant
@@ -124,7 +273,31 @@ impl ApiAuth {
                 .unwrap_or_default();
             return Ok(ApiIdentity {
                 tenant,
-                _role: ApiRole::Admin,
+                role: ApiRole::Admin,
+                actor: Some("anonymous".to_string()),
+                method: AuthMethod::Anonymous,
+            });
+        }
+
+        if let Some(token) = bearer_token(headers) {
+            let verifier = self
+                .jwt_verifier
+                .as_ref()
+                .ok_or_else(|| ApiError::Unauthorized("jwt auth not configured".into()))?;
+            let claims = verifier.verify(token)?;
+            enforce_tenant_constraints(
+                path_tenant,
+                requested_header_tenant.as_ref(),
+                &claims.tenant,
+            )?;
+            if !claims.role.allows(&required) {
+                return Err(ApiError::Forbidden("insufficient role".into()));
+            }
+            return Ok(ApiIdentity {
+                tenant: claims.tenant,
+                role: claims.role,
+                actor: claims.subject,
+                method: AuthMethod::Jwt,
             });
         }
 
@@ -136,25 +309,33 @@ impl ApiAuth {
         let record = guard
             .get(api_key)
             .ok_or_else(|| ApiError::Unauthorized("invalid api key".into()))?;
-        if let Some(path) = path_tenant {
-            if path != &record.tenant {
-                return Err(ApiError::Forbidden("tenant mismatch".into()));
-            }
-        }
-        if let Some(header_tenant) = requested_header_tenant {
-            if header_tenant != record.tenant {
-                return Err(ApiError::Forbidden("tenant header mismatch".into()));
-            }
-        }
+        enforce_tenant_constraints(
+            path_tenant,
+            requested_header_tenant.as_ref(),
+            &record.tenant,
+        )?;
         if !record.role.allows(&required) {
             return Err(ApiError::Forbidden("insufficient role".into()));
         }
 
         Ok(ApiIdentity {
             tenant: record.tenant.clone(),
-            _role: record.role.clone(),
+            role: record.role.clone(),
+            actor: Some(redact_key(api_key)),
+            method: AuthMethod::ApiKey,
         })
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct JwtClaims {
+    pub tenant: TenantId,
+    pub role: ApiRole,
+    pub subject: Option<String>,
+}
+
+pub trait JwtVerifier: Send + Sync {
+    fn verify(&self, token: &str) -> Result<JwtClaims, ApiError>;
 }
 
 fn init_metrics_recorder() -> PrometheusHandle {
@@ -171,7 +352,9 @@ fn init_metrics_recorder() -> PrometheusHandle {
 #[derive(Debug, Clone)]
 struct ApiIdentity {
     tenant: TenantId,
-    _role: ApiRole,
+    role: ApiRole,
+    actor: Option<String>,
+    method: AuthMethod,
 }
 
 fn tenant_header(headers: &HeaderMap) -> Option<TenantId> {
@@ -179,6 +362,74 @@ fn tenant_header(headers: &HeaderMap) -> Option<TenantId> {
         .get("x-tenant-id")
         .and_then(|value| value.to_str().ok())
         .map(TenantId::new)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AuthMethod {
+    Anonymous,
+    ApiKey,
+    Jwt,
+}
+
+impl AuthMethod {
+    fn as_str(&self) -> &'static str {
+        match self {
+            AuthMethod::Anonymous => "anonymous",
+            AuthMethod::ApiKey => "api-key",
+            AuthMethod::Jwt => "jwt",
+        }
+    }
+}
+
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn enforce_tenant_constraints(
+    path_tenant: Option<&TenantId>,
+    header_tenant: Option<&TenantId>,
+    identity_tenant: &TenantId,
+) -> Result<(), ApiError> {
+    if let Some(path) = path_tenant {
+        if path != identity_tenant {
+            return Err(ApiError::Forbidden("tenant mismatch".into()));
+        }
+    }
+
+    if let Some(header) = header_tenant {
+        if header != identity_tenant {
+            return Err(ApiError::Forbidden("tenant header mismatch".into()));
+        }
+    }
+
+    Ok(())
+}
+
+fn redact_key(key: &str) -> String {
+    let len = key.chars().count();
+    if len <= 4 {
+        return "****".to_string();
+    }
+    let prefix: String = key.chars().take(4).collect();
+    format!("{}***", prefix)
+}
+
+fn audit_log(action: &str, identity: &ApiIdentity, details: &str) {
+    info!(
+        target: "audit",
+        action,
+        tenant = identity.tenant.as_str(),
+        role = ?identity.role,
+        actor = identity.actor.as_deref().unwrap_or("unknown"),
+        method = identity.method.as_str(),
+        details,
+        "security event"
+    );
 }
 
 #[derive(Debug, Error)]
@@ -201,6 +452,9 @@ pub enum ApiError {
     #[error("forbidden: {0}")]
     Forbidden(String),
 
+    #[error("tls configuration error: {0}")]
+    Tls(String),
+
     #[error("redirecting to leader at {0}")]
     Redirect(String),
 }
@@ -215,6 +469,7 @@ impl IntoResponse for ApiError {
             ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
             ApiError::Redirect(_) => StatusCode::TEMPORARY_REDIRECT,
             ApiError::Cluster(_) => StatusCode::SERVICE_UNAVAILABLE,
+            ApiError::Tls(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ApiError::Storage(barq_storage::StorageError::QuotaExceeded { .. }) => {
                 StatusCode::TOO_MANY_REQUESTS
             }
@@ -260,7 +515,7 @@ pub struct TextFieldRequest {
     pub required: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum DocumentIdInput {
     U64(u64),
@@ -450,6 +705,31 @@ pub async fn start_server_with_auth(
     })
 }
 
+pub async fn start_tls_server(
+    addr: SocketAddr,
+    storage: Storage,
+    auth: ApiAuth,
+    tls: TlsConfig,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<JoinHandle<Result<(), std::io::Error>>, ApiError> {
+    let app = build_router_with_auth(storage, auth);
+    let rustls_config = tls.into_rustls_config().await?;
+    let server_handle = axum_server::Handle::new();
+    let shutdown_handle = server_handle.clone();
+    tokio::spawn(async move {
+        shutdown.await;
+        shutdown_handle.graceful_shutdown(None);
+    });
+
+    Ok(tokio::spawn(async move {
+        axum_server::bind_rustls(addr, rustls_config)
+            .handle(server_handle)
+            .serve(app.into_make_service())
+            .await
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))
+    }))
+}
+
 async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "status": "ok" }))
 }
@@ -458,7 +738,9 @@ async fn render_metrics(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    state.auth.authenticate(&headers, ApiRole::Admin, None)?;
+    state
+        .auth
+        .authenticate(&headers, ApiPermission::Ops, None)?;
     let body = state.metrics.render();
     Ok((StatusCode::OK, body).into_response())
 }
@@ -467,7 +749,9 @@ async fn info(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let identity = state.auth.authenticate(&headers, ApiRole::ReadOnly, None)?;
+    let identity = state
+        .auth
+        .authenticate(&headers, ApiPermission::Read, None)?;
     state.ensure_local_for_tenant(&identity.tenant)?;
     let mut storage = state.storage.lock().await;
     let usage = storage.tenant_usage_report(&identity.tenant);
@@ -513,10 +797,10 @@ async fn create_collection(
         });
     }
 
-    let tenant = state
+    let identity = state
         .auth
-        .authenticate(&headers, ApiRole::Admin, None)?
-        .tenant;
+        .authenticate(&headers, ApiPermission::TenantAdmin, None)?;
+    let tenant = identity.tenant.clone();
     state.ensure_primary_for_tenant(&tenant)?;
     let schema = CollectionSchema {
         name: payload.name.clone(),
@@ -527,6 +811,11 @@ async fn create_collection(
 
     let mut storage = state.storage.lock().await;
     storage.create_collection_for_tenant(tenant, schema)?;
+    audit_log(
+        "create-collection",
+        &identity,
+        &format!("collection={} schema", payload.name),
+    );
     Ok(StatusCode::CREATED)
 }
 
@@ -535,13 +824,18 @@ async fn drop_collection(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
-    let tenant = state
+    let identity = state
         .auth
-        .authenticate(&headers, ApiRole::Admin, None)?
-        .tenant;
+        .authenticate(&headers, ApiPermission::TenantAdmin, None)?;
+    let tenant = identity.tenant.clone();
     state.ensure_primary_for_tenant(&tenant)?;
     let mut storage = state.storage.lock().await;
     storage.drop_collection_for_tenant(&tenant, &name)?;
+    audit_log(
+        "drop-collection",
+        &identity,
+        &format!("collection={}", name),
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -551,10 +845,11 @@ async fn insert_document(
     headers: HeaderMap,
     Json(payload): Json<InsertDocumentRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let tenant = state
+    let identity = state
         .auth
-        .authenticate(&headers, ApiRole::ReadWrite, None)?
-        .tenant;
+        .authenticate(&headers, ApiPermission::Write, None)?;
+    let tenant = identity.tenant.clone();
+    let id_for_log = payload.id.clone();
     let document_id: DocumentId = payload.id.try_into()?;
     state.ensure_primary_for_document(&tenant, &document_id)?;
     let document = Document {
@@ -564,6 +859,11 @@ async fn insert_document(
     };
     let mut storage = state.storage.lock().await;
     storage.insert_for_tenant(&tenant, &name, document, payload.upsert)?;
+    audit_log(
+        "insert-document",
+        &identity,
+        &format!("collection={} id={:?}", name, id_for_log),
+    );
     Ok(StatusCode::CREATED)
 }
 
@@ -573,13 +873,19 @@ async fn delete_document(
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
     let document_id: DocumentId = id.parse()?;
-    let tenant = state
+    let identity = state
         .auth
-        .authenticate(&headers, ApiRole::ReadWrite, None)?
-        .tenant;
+        .authenticate(&headers, ApiPermission::Write, None)?;
+    let tenant = identity.tenant.clone();
     state.ensure_primary_for_document(&tenant, &document_id)?;
     let mut storage = state.storage.lock().await;
+    let id_for_log = document_id.clone();
     let existed = storage.delete_for_tenant(&tenant, &name, document_id)?;
+    audit_log(
+        "delete-document",
+        &identity,
+        &format!("collection={} id={:?}", name, id_for_log),
+    );
     Ok(if existed {
         StatusCode::NO_CONTENT
     } else {
@@ -593,10 +899,10 @@ async fn rebuild_collection_index(
     headers: HeaderMap,
     Json(payload): Json<RebuildIndexRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let tenant = state
+    let identity = state
         .auth
-        .authenticate(&headers, ApiRole::Admin, None)?
-        .tenant;
+        .authenticate(&headers, ApiPermission::TenantAdmin, None)?;
+    let tenant = identity.tenant.clone();
     state.ensure_primary_for_tenant(&tenant)?;
     {
         let storage = state.storage.lock().await;
@@ -606,15 +912,17 @@ async fn rebuild_collection_index(
     let storage = state.storage.clone();
     let requested_index = payload.index.clone();
     let tenant_for_spawn = tenant.clone();
+    let name_for_spawn = name.clone();
     tokio::spawn(async move {
         let mut storage = storage.lock().await;
         if let Err(err) =
-            storage.rebuild_index_for_tenant(&tenant_for_spawn, &name, requested_index)
+            storage.rebuild_index_for_tenant(&tenant_for_spawn, &name_for_spawn, requested_index)
         {
-            eprintln!("failed to rebuild index for {}: {}", name, err);
+            eprintln!("failed to rebuild index for {}: {}", name_for_spawn, err);
         }
     });
 
+    audit_log("rebuild-index", &identity, &format!("collection={}", name));
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -626,7 +934,7 @@ async fn search_collection(
 ) -> Result<Json<SearchResponse>, ApiError> {
     let tenant = state
         .auth
-        .authenticate(&headers, ApiRole::ReadOnly, None)?
+        .authenticate(&headers, ApiPermission::Read, None)?
         .tenant;
     state.ensure_local_for_tenant(&tenant)?;
     if payload.top_k == 0 {
@@ -651,7 +959,7 @@ async fn search_text_collection(
 ) -> Result<Json<TextSearchResponse>, ApiError> {
     let tenant = state
         .auth
-        .authenticate(&headers, ApiRole::ReadOnly, None)?
+        .authenticate(&headers, ApiPermission::Read, None)?
         .tenant;
     state.ensure_local_for_tenant(&tenant)?;
     if payload.top_k == 0 {
@@ -676,7 +984,7 @@ async fn search_hybrid_collection(
 ) -> Result<Json<HybridSearchResponse>, ApiError> {
     let tenant = state
         .auth
-        .authenticate(&headers, ApiRole::ReadOnly, None)?
+        .authenticate(&headers, ApiPermission::Read, None)?
         .tenant;
     state.ensure_local_for_tenant(&tenant)?;
     if payload.top_k == 0 {
@@ -703,7 +1011,7 @@ async fn explain_hybrid_collection(
 ) -> Result<Json<ExplainResponse>, ApiError> {
     let tenant = state
         .auth
-        .authenticate(&headers, ApiRole::ReadOnly, None)?
+        .authenticate(&headers, ApiPermission::Read, None)?
         .tenant;
     state.ensure_local_for_tenant(&tenant)?;
     if payload.top_k == 0 {
@@ -729,9 +1037,10 @@ async fn tenant_usage(
     headers: HeaderMap,
 ) -> Result<Json<TenantUsageReport>, ApiError> {
     let tenant_id = TenantId::new(tenant);
-    let _ = state
-        .auth
-        .authenticate(&headers, ApiRole::Admin, Some(&tenant_id))?;
+    let _identity =
+        state
+            .auth
+            .authenticate(&headers, ApiPermission::TenantAdmin, Some(&tenant_id))?;
     state.ensure_local_for_tenant(&tenant_id)?;
     let mut storage = state.storage.lock().await;
     let report = storage.tenant_usage_report(&tenant_id);
@@ -745,12 +1054,18 @@ async fn set_tenant_quota(
     Json(payload): Json<TenantQuotaRequest>,
 ) -> Result<StatusCode, ApiError> {
     let tenant_id = TenantId::new(tenant);
-    let _ = state
-        .auth
-        .authenticate(&headers, ApiRole::Admin, Some(&tenant_id))?;
+    let identity =
+        state
+            .auth
+            .authenticate(&headers, ApiPermission::TenantAdmin, Some(&tenant_id))?;
     state.ensure_primary_for_tenant(&tenant_id)?;
     let mut storage = state.storage.lock().await;
     storage.set_tenant_quota(tenant_id, payload.into());
+    audit_log(
+        "set-tenant-quota",
+        &identity,
+        &format!("tenant={}", identity.tenant.as_str()),
+    );
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -761,12 +1076,19 @@ async fn register_api_key(
     Json(payload): Json<ApiKeyRequest>,
 ) -> Result<StatusCode, ApiError> {
     let tenant_id = TenantId::new(tenant);
-    let _ = state
-        .auth
-        .authenticate(&headers, ApiRole::Admin, Some(&tenant_id))?;
+    let identity =
+        state
+            .auth
+            .authenticate(&headers, ApiPermission::TenantAdmin, Some(&tenant_id))?;
+    let role = payload.role.clone();
     state
         .auth
         .insert(payload.key, tenant_id.clone(), payload.role);
+    audit_log(
+        "register-api-key",
+        &identity,
+        &format!("tenant={} role={:?}", tenant_id.as_str(), role),
+    );
     Ok(StatusCode::CREATED)
 }
 
@@ -779,13 +1101,14 @@ pub fn init_tracing() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use barq_cluster::{NodeConfig, NodeId, ShardId, ShardPlacement};
+    use barq_cluster::{NodeConfig, NodeId, ReadPreference, ShardId, ShardPlacement};
     use barq_core::TenantId;
     use barq_index::DocumentId;
     use reqwest::{Client, StatusCode};
     use std::collections::HashMap;
     use std::net::SocketAddr;
     use std::path::Path;
+    use std::sync::Arc;
     use tokio::sync::oneshot;
     use tokio::time::{sleep, Duration};
 
@@ -843,6 +1166,24 @@ mod tests {
                 .await
         });
         (addr, tx, handle)
+    }
+
+    struct MapJwtVerifier {
+        claims: HashMap<String, (TenantId, ApiRole)>,
+    }
+
+    impl JwtVerifier for MapJwtVerifier {
+        fn verify(&self, token: &str) -> Result<JwtClaims, ApiError> {
+            let (tenant, role) = self
+                .claims
+                .get(token)
+                .ok_or_else(|| ApiError::Unauthorized("invalid token".into()))?;
+            Ok(JwtClaims {
+                tenant: tenant.clone(),
+                role: role.clone(),
+                subject: Some(format!("subject:{token}")),
+            })
+        }
     }
 
     #[tokio::test]
@@ -1302,6 +1643,151 @@ mod tests {
 
         shutdown.send(()).unwrap();
         handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn writer_role_cannot_manage_collections() {
+        init_tracing();
+        let dir = tempfile::tempdir().unwrap();
+        let tenant = TenantId::new("rbac-tenant");
+        let auth = ApiAuth::new().require_keys();
+        auth.insert("admin-key", tenant.clone(), ApiRole::TenantAdmin);
+        auth.insert("writer-key", tenant.clone(), ApiRole::Writer);
+
+        let (addr, shutdown, handle) = start_test_server_with_auth(dir.path(), auth).await;
+        let client = Client::new();
+
+        let create_body = serde_json::json!({
+            "name": "managed",
+            "dimension": 3,
+            "metric": "Cosine"
+        });
+
+        client
+            .post(format!("http://{}/collections", addr))
+            .header("x-api-key", "admin-key")
+            .header("x-tenant-id", tenant.as_str())
+            .json(&create_body)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+
+        let forbidden = client
+            .post(format!("http://{}/collections", addr))
+            .header("x-api-key", "writer-key")
+            .header("x-tenant-id", tenant.as_str())
+            .json(&create_body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+        let insert_body = serde_json::json!({
+            "id": 42,
+            "vector": [0.3, 0.1, 0.2],
+            "payload": {"mode": "writer"}
+        });
+
+        client
+            .post(format!("http://{}/collections/managed/documents", addr))
+            .header("x-api-key", "writer-key")
+            .header("x-tenant-id", tenant.as_str())
+            .json(&insert_body)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+
+        shutdown.send(()).unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn jwt_tokens_respect_roles() {
+        init_tracing();
+        let dir = tempfile::tempdir().unwrap();
+        let tenant = TenantId::new("jwt-tenant");
+        let mut claims = HashMap::new();
+        claims.insert(
+            "tenant-admin".into(),
+            (tenant.clone(), ApiRole::TenantAdmin),
+        );
+        claims.insert("reader-token".into(), (tenant.clone(), ApiRole::Reader));
+
+        let verifier = MapJwtVerifier { claims };
+        let auth = ApiAuth::new()
+            .require_keys()
+            .with_jwt_verifier(Arc::new(verifier));
+
+        let (addr, shutdown, handle) = start_test_server_with_auth(dir.path(), auth).await;
+        let client = Client::new();
+
+        let create_body = serde_json::json!({
+            "name": "jwt-coll",
+            "dimension": 3,
+            "metric": "Cosine"
+        });
+
+        client
+            .post(format!("http://{}/collections", addr))
+            .header(axum::http::header::AUTHORIZATION, "Bearer tenant-admin")
+            .json(&create_body)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+
+        let insert_body = serde_json::json!({
+            "id": 5,
+            "vector": [0.2, 0.4, 0.6],
+            "payload": {"tag": "jwt"}
+        });
+
+        client
+            .post(format!("http://{}/collections/jwt-coll/documents", addr))
+            .header(axum::http::header::AUTHORIZATION, "Bearer tenant-admin")
+            .json(&insert_body)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+
+        let search_body = serde_json::json!({
+            "vector": [0.2, 0.4, 0.6],
+            "top_k": 1
+        });
+
+        let search = client
+            .post(format!("http://{}/collections/jwt-coll/search", addr))
+            .header(axum::http::header::AUTHORIZATION, "Bearer reader-token")
+            .json(&search_body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(search.status(), StatusCode::OK);
+
+        let metrics = client
+            .get(format!("http://{}/metrics", addr))
+            .header(axum::http::header::AUTHORIZATION, "Bearer reader-token")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(metrics.status(), StatusCode::FORBIDDEN);
+
+        shutdown.send(()).unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn tls_config_validation_catches_missing_material() {
+        let config = TlsConfig::new("/no/such/cert.pem", "/no/such/key.pem");
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, ApiError::Tls(_)));
     }
 
     #[tokio::test]
