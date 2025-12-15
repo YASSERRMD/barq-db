@@ -2,6 +2,8 @@
 members = [
     "barq-core",
     "barq-index",
+    "barq-storage",
+    "barq-api",
 ]
 resolver = "2"
 

@@ -1,6 +1,6 @@
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use std::{fmt, str::FromStr};
 
 #[derive(Debug, thiserror::Error)]
 pub enum VectorIndexError {
@@ -9,6 +9,15 @@ pub enum VectorIndexError {
 
     #[error("search requested top_k={top_k}, but a positive value is required")]
     InvalidTopK { top_k: usize },
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum DocumentIdError {
+    #[error("document id string cannot be empty")]
+    EmptyString,
+
+    #[error("document id must be positive, got {0}")]
+    NonPositiveU64(u64),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -22,6 +31,31 @@ impl fmt::Display for DocumentId {
         match self {
             DocumentId::U64(v) => write!(f, "{}", v),
             DocumentId::Str(s) => write!(f, "{}", s),
+        }
+    }
+}
+
+impl DocumentId {
+    pub fn validate(&self) -> Result<(), DocumentIdError> {
+        match self {
+            DocumentId::U64(v) if *v == 0 => Err(DocumentIdError::NonPositiveU64(*v)),
+            DocumentId::Str(s) if s.trim().is_empty() => Err(DocumentIdError::EmptyString),
+            _ => Ok(()),
+        }
+    }
+}
+
+impl FromStr for DocumentId {
+    type Err = DocumentIdError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Ok(value) = s.parse::<u64>() {
+            let id = DocumentId::U64(value);
+            id.validate().map(|_| id)
+        } else if s.trim().is_empty() {
+            Err(DocumentIdError::EmptyString)
+        } else {
+            Ok(DocumentId::Str(s.to_string()))
         }
     }
 }
@@ -66,6 +100,10 @@ impl FlatIndex {
         }
     }
 
+    pub fn dimension(&self) -> usize {
+        self.dimension
+    }
+
     fn validate_dimension(&self, vector: &[f32]) -> Result<(), VectorIndexError> {
         if vector.len() != self.dimension {
             return Err(VectorIndexError::DimensionMismatch {
@@ -93,7 +131,12 @@ impl VectorIndex for FlatIndex {
     }
 
     fn remove(&mut self, id: &DocumentId) -> Option<Vec<f32>> {
-        if let Some((idx, _)) = self.vectors.iter().enumerate().find(|(_, (doc_id, _))| doc_id == id) {
+        if let Some((idx, _)) = self
+            .vectors
+            .iter()
+            .enumerate()
+            .find(|(_, (doc_id, _))| doc_id == id)
+        {
             let (_, vector) = self.vectors.swap_remove(idx);
             Some(vector)
         } else {
@@ -116,7 +159,11 @@ impl VectorIndex for FlatIndex {
             })
             .collect();
 
-        scored.par_sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        scored.par_sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         scored.truncate(top_k.min(scored.len()));
         Ok(scored)
     }
@@ -158,8 +205,12 @@ mod tests {
     #[test]
     fn inserts_and_searches() {
         let mut index = FlatIndex::new(DistanceMetric::L2, 3);
-        index.insert(DocumentId::U64(1), vec![0.0, 1.0, 2.0]).unwrap();
-        index.insert(DocumentId::U64(2), vec![0.0, 1.5, 2.0]).unwrap();
+        index
+            .insert(DocumentId::U64(1), vec![0.0, 1.0, 2.0])
+            .unwrap();
+        index
+            .insert(DocumentId::U64(2), vec![0.0, 1.5, 2.0])
+            .unwrap();
 
         let results = index.search(&[0.0, 1.0, 2.1], 1).unwrap();
         assert_eq!(results.len(), 1);
@@ -178,5 +229,19 @@ mod tests {
         let index = FlatIndex::new(DistanceMetric::Dot, 2);
         let err = index.search(&[0.0, 1.0], 0).unwrap_err();
         matches!(err, VectorIndexError::InvalidTopK { .. });
+    }
+
+    #[test]
+    fn validates_document_ids() {
+        assert!(DocumentId::U64(1).validate().is_ok());
+        assert!(DocumentId::Str("abc".into()).validate().is_ok());
+        assert_eq!(
+            DocumentId::U64(0).validate().unwrap_err(),
+            DocumentIdError::NonPositiveU64(0)
+        );
+        assert_eq!(
+            DocumentId::from_str("").unwrap_err(),
+            DocumentIdError::EmptyString
+        );
     }
 }
