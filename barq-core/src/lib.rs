@@ -810,6 +810,7 @@ impl Collection {
         Ok(results)
     }
 
+
     fn search_over_candidates(
         &self,
         vector: &[f32],

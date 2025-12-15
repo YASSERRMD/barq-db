@@ -1,0 +1,29 @@
+[package]
+name = "barq-admin"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = { version = "0.7", features = ["macros"] }
+axum-server = { version = "0.8", features = ["tls-rustls"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync"] }
+tracing = "0.1"
+thiserror = { workspace = true }
+reqwest = { version = "0.11", features = ["json"] }
+clap = { version = "4.4", features = ["derive", "env"] }
+
+barq-core = { path = "../barq-core" }
+barq-storage = { path = "../barq-storage" }
+barq-cluster = { path = "../barq-cluster" }
+barq-index = { path = "../barq-index" }
+
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "logging"] }
+rustls-pemfile = "2"
+csv = "1.3" # For potential export/import tools
+anyhow = "1"
+
+[[bin]]
+name = "barq-admin"
+path = "src/bin/barq-admin.rs"

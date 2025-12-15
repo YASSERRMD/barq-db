@@ -11,20 +11,30 @@ axum-server = { version = "0.8", features = ["tls-rustls"] }
 barq-core = { path = "../barq-core" }
 barq-index = { path = "../barq-index" }
 barq-bm25 = { path = "../barq-bm25" }
+barq-admin = { path = "../barq-admin" }
 barq-storage = { path = "../barq-storage" }
 barq-cluster = { path = "../barq-cluster" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing = "0.1"
 metrics = "0.22"
+anyhow = "1"
 metrics-exporter-prometheus = "0.13"
 rustls = { version = "0.23", default-features = false, features = ["std", "ring", "logging"] }
 rustls-pemfile = "2"
+clap = { version = "4", features = ["derive", "env"] }
+tracing-appender = "0.2"
+tracing-opentelemetry = "0.22"
+opentelemetry = { version = "0.21", features = ["metrics"] }
+opentelemetry_sdk = { version = "0.21", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.14", features = ["metrics"] }
+tower-http = { version = "0.5", features = ["trace"] }
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+axum-test = "14.0"

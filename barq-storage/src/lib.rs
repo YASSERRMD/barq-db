@@ -122,7 +122,12 @@ impl Storage {
         storage.ensure_tenant_root(&storage.default_tenant)?;
         storage.load_collections()?;
         storage.recalculate_usage();
+        storage.recalculate_usage();
         Ok(storage)
+    }
+
+    pub fn catalog_mut(&mut self) -> &mut Catalog {
+        &mut self.catalog
     }
 
     pub fn open_with_snapshot(
