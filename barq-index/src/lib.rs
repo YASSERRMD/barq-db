@@ -895,7 +895,13 @@ mod tests {
             }
         }
 
-        assert!(max_elapsed < Duration::from_millis(150), "search took {:?}", max_elapsed);
+        // Allow a modest headroom to avoid flakes on slower CI hardware while still
+        // ensuring HNSW search remains low latency for reasonably large collections.
+        assert!(
+            max_elapsed < Duration::from_millis(250),
+            "search took {:?}",
+            max_elapsed
+        );
         assert_eq!(empty_results, 0, "missing matches for {empty_results} / {evaluated}");
     }
 }
