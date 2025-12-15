@@ -20,6 +20,12 @@ pub enum CatalogError {
     #[error("collection {0} not found")]
     CollectionMissing(String),
 
+    #[error("tenant {0} does not exist")]
+    TenantMissing(TenantId),
+
+    #[error("tenant mismatch: schema belongs to {schema} but tenant {tenant} was requested")]
+    TenantMismatch { tenant: TenantId, schema: TenantId },
+
     #[error("invalid schema: {0}")]
     InvalidSchema(String),
 
@@ -34,6 +40,37 @@ pub enum CatalogError {
 
     #[error("invalid filter: {0}")]
     Filter(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct TenantId(String);
+
+impl TenantId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for TenantId {
+    fn default() -> Self {
+        Self("default".to_string())
+    }
+}
+
+impl fmt::Display for TenantId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<&str> for TenantId {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -63,6 +100,8 @@ pub struct CollectionSchema {
     pub fields: Vec<FieldSchema>,
     #[serde(default)]
     pub bm25_config: Option<Bm25Config>,
+    #[serde(default)]
+    pub tenant_id: TenantId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1026,7 +1065,7 @@ impl Collection {
 
 #[derive(Debug, Default)]
 pub struct Catalog {
-    collections: HashMap<String, Collection>,
+    collections: HashMap<TenantId, HashMap<String, Collection>>,
 }
 
 impl Catalog {
@@ -1034,32 +1073,63 @@ impl Catalog {
         Self::default()
     }
 
-    pub fn create_collection(&mut self, schema: CollectionSchema) -> Result<(), CatalogError> {
-        if self.collections.contains_key(&schema.name) {
+    pub fn create_collection(
+        &mut self,
+        tenant: TenantId,
+        schema: CollectionSchema,
+    ) -> Result<(), CatalogError> {
+        if schema.tenant_id != tenant {
+            return Err(CatalogError::TenantMismatch {
+                tenant,
+                schema: schema.tenant_id,
+            });
+        }
+        let collections = self
+            .collections
+            .entry(schema.tenant_id.clone())
+            .or_default();
+        if collections.contains_key(&schema.name) {
             return Err(CatalogError::CollectionExists(schema.name));
         }
         let collection = Collection::new(schema.clone())?;
-        self.collections.insert(schema.name, collection);
+        collections.insert(schema.name, collection);
         Ok(())
     }
 
-    pub fn drop_collection(&mut self, name: &str) -> Result<(), CatalogError> {
+    pub fn drop_collection(&mut self, tenant: &TenantId, name: &str) -> Result<(), CatalogError> {
         self.collections
+            .get_mut(tenant)
+            .ok_or_else(|| CatalogError::TenantMissing(tenant.clone()))?
             .remove(name)
             .map(|_| ())
             .ok_or_else(|| CatalogError::CollectionMissing(name.to_string()))
     }
 
-    pub fn collection(&self, name: &str) -> Result<&Collection, CatalogError> {
+    pub fn collection(&self, tenant: &TenantId, name: &str) -> Result<&Collection, CatalogError> {
         self.collections
+            .get(tenant)
+            .ok_or_else(|| CatalogError::TenantMissing(tenant.clone()))?
             .get(name)
             .ok_or_else(|| CatalogError::CollectionMissing(name.to_string()))
     }
 
-    pub fn collection_mut(&mut self, name: &str) -> Result<&mut Collection, CatalogError> {
+    pub fn collection_mut(
+        &mut self,
+        tenant: &TenantId,
+        name: &str,
+    ) -> Result<&mut Collection, CatalogError> {
         self.collections
+            .get_mut(tenant)
+            .ok_or_else(|| CatalogError::TenantMissing(tenant.clone()))?
             .get_mut(name)
             .ok_or_else(|| CatalogError::CollectionMissing(name.to_string()))
+    }
+
+    pub fn collection_names(&self, tenant: &TenantId) -> Vec<String> {
+        self.collections
+            .get(tenant)
+            .map(|c| c.keys().cloned().collect())
+            .unwrap_or_default()
     }
 }
 
@@ -1092,6 +1162,10 @@ mod tests {
     use super::*;
     use barq_index::HnswParams;
 
+    fn default_tenant() -> TenantId {
+        TenantId::default()
+    }
+
     fn sample_schema() -> CollectionSchema {
         CollectionSchema {
             name: "products".to_string(),
@@ -1105,6 +1179,7 @@ mod tests {
                 required: true,
             }],
             bm25_config: None,
+            tenant_id: TenantId::default(),
         }
     }
 
@@ -1128,6 +1203,7 @@ mod tests {
                 },
             ],
             bm25_config: None,
+            tenant_id: TenantId::default(),
         }
     }
 
@@ -1156,23 +1232,30 @@ mod tests {
                 },
             ],
             bm25_config: None,
+            tenant_id: TenantId::default(),
         }
     }
 
     #[test]
     fn catalog_lifecycle() {
         let mut catalog = Catalog::new();
-        catalog.create_collection(sample_schema()).unwrap();
-        assert!(catalog.collection("products").is_ok());
-        catalog.drop_collection("products").unwrap();
-        assert!(catalog.collection("products").is_err());
+        let tenant = default_tenant();
+        catalog
+            .create_collection(tenant.clone(), sample_schema())
+            .unwrap();
+        assert!(catalog.collection(&tenant, "products").is_ok());
+        catalog.drop_collection(&tenant, "products").unwrap();
+        assert!(catalog.collection(&tenant, "products").is_err());
     }
 
     #[test]
     fn insert_and_search_document() {
         let mut catalog = Catalog::new();
-        catalog.create_collection(sample_schema()).unwrap();
-        let collection = catalog.collection_mut("products").unwrap();
+        let tenant = default_tenant();
+        catalog
+            .create_collection(tenant.clone(), sample_schema())
+            .unwrap();
+        let collection = catalog.collection_mut(&tenant, "products").unwrap();
 
         collection
             .insert(Document {
@@ -1190,8 +1273,11 @@ mod tests {
     #[test]
     fn delete_document() {
         let mut catalog = Catalog::new();
-        catalog.create_collection(sample_schema()).unwrap();
-        let collection = catalog.collection_mut("products").unwrap();
+        let tenant = default_tenant();
+        catalog
+            .create_collection(tenant.clone(), sample_schema())
+            .unwrap();
+        let collection = catalog.collection_mut(&tenant, "products").unwrap();
 
         collection
             .insert(Document {
@@ -1208,8 +1294,11 @@ mod tests {
     #[test]
     fn text_search_scores() {
         let mut catalog = Catalog::new();
-        catalog.create_collection(text_schema()).unwrap();
-        let collection = catalog.collection_mut("articles").unwrap();
+        let tenant = default_tenant();
+        catalog
+            .create_collection(tenant.clone(), text_schema())
+            .unwrap();
+        let collection = catalog.collection_mut(&tenant, "articles").unwrap();
 
         let mut payload1 = HashMap::new();
         payload1.insert(
@@ -1246,8 +1335,11 @@ mod tests {
     #[test]
     fn hybrid_includes_both_scores() {
         let mut catalog = Catalog::new();
-        catalog.create_collection(text_schema()).unwrap();
-        let collection = catalog.collection_mut("articles").unwrap();
+        let tenant = default_tenant();
+        catalog
+            .create_collection(tenant.clone(), text_schema())
+            .unwrap();
+        let collection = catalog.collection_mut(&tenant, "articles").unwrap();
 
         let mut payload1 = HashMap::new();
         payload1.insert(
@@ -1287,8 +1379,11 @@ mod tests {
     #[test]
     fn rebuilds_index_with_new_type() {
         let mut catalog = Catalog::new();
-        catalog.create_collection(sample_schema()).unwrap();
-        let collection = catalog.collection_mut("products").unwrap();
+        let tenant = default_tenant();
+        catalog
+            .create_collection(tenant.clone(), sample_schema())
+            .unwrap();
+        let collection = catalog.collection_mut(&tenant, "products").unwrap();
 
         collection
             .insert(Document {
@@ -1315,8 +1410,11 @@ mod tests {
         let mut schema = text_schema();
         schema.bm25_config = Some(Bm25Config { k1: 1.7, b: 0.6 });
         let mut catalog = Catalog::new();
-        catalog.create_collection(schema.clone()).unwrap();
-        let collection = catalog.collection_mut("articles").unwrap();
+        let tenant = default_tenant();
+        catalog
+            .create_collection(tenant.clone(), schema.clone())
+            .unwrap();
+        let collection = catalog.collection_mut(&tenant, "articles").unwrap();
         assert_eq!(collection.schema.bm25_config, schema.bm25_config);
         let bm25 = collection.text_index.as_ref().unwrap();
         assert_eq!(bm25.config(), schema.bm25_config.unwrap());
@@ -1325,8 +1423,11 @@ mod tests {
     #[test]
     fn metadata_index_tracks_nested_fields() {
         let mut catalog = Catalog::new();
-        catalog.create_collection(json_schema()).unwrap();
-        let collection = catalog.collection_mut("products_meta").unwrap();
+        let tenant = default_tenant();
+        catalog
+            .create_collection(tenant.clone(), json_schema())
+            .unwrap();
+        let collection = catalog.collection_mut(&tenant, "products_meta").unwrap();
 
         let mut attrs = HashMap::new();
         attrs.insert("category".to_string(), PayloadValue::String("tech".into()));
@@ -1440,8 +1541,11 @@ mod tests {
         });
 
         let mut catalog = Catalog::new();
-        catalog.create_collection(schema).unwrap();
-        let collection = catalog.collection_mut("articles_with_meta").unwrap();
+        let tenant = default_tenant();
+        catalog.create_collection(tenant.clone(), schema).unwrap();
+        let collection = catalog
+            .collection_mut(&tenant, "articles_with_meta")
+            .unwrap();
 
         let mut payload1 = HashMap::new();
         payload1.insert(

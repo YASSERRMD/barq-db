@@ -1,4 +1,4 @@
-use barq_core::{Catalog, CatalogError, CollectionSchema, Document, Filter};
+use barq_core::{Catalog, CatalogError, CollectionSchema, Document, Filter, TenantId};
 use barq_index::{DocumentId, IndexType};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
@@ -32,28 +32,52 @@ pub struct WalEntry {
 pub struct Storage {
     root: PathBuf,
     catalog: Catalog,
+    default_tenant: TenantId,
 }
 
 impl Storage {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, StorageError> {
         let root = root.as_ref().to_path_buf();
-        fs::create_dir_all(root.join("collections"))?;
         let mut storage = Self {
             root,
             catalog: Catalog::new(),
+            default_tenant: TenantId::default(),
         };
+        storage.ensure_tenant_root(&storage.default_tenant)?;
         storage.load_collections()?;
         Ok(storage)
     }
 
     pub fn create_collection(&mut self, schema: CollectionSchema) -> Result<(), StorageError> {
-        self.catalog.create_collection(schema.clone())?;
-        self.persist_schema(&schema)
+        self.create_collection_for_tenant(self.default_tenant.clone(), schema)
+    }
+
+    pub fn create_collection_for_tenant(
+        &mut self,
+        tenant: impl Into<TenantId>,
+        mut schema: CollectionSchema,
+    ) -> Result<(), StorageError> {
+        let tenant = tenant.into();
+        if schema.tenant_id != tenant {
+            schema.tenant_id = tenant.clone();
+        }
+        self.ensure_tenant_root(&tenant)?;
+        self.catalog
+            .create_collection(tenant.clone(), schema.clone())?;
+        self.persist_schema(&tenant, &schema)
     }
 
     pub fn drop_collection(&mut self, name: &str) -> Result<(), StorageError> {
-        self.catalog.drop_collection(name)?;
-        let dir = self.collection_dir(name);
+        self.drop_collection_for_tenant(&self.default_tenant.clone(), name)
+    }
+
+    pub fn drop_collection_for_tenant(
+        &mut self,
+        tenant: &TenantId,
+        name: &str,
+    ) -> Result<(), StorageError> {
+        self.catalog.drop_collection(tenant, name)?;
+        let dir = self.collection_dir(tenant, name);
         if dir.exists() {
             fs::remove_dir_all(dir)?;
         }
@@ -66,8 +90,18 @@ impl Storage {
         document: Document,
         upsert: bool,
     ) -> Result<(), StorageError> {
+        self.insert_for_tenant(&self.default_tenant.clone(), collection, document, upsert)
+    }
+
+    pub fn insert_for_tenant(
+        &mut self,
+        tenant: &TenantId,
+        collection: &str,
+        document: Document,
+        upsert: bool,
+    ) -> Result<(), StorageError> {
         {
-            let coll = self.catalog.collection_mut(collection)?;
+            let coll = self.catalog.collection_mut(tenant, collection)?;
             if upsert {
                 coll.upsert(document.clone())?;
             } else {
@@ -75,6 +109,7 @@ impl Storage {
             }
         }
         self.append_wal(
+            tenant,
             collection,
             WalEntry {
                 op: WalOp::Insert(document),
@@ -83,12 +118,22 @@ impl Storage {
     }
 
     pub fn delete(&mut self, collection: &str, id: DocumentId) -> Result<bool, StorageError> {
+        self.delete_for_tenant(&self.default_tenant.clone(), collection, id)
+    }
+
+    pub fn delete_for_tenant(
+        &mut self,
+        tenant: &TenantId,
+        collection: &str,
+        id: DocumentId,
+    ) -> Result<bool, StorageError> {
         let removed = {
-            let coll = self.catalog.collection_mut(collection)?;
+            let coll = self.catalog.collection_mut(tenant, collection)?;
             coll.delete(&id)
         };
         if removed {
             self.append_wal(
+                tenant,
                 collection,
                 WalEntry {
                     op: WalOp::Delete(id),
@@ -105,7 +150,18 @@ impl Storage {
         top_k: usize,
         filter: Option<&Filter>,
     ) -> Result<Vec<barq_index::SearchResult>, StorageError> {
-        let coll = self.catalog.collection(collection)?;
+        self.search_for_tenant(&self.default_tenant, collection, query, top_k, filter)
+    }
+
+    pub fn search_for_tenant(
+        &self,
+        tenant: &TenantId,
+        collection: &str,
+        query: &[f32],
+        top_k: usize,
+        filter: Option<&Filter>,
+    ) -> Result<Vec<barq_index::SearchResult>, StorageError> {
+        let coll = self.catalog.collection(tenant, collection)?;
         Ok(coll.search_with_filter(query, top_k, filter)?)
     }
 
@@ -116,7 +172,18 @@ impl Storage {
         top_k: usize,
         filter: Option<&Filter>,
     ) -> Result<Vec<barq_index::SearchResult>, StorageError> {
-        let coll = self.catalog.collection(collection)?;
+        self.search_text_for_tenant(&self.default_tenant, collection, query, top_k, filter)
+    }
+
+    pub fn search_text_for_tenant(
+        &self,
+        tenant: &TenantId,
+        collection: &str,
+        query: &str,
+        top_k: usize,
+        filter: Option<&Filter>,
+    ) -> Result<Vec<barq_index::SearchResult>, StorageError> {
+        let coll = self.catalog.collection(tenant, collection)?;
         Ok(coll.search_text_with_filter(query, top_k, filter)?)
     }
 
@@ -129,7 +196,28 @@ impl Storage {
         weights: Option<barq_core::HybridWeights>,
         filter: Option<&Filter>,
     ) -> Result<Vec<barq_core::HybridSearchResult>, StorageError> {
-        let coll = self.catalog.collection(collection)?;
+        self.search_hybrid_for_tenant(
+            &self.default_tenant,
+            collection,
+            vector,
+            query,
+            top_k,
+            weights,
+            filter,
+        )
+    }
+
+    pub fn search_hybrid_for_tenant(
+        &self,
+        tenant: &TenantId,
+        collection: &str,
+        vector: &[f32],
+        query: &str,
+        top_k: usize,
+        weights: Option<barq_core::HybridWeights>,
+        filter: Option<&Filter>,
+    ) -> Result<Vec<barq_core::HybridSearchResult>, StorageError> {
+        let coll = self.catalog.collection(tenant, collection)?;
         Ok(coll.search_hybrid(vector, query, top_k, weights, filter)?)
     }
 
@@ -142,7 +230,28 @@ impl Storage {
         id: &barq_index::DocumentId,
         weights: Option<barq_core::HybridWeights>,
     ) -> Result<Option<barq_core::HybridSearchResult>, StorageError> {
-        let coll = self.catalog.collection(collection)?;
+        self.explain_hybrid_for_tenant(
+            &self.default_tenant,
+            collection,
+            vector,
+            query,
+            top_k,
+            id,
+            weights,
+        )
+    }
+
+    pub fn explain_hybrid_for_tenant(
+        &self,
+        tenant: &TenantId,
+        collection: &str,
+        vector: &[f32],
+        query: &str,
+        top_k: usize,
+        id: &barq_index::DocumentId,
+        weights: Option<barq_core::HybridWeights>,
+    ) -> Result<Option<barq_core::HybridSearchResult>, StorageError> {
+        let coll = self.catalog.collection(tenant, collection)?;
         Ok(coll.explain_hybrid(vector, query, top_k, id, weights)?)
     }
 
@@ -151,22 +260,49 @@ impl Storage {
         collection: &str,
         index: Option<IndexType>,
     ) -> Result<(), StorageError> {
+        self.rebuild_index_for_tenant(&self.default_tenant.clone(), collection, index)
+    }
+
+    pub fn rebuild_index_for_tenant(
+        &mut self,
+        tenant: &TenantId,
+        collection: &str,
+        index: Option<IndexType>,
+    ) -> Result<(), StorageError> {
         {
-            let coll = self.catalog.collection_mut(collection)?;
+            let coll = self.catalog.collection_mut(tenant, collection)?;
             coll.rebuild_index(index)?;
             let schema = coll.schema().clone();
-            self.persist_schema(&schema)?;
+            self.persist_schema(tenant, &schema)?;
         }
         Ok(())
     }
 
     pub fn collection_schema(&self, name: &str) -> Result<&CollectionSchema, StorageError> {
-        Ok(self.catalog.collection(name)?.schema())
+        self.collection_schema_for_tenant(&self.default_tenant, name)
+    }
+
+    pub fn collection_schema_for_tenant(
+        &self,
+        tenant: &TenantId,
+        name: &str,
+    ) -> Result<&CollectionSchema, StorageError> {
+        Ok(self.catalog.collection(tenant, name)?.schema())
     }
 
     pub fn collection_names(&self) -> Result<Vec<String>, StorageError> {
+        self.collection_names_for_tenant(&self.default_tenant)
+    }
+
+    pub fn collection_names_for_tenant(
+        &self,
+        tenant: &TenantId,
+    ) -> Result<Vec<String>, StorageError> {
         let mut names = Vec::new();
-        let collections_root = self.root.join("collections");
+        let collections_root = self.collections_root(tenant);
+        if !collections_root.exists() {
+            return Ok(names);
+        }
         for entry in fs::read_dir(&collections_root)? {
             let entry = entry?;
             if entry.file_type()?.is_dir() {
@@ -177,27 +313,44 @@ impl Storage {
     }
 
     fn load_collections(&mut self) -> Result<(), StorageError> {
-        let collections_root = self.root.join("collections");
-        for entry in fs::read_dir(&collections_root)? {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
+        let tenants_root = self.tenants_root();
+        if !tenants_root.exists() {
+            return Ok(());
+        }
+        for tenant_entry in fs::read_dir(&tenants_root)? {
+            let tenant_entry = tenant_entry?;
+            if !tenant_entry.file_type()?.is_dir() {
                 continue;
             }
-            let name = entry.file_name().to_string_lossy().to_string();
-            let schema_path = entry.path().join("schema.json");
-            if !schema_path.exists() {
+            let tenant = TenantId::new(tenant_entry.file_name().to_string_lossy());
+            let collections_root = tenant_entry.path().join("collections");
+            if !collections_root.exists() {
                 continue;
             }
-            let schema_file = File::open(&schema_path)?;
-            let schema: CollectionSchema = serde_json::from_reader(schema_file)?;
-            self.catalog.create_collection(schema)?;
-            self.replay_wal(&name)?;
+            for entry in fs::read_dir(&collections_root)? {
+                let entry = entry?;
+                if !entry.file_type()?.is_dir() {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().to_string();
+                let schema_path = entry.path().join("schema.json");
+                if !schema_path.exists() {
+                    continue;
+                }
+                let schema_file = File::open(&schema_path)?;
+                let mut schema: CollectionSchema = serde_json::from_reader(schema_file)?;
+                if schema.tenant_id != tenant {
+                    schema.tenant_id = tenant.clone();
+                }
+                self.catalog.create_collection(tenant.clone(), schema)?;
+                self.replay_wal(&tenant, &name)?;
+            }
         }
         Ok(())
     }
 
-    fn replay_wal(&mut self, collection: &str) -> Result<(), StorageError> {
-        let wal_path = self.wal_path(collection);
+    fn replay_wal(&mut self, tenant: &TenantId, collection: &str) -> Result<(), StorageError> {
+        let wal_path = self.wal_path(tenant, collection);
         if !wal_path.exists() {
             return Ok(());
         }
@@ -211,12 +364,12 @@ impl Storage {
             let entry: WalEntry = serde_json::from_str(&line)?;
             match entry.op {
                 WalOp::Insert(doc) => {
-                    let coll = self.catalog.collection_mut(collection)?;
+                    let coll = self.catalog.collection_mut(tenant, collection)?;
                     // Use upsert semantics during replay to guarantee last write wins.
                     coll.upsert(doc)?;
                 }
                 WalOp::Delete(id) => {
-                    let coll = self.catalog.collection_mut(collection)?;
+                    let coll = self.catalog.collection_mut(tenant, collection)?;
                     coll.delete(&id);
                 }
             }
@@ -224,8 +377,13 @@ impl Storage {
         Ok(())
     }
 
-    fn append_wal(&self, collection: &str, entry: WalEntry) -> Result<(), StorageError> {
-        let wal_path = self.wal_path(collection);
+    fn append_wal(
+        &self,
+        tenant: &TenantId,
+        collection: &str,
+        entry: WalEntry,
+    ) -> Result<(), StorageError> {
+        let wal_path = self.wal_path(tenant, collection);
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -236,8 +394,12 @@ impl Storage {
         Ok(())
     }
 
-    fn persist_schema(&self, schema: &CollectionSchema) -> Result<(), StorageError> {
-        let dir = self.collection_dir(&schema.name);
+    fn persist_schema(
+        &self,
+        tenant: &TenantId,
+        schema: &CollectionSchema,
+    ) -> Result<(), StorageError> {
+        let dir = self.collection_dir(tenant, &schema.name);
         fs::create_dir_all(&dir)?;
         let schema_path = dir.join("schema.json");
         let mut file = File::create(schema_path)?;
@@ -246,12 +408,29 @@ impl Storage {
         Ok(())
     }
 
-    fn collection_dir(&self, name: &str) -> PathBuf {
-        self.root.join("collections").join(name)
+    fn collection_dir(&self, tenant: &TenantId, name: &str) -> PathBuf {
+        self.collections_root(tenant).join(name)
     }
 
-    fn wal_path(&self, name: &str) -> PathBuf {
-        self.collection_dir(name).join("wal.jsonl")
+    fn wal_path(&self, tenant: &TenantId, name: &str) -> PathBuf {
+        self.collection_dir(tenant, name).join("wal.jsonl")
+    }
+
+    fn collections_root(&self, tenant: &TenantId) -> PathBuf {
+        self.tenant_root(tenant).join("collections")
+    }
+
+    fn tenant_root(&self, tenant: &TenantId) -> PathBuf {
+        self.tenants_root().join(tenant.as_str())
+    }
+
+    fn tenants_root(&self) -> PathBuf {
+        self.root.join("tenants")
+    }
+
+    fn ensure_tenant_root(&self, tenant: &TenantId) -> Result<(), StorageError> {
+        fs::create_dir_all(self.collections_root(tenant))?;
+        Ok(())
     }
 }
 
@@ -274,6 +453,7 @@ mod tests {
                 required: true,
             }],
             bm25_config: None,
+            tenant_id: TenantId::default(),
         }
     }
 

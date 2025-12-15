@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::{
     extract::{Path as AxumPath, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
@@ -11,7 +11,7 @@ use axum::{
 use barq_bm25::Bm25Config;
 use barq_core::{
     CollectionSchema, Document, FieldSchema, FieldType, Filter, HybridSearchResult, HybridWeights,
-    PayloadValue,
+    PayloadValue, TenantId,
 };
 use barq_index::{DistanceMetric, DocumentId, DocumentIdError, IndexType};
 use barq_storage::Storage;
@@ -23,6 +23,14 @@ use tracing_subscriber::EnvFilter;
 #[derive(Clone)]
 struct AppState {
     storage: Arc<Mutex<Storage>>,
+}
+
+fn tenant_from_headers(headers: &HeaderMap) -> TenantId {
+    headers
+        .get("x-tenant-id")
+        .and_then(|value| value.to_str().ok())
+        .map(TenantId::new)
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Error)]
@@ -216,14 +224,21 @@ async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "status": "ok" }))
 }
 
-async fn info(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+async fn info(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let tenant = tenant_from_headers(&headers);
     let storage = state.storage.lock().await;
-    let count = storage.collection_names()?.len();
-    Ok(Json(serde_json::json!({ "collections": count })))
+    let count = storage.collection_names_for_tenant(&tenant)?.len();
+    Ok(Json(
+        serde_json::json!({ "collections": count, "tenant": tenant.as_str() }),
+    ))
 }
 
 async fn create_collection(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<CreateCollectionRequest>,
 ) -> Result<StatusCode, ApiError> {
     if payload.dimension == 0 {
@@ -249,31 +264,37 @@ async fn create_collection(
         });
     }
 
+    let tenant = tenant_from_headers(&headers);
     let schema = CollectionSchema {
         name: payload.name.clone(),
         fields,
         bm25_config: payload.bm25_config,
+        tenant_id: tenant.clone(),
     };
 
     let mut storage = state.storage.lock().await;
-    storage.create_collection(schema)?;
+    storage.create_collection_for_tenant(tenant, schema)?;
     Ok(StatusCode::CREATED)
 }
 
 async fn drop_collection(
     AxumPath(name): AxumPath<String>,
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
+    let tenant = tenant_from_headers(&headers);
     let mut storage = state.storage.lock().await;
-    storage.drop_collection(&name)?;
+    storage.drop_collection_for_tenant(&tenant, &name)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn insert_document(
     AxumPath(name): AxumPath<String>,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<InsertDocumentRequest>,
 ) -> Result<StatusCode, ApiError> {
+    let tenant = tenant_from_headers(&headers);
     let document_id: DocumentId = payload.id.try_into()?;
     let document = Document {
         id: document_id,
@@ -281,17 +302,19 @@ async fn insert_document(
         payload: payload.payload,
     };
     let mut storage = state.storage.lock().await;
-    storage.insert(&name, document, payload.upsert)?;
+    storage.insert_for_tenant(&tenant, &name, document, payload.upsert)?;
     Ok(StatusCode::CREATED)
 }
 
 async fn delete_document(
     AxumPath((name, id)): AxumPath<(String, String)>,
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
     let document_id: DocumentId = id.parse()?;
     let mut storage = state.storage.lock().await;
-    let existed = storage.delete(&name, document_id)?;
+    let tenant = tenant_from_headers(&headers);
+    let existed = storage.delete_for_tenant(&tenant, &name, document_id)?;
     Ok(if existed {
         StatusCode::NO_CONTENT
     } else {
@@ -302,18 +325,20 @@ async fn delete_document(
 async fn rebuild_collection_index(
     AxumPath(name): AxumPath<String>,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<RebuildIndexRequest>,
 ) -> Result<StatusCode, ApiError> {
+    let tenant = tenant_from_headers(&headers);
     {
         let storage = state.storage.lock().await;
-        storage.collection_schema(&name)?;
+        storage.collection_schema_for_tenant(&tenant, &name)?;
     }
 
     let storage = state.storage.clone();
     let requested_index = payload.index.clone();
     tokio::spawn(async move {
         let mut storage = storage.lock().await;
-        if let Err(err) = storage.rebuild_index(&name, requested_index) {
+        if let Err(err) = storage.rebuild_index_for_tenant(&tenant, &name, requested_index) {
             eprintln!("failed to rebuild index for {}: {}", name, err);
         }
     });
@@ -324,13 +349,16 @@ async fn rebuild_collection_index(
 async fn search_collection(
     AxumPath(name): AxumPath<String>,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<SearchRequest>,
 ) -> Result<Json<SearchResponse>, ApiError> {
+    let tenant = tenant_from_headers(&headers);
     if payload.top_k == 0 {
         return Err(ApiError::BadRequest("top_k must be positive".into()));
     }
     let storage = state.storage.lock().await;
-    let results = storage.search(
+    let results = storage.search_for_tenant(
+        &tenant,
         &name,
         &payload.vector,
         payload.top_k,
@@ -342,13 +370,16 @@ async fn search_collection(
 async fn search_text_collection(
     AxumPath(name): AxumPath<String>,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<TextSearchRequest>,
 ) -> Result<Json<TextSearchResponse>, ApiError> {
+    let tenant = tenant_from_headers(&headers);
     if payload.top_k == 0 {
         return Err(ApiError::BadRequest("top_k must be positive".into()));
     }
     let storage = state.storage.lock().await;
-    let results = storage.search_text(
+    let results = storage.search_text_for_tenant(
+        &tenant,
         &name,
         &payload.query,
         payload.top_k,
@@ -360,13 +391,16 @@ async fn search_text_collection(
 async fn search_hybrid_collection(
     AxumPath(name): AxumPath<String>,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<HybridSearchRequest>,
 ) -> Result<Json<HybridSearchResponse>, ApiError> {
+    let tenant = tenant_from_headers(&headers);
     if payload.top_k == 0 {
         return Err(ApiError::BadRequest("top_k must be positive".into()));
     }
     let storage = state.storage.lock().await;
-    let results = storage.search_hybrid(
+    let results = storage.search_hybrid_for_tenant(
+        &tenant,
         &name,
         &payload.vector,
         &payload.query,
@@ -380,14 +414,17 @@ async fn search_hybrid_collection(
 async fn explain_hybrid_collection(
     AxumPath(name): AxumPath<String>,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<ExplainRequest>,
 ) -> Result<Json<ExplainResponse>, ApiError> {
+    let tenant = tenant_from_headers(&headers);
     if payload.top_k == 0 {
         return Err(ApiError::BadRequest("top_k must be positive".into()));
     }
     let id: DocumentId = payload.id.try_into()?;
     let storage = state.storage.lock().await;
-    let result = storage.explain_hybrid(
+    let result = storage.explain_hybrid_for_tenant(
+        &tenant,
         &name,
         &payload.vector,
         &payload.query,
