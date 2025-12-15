@@ -73,6 +73,13 @@ impl ClusterConfig {
         serde_json::from_str(&content).map_err(ClusterError::from)
     }
 
+    /// Persist the configuration to a file, allowing static membership via config files.
+    pub fn to_path(&self, path: impl AsRef<Path>) -> Result<(), ClusterError> {
+        let content = serde_json::to_string_pretty(self)?;
+        fs::write(path, content)?;
+        Ok(())
+    }
+
     pub fn from_env_or_default() -> Result<Self, ClusterError> {
         match std::env::var("BARQ_CLUSTER_CONFIG") {
             Ok(path) => Self::from_path(path),
@@ -86,6 +93,13 @@ pub struct ShardPlacement {
     pub shard: ShardId,
     pub primary: NodeId,
     pub replicas: Vec<NodeId>,
+}
+
+/// Representation of a shard belonging to a logical collection/tenant.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Shard {
+    pub id: ShardId,
+    pub collection: String,
 }
 
 #[derive(Clone, Debug)]
@@ -108,6 +122,9 @@ pub enum ClusterError {
 
     #[error("replication factor must be at least 1")]
     InvalidReplication,
+
+    #[error("shard {0:?} is not known in the cluster")]
+    UnknownShard(ShardId),
 
     #[error("shard {shard:?} is not hosted on node {node:?}; target node: {target:?}")]
     NotLocal {
@@ -158,6 +175,13 @@ impl ClusterRouter {
         ShardId((hasher.finish() % self.placements.len() as u64) as u32)
     }
 
+    /// Determine a shard using a tenant/document composite key, ensuring multi-tenant
+    /// collections always shard consistently for the same tenant.
+    pub fn shard_for_tenant_document(&self, tenant: &str, document_id: &str) -> ShardId {
+        let composite = format!("{}:{}", tenant, document_id);
+        self.shard_for_key(&composite)
+    }
+
     pub fn route(&self, key: &str, read_preference: Option<ReadPreference>) -> ShardRouting {
         let shard = self.shard_for_key(key);
         let placement = self
@@ -190,6 +214,14 @@ impl ClusterRouter {
             target,
             role,
         }
+    }
+
+    /// Return the placement for a shard id, validating existence.
+    pub fn placement(&self, shard: ShardId) -> Result<ShardPlacement, ClusterError> {
+        self.placements
+            .get(&shard)
+            .cloned()
+            .ok_or(ClusterError::UnknownShard(shard))
     }
 
     pub fn ensure_primary(&self, key: &str) -> Result<(), ClusterError> {
@@ -236,6 +268,153 @@ pub struct ShardRouting {
 pub enum ReplicaRole {
     Primary,
     Follower,
+}
+
+/// In-memory replication log entry used for log-shipping style replication.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationEntry {
+    pub shard: ShardId,
+    pub index: u64,
+    pub term: u64,
+    pub payload: Vec<u8>,
+}
+
+/// Replication log state for a single shard on a node.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationLog {
+    entries: Vec<ReplicationEntry>,
+    committed: u64,
+}
+
+impl ReplicationLog {
+    pub fn append(&mut self, entry: ReplicationEntry) {
+        self.entries.push(entry);
+    }
+
+    pub fn commit_up_to(&mut self, index: u64) {
+        self.committed = self.committed.max(index);
+    }
+
+    pub fn committed_index(&self) -> u64 {
+        self.committed
+    }
+
+    pub fn entries(&self) -> &[ReplicationEntry] {
+        &self.entries
+    }
+}
+
+/// High level replication helper that ships log entries from primaries to followers.
+#[derive(Clone, Debug, Default)]
+pub struct ReplicationManager {
+    logs: HashMap<NodeId, HashMap<ShardId, ReplicationLog>>,
+}
+
+impl ReplicationManager {
+    pub fn new(nodes: &[NodeId], shard_count: u32) -> Self {
+        let mut logs = HashMap::new();
+        for node in nodes {
+            let mut shard_logs = HashMap::new();
+            for shard in 0..shard_count {
+                shard_logs.insert(ShardId(shard), ReplicationLog::default());
+            }
+            logs.insert(node.clone(), shard_logs);
+        }
+        Self { logs }
+    }
+
+    /// Ship a payload to the primary and all replicas for the shard placement.
+    pub fn replicate(
+        &mut self,
+        placement: &ShardPlacement,
+        payload: Vec<u8>,
+        term: u64,
+    ) -> ReplicationResult {
+        let mut acked = Vec::new();
+        let mut index = 0;
+        let mut ship =
+            |node: &NodeId,
+             role: ReplicaRole,
+             logs: &mut HashMap<NodeId, HashMap<ShardId, ReplicationLog>>| {
+                if let Some(shard_logs) = logs.get_mut(node) {
+                    if let Some(log) = shard_logs.get_mut(&placement.shard) {
+                        index = (log.entries.len() as u64) + 1;
+                        log.append(ReplicationEntry {
+                            shard: placement.shard,
+                            index,
+                            term,
+                            payload: payload.clone(),
+                        });
+                        log.commit_up_to(index);
+                        acked.push((node.clone(), role));
+                    }
+                }
+            };
+
+        ship(&placement.primary, ReplicaRole::Primary, &mut self.logs);
+        for follower in &placement.replicas {
+            ship(follower, ReplicaRole::Follower, &mut self.logs);
+        }
+
+        ReplicationResult { index, acked }
+    }
+
+    pub fn log_for(&self, node: &NodeId, shard: ShardId) -> Option<&ReplicationLog> {
+        self.logs.get(node).and_then(|shards| shards.get(&shard))
+    }
+}
+
+/// Result describing how replication was applied across nodes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplicationResult {
+    pub index: u64,
+    pub acked: Vec<(NodeId, ReplicaRole)>,
+}
+
+/// Administrative helper for re-sharding and membership changes.
+#[derive(Clone, Debug)]
+pub struct ClusterAdmin {
+    pub config: ClusterConfig,
+}
+
+impl ClusterAdmin {
+    pub fn new(config: ClusterConfig) -> Self {
+        Self { config }
+    }
+
+    pub fn add_node(&mut self, node: NodeConfig) {
+        self.config.nodes.push(node);
+    }
+
+    pub fn remove_node(&mut self, node_id: &NodeId) {
+        self.config.nodes.retain(|n| &n.id != node_id);
+    }
+
+    /// Move a shard to a new primary and replicas, returning an updated placement map.
+    pub fn move_shard(
+        &self,
+        shard: ShardId,
+        new_primary: NodeId,
+        replicas: Vec<NodeId>,
+    ) -> Result<HashMap<ShardId, ShardPlacement>, ClusterError> {
+        let mut router = ClusterRouter::from_config(self.config.clone())?;
+        let mut placements = router.placements.clone();
+        placements.insert(
+            shard,
+            ShardPlacement {
+                shard,
+                primary: new_primary,
+                replicas,
+            },
+        );
+        router.placements = placements.clone();
+        Ok(placements)
+    }
+
+    /// Recompute placements after membership changes, returning a fresh router.
+    pub fn rebalance(&self) -> Result<ClusterRouter, ClusterError> {
+        ClusterRouter::from_config(self.config.clone())
+    }
 }
 
 #[cfg(test)]
@@ -287,6 +466,17 @@ mod tests {
     }
 
     #[test]
+    fn shards_by_tenant_and_document() {
+        let router = ClusterRouter::from_config(test_config()).unwrap();
+        let shard_a = router.shard_for_tenant_document("tenant-a", "doc-1");
+        let shard_b = router.shard_for_tenant_document("tenant-a", "doc-1");
+        assert_eq!(shard_a, shard_b);
+
+        let shard_c = router.shard_for_tenant_document("tenant-b", "doc-1");
+        assert_ne!(shard_a, shard_c);
+    }
+
+    #[test]
     fn rejects_remote_primary() {
         let router = ClusterRouter::from_config(test_config()).unwrap();
         let key = "key-on-other";
@@ -296,5 +486,62 @@ mod tests {
         } else {
             assert!(router.ensure_primary(key).is_ok());
         }
+    }
+
+    #[test]
+    fn replicates_entries_to_followers() {
+        let config = test_config();
+        let router = ClusterRouter::from_config(config.clone()).unwrap();
+        let placement = router.placement(ShardId(0)).unwrap();
+        let mut manager = ReplicationManager::new(
+            &config
+                .nodes
+                .iter()
+                .map(|n| n.id.clone())
+                .collect::<Vec<_>>(),
+            config.shard_count,
+        );
+
+        let result = manager.replicate(&placement, b"payload".to_vec(), 1);
+        assert_eq!(result.index, 1);
+        assert_eq!(result.acked.len(), 2);
+
+        let primary_log = manager
+            .log_for(&placement.primary, placement.shard)
+            .unwrap();
+        assert_eq!(primary_log.committed_index(), 1);
+        assert_eq!(primary_log.entries().len(), 1);
+
+        let follower = placement.replicas.first().unwrap();
+        let follower_log = manager.log_for(follower, placement.shard).unwrap();
+        assert_eq!(follower_log.entries().len(), 1);
+        assert_eq!(follower_log.entries()[0].payload, b"payload".to_vec());
+    }
+
+    #[test]
+    fn config_round_trip_to_disk() {
+        let cfg = test_config();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cluster.json");
+        cfg.to_path(&path).unwrap();
+        let loaded = ClusterConfig::from_path(&path).unwrap();
+        assert_eq!(loaded.nodes.len(), cfg.nodes.len());
+        assert_eq!(loaded.shard_count, cfg.shard_count);
+    }
+
+    #[test]
+    fn admin_rebalances_after_membership_change() {
+        let mut admin = ClusterAdmin::new(test_config());
+        admin.add_node(NodeConfig {
+            id: NodeId::new("node-3"),
+            address: "n3".into(),
+        });
+        let router = admin.rebalance().unwrap();
+        assert_eq!(router.placements.len(), 4);
+        // With four nodes, at least one shard should place node-3 as a primary or replica.
+        let has_new_node = router.placements.values().any(|placement| {
+            placement.primary.0 == "node-3" || placement.replicas.iter().any(|n| n.0 == "node-3")
+        });
+        assert!(has_new_node);
     }
 }
