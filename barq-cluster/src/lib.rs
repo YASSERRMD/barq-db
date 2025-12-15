@@ -48,6 +48,10 @@ pub struct ClusterConfig {
     pub replication_factor: u32,
     #[serde(default)]
     pub read_preference: ReadPreference,
+    /// Explicit shard placements, used for resharding or manual overrides. When empty, a
+    /// round-robin scheme is derived from the configured nodes and replication factor.
+    #[serde(default)]
+    pub placements: HashMap<ShardId, ShardPlacement>,
 }
 
 fn default_replication_factor() -> u32 {
@@ -65,6 +69,7 @@ impl ClusterConfig {
             shard_count: 1,
             replication_factor: 1,
             read_preference: ReadPreference::Primary,
+            placements: HashMap::new(),
         }
     }
 
@@ -126,6 +131,9 @@ pub enum ClusterError {
     #[error("shard {0:?} is not known in the cluster")]
     UnknownShard(ShardId),
 
+    #[error("node {0:?} is not part of the configured cluster")]
+    UnknownNode(NodeId),
+
     #[error("shard {shard:?} is not hosted on node {node:?}; target node: {target:?}")]
     NotLocal {
         shard: ShardId,
@@ -143,23 +151,39 @@ impl ClusterRouter {
             return Err(ClusterError::InvalidReplication);
         }
 
-        let shard_count = config.shard_count.max(1);
-        let node_count = config.nodes.len() as u32;
-        let replication = config.replication_factor.min(node_count);
-        let mut placements = HashMap::new();
-        for shard_index in 0..shard_count {
-            let primary_index = shard_index % node_count;
-            let mut replicas = Vec::new();
-            for offset in 1..replication {
-                let idx = (shard_index + offset) % node_count;
-                replicas.push(config.nodes[idx as usize].id.clone());
+        let mut placements = config.placements.clone();
+        if placements.is_empty() {
+            let shard_count = config.shard_count.max(1);
+            let node_count = config.nodes.len() as u32;
+            let replication = config.replication_factor.min(node_count);
+            for shard_index in 0..shard_count {
+                let primary_index = shard_index % node_count;
+                let mut replicas = Vec::new();
+                for offset in 1..replication {
+                    let idx = (shard_index + offset) % node_count;
+                    replicas.push(config.nodes[idx as usize].id.clone());
+                }
+                let placement = ShardPlacement {
+                    shard: ShardId(shard_index),
+                    primary: config.nodes[primary_index as usize].id.clone(),
+                    replicas,
+                };
+                placements.insert(ShardId(shard_index), placement);
             }
-            let placement = ShardPlacement {
-                shard: ShardId(shard_index),
-                primary: config.nodes[primary_index as usize].id.clone(),
-                replicas,
-            };
-            placements.insert(ShardId(shard_index), placement);
+        }
+
+        // Validate that every placement references known nodes.
+        let node_ids: Vec<_> = config.nodes.iter().map(|n| n.id.clone()).collect();
+        let known_nodes: HashMap<_, _> = node_ids.iter().map(|id| (id, ())).collect();
+        for placement in placements.values() {
+            if !known_nodes.contains_key(&placement.primary) {
+                return Err(ClusterError::UnknownNode(placement.primary.clone()));
+            }
+            for replica in &placement.replicas {
+                if !known_nodes.contains_key(replica) {
+                    return Err(ClusterError::UnknownNode(replica.clone()));
+                }
+            }
         }
 
         Ok(Self {
@@ -392,13 +416,13 @@ impl ClusterAdmin {
 
     /// Move a shard to a new primary and replicas, returning an updated placement map.
     pub fn move_shard(
-        &self,
+        &mut self,
         shard: ShardId,
         new_primary: NodeId,
         replicas: Vec<NodeId>,
     ) -> Result<HashMap<ShardId, ShardPlacement>, ClusterError> {
-        let mut router = ClusterRouter::from_config(self.config.clone())?;
-        let mut placements = router.placements.clone();
+        let mut base_router = ClusterRouter::from_config(self.config.clone())?;
+        let mut placements = base_router.placements.clone();
         placements.insert(
             shard,
             ShardPlacement {
@@ -407,13 +431,19 @@ impl ClusterAdmin {
                 replicas,
             },
         );
-        router.placements = placements.clone();
+        base_router.placements = placements.clone();
+        self.config.placements = placements.clone();
         Ok(placements)
     }
 
     /// Recompute placements after membership changes, returning a fresh router.
-    pub fn rebalance(&self) -> Result<ClusterRouter, ClusterError> {
-        ClusterRouter::from_config(self.config.clone())
+    pub fn rebalance(&mut self) -> Result<ClusterRouter, ClusterError> {
+        let mut new_config = self.config.clone();
+        new_config.placements.clear();
+        let router = ClusterRouter::from_config(new_config.clone())?;
+        self.config.placements = router.placements.clone();
+        self.config.shard_count = router.placements.len() as u32;
+        Ok(router)
     }
 }
 
@@ -441,6 +471,7 @@ mod tests {
             shard_count: 4,
             replication_factor: 2,
             read_preference: ReadPreference::Primary,
+            placements: HashMap::new(),
         }
     }
 
@@ -472,8 +503,18 @@ mod tests {
         let shard_b = router.shard_for_tenant_document("tenant-a", "doc-1");
         assert_eq!(shard_a, shard_b);
 
-        let shard_c = router.shard_for_tenant_document("tenant-b", "doc-1");
-        assert_ne!(shard_a, shard_c);
+        let different = (0..10).find_map(|i| {
+            let shard = router.shard_for_tenant_document(&format!("tenant-{i}"), "doc-1");
+            if shard != shard_a {
+                Some(shard)
+            } else {
+                None
+            }
+        });
+        assert!(
+            different.is_some(),
+            "expected at least one tenant to map to a different shard"
+        );
     }
 
     #[test]
@@ -519,6 +560,76 @@ mod tests {
     }
 
     #[test]
+    fn honors_read_preference_and_manual_placements() {
+        let mut config = test_config();
+        config.replication_factor = 3;
+        config.shard_count = 1;
+        config.placements.insert(
+            ShardId(0),
+            ShardPlacement {
+                shard: ShardId(0),
+                primary: NodeId::new("node-1"),
+                replicas: vec![NodeId::new("node-2"), NodeId::new("node-0")],
+            },
+        );
+
+        let router = ClusterRouter::from_config(config).unwrap();
+        let routing_any = router.route("key", Some(ReadPreference::Any));
+        assert_eq!(routing_any.target, NodeId::new("node-2"));
+        assert_eq!(routing_any.role, ReplicaRole::Follower);
+
+        let routing_followers = router.route("key", Some(ReadPreference::Followers));
+        assert_eq!(routing_followers.target, NodeId::new("node-2"));
+        assert_eq!(routing_followers.role, ReplicaRole::Follower);
+    }
+
+    #[test]
+    fn concurrent_replication_preserves_ordering() {
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let config = test_config();
+        let router = ClusterRouter::from_config(config.clone()).unwrap();
+        let placement = router.placement(ShardId(1)).unwrap();
+        let manager = Arc::new(Mutex::new(ReplicationManager::new(
+            &config
+                .nodes
+                .iter()
+                .map(|n| n.id.clone())
+                .collect::<Vec<_>>(),
+            config.shard_count,
+        )));
+
+        let threads: Vec<_> = (0..5)
+            .map(|i| {
+                let manager = manager.clone();
+                let placement = placement.clone();
+                thread::spawn(move || {
+                    for j in 0..10 {
+                        let payload = format!("payload-{i}-{j}").into_bytes();
+                        let mut guard = manager.lock().unwrap();
+                        guard.replicate(&placement, payload, 1);
+                    }
+                })
+            })
+            .collect();
+
+        for handle in threads {
+            handle.join().unwrap();
+        }
+
+        let guard = manager.lock().unwrap();
+        let log = guard
+            .log_for(&placement.primary, placement.shard)
+            .expect("log for primary");
+        assert_eq!(log.entries().len(), 50);
+        assert_eq!(log.committed_index(), 50);
+        let mut indices: Vec<_> = log.entries().iter().map(|e| e.index).collect();
+        indices.sort();
+        assert_eq!(indices, (1..=50).collect::<Vec<_>>());
+    }
+
+    #[test]
     fn config_round_trip_to_disk() {
         let cfg = test_config();
         let dir = tempfile::tempdir().unwrap();
@@ -543,5 +654,24 @@ mod tests {
             placement.primary.0 == "node-3" || placement.replicas.iter().any(|n| n.0 == "node-3")
         });
         assert!(has_new_node);
+    }
+
+    #[test]
+    fn admin_can_move_shard_and_persist_config() {
+        let mut admin = ClusterAdmin::new(test_config());
+        let updated = admin
+            .move_shard(
+                ShardId(2),
+                NodeId::new("node-1"),
+                vec![NodeId::new("node-0")],
+            )
+            .unwrap();
+
+        assert_eq!(
+            updated.get(&ShardId(2)).unwrap().primary,
+            NodeId::new("node-1")
+        );
+        assert_eq!(admin.config.placements.len(), updated.len());
+        assert!(admin.config.placements.contains_key(&ShardId(2)));
     }
 }

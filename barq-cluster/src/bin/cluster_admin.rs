@@ -51,7 +51,7 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Show {} => {
-            let router = admin.rebalance()?;
+            let router = barq_cluster::ClusterRouter::from_config(admin.config.clone())?;
             for placement in router.placements.values() {
                 println!(
                     "shard {} => primary={}, replicas={:?}",
@@ -97,6 +97,7 @@ fn persist(
     println!("writing updated configuration to {}", path.display());
     let mut updated = config.clone();
     updated.shard_count = placements.len() as u32;
+    updated.placements = placements;
     updated.to_path(path)?;
     Ok(())
 }
