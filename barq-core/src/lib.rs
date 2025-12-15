@@ -1,4 +1,6 @@
-use barq_index::{DistanceMetric, DocumentId, FlatIndex, SearchResult, VectorIndex};
+use barq_index::{
+    DistanceMetric, DocumentId, DocumentIdError, FlatIndex, SearchResult, VectorIndex,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -15,11 +17,17 @@ pub enum CatalogError {
 
     #[error("index error: {0}")]
     Index(#[from] barq_index::VectorIndexError),
+
+    #[error("invalid document id: {0}")]
+    DocumentId(#[from] DocumentIdError),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum FieldType {
-    Vector { dimension: usize, metric: DistanceMetric },
+    Vector {
+        dimension: usize,
+        metric: DistanceMetric,
+    },
     Json,
 }
 
@@ -37,6 +45,7 @@ pub struct CollectionSchema {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
 pub enum PayloadValue {
     Null,
     Bool(bool),
@@ -55,6 +64,34 @@ pub struct Document {
 }
 
 impl CollectionSchema {
+    pub fn validate(&self) -> Result<(), CatalogError> {
+        let vector_fields: Vec<_> = self
+            .fields
+            .iter()
+            .filter_map(|field| match field.field_type {
+                FieldType::Vector {
+                    dimension,
+                    metric: _,
+                } => Some((field.name.clone(), dimension)),
+                _ => None,
+            })
+            .collect();
+
+        if vector_fields.is_empty() {
+            return Err(CatalogError::InvalidSchema(
+                "schema missing vector field".to_string(),
+            ));
+        }
+
+        if vector_fields.iter().any(|(_, dim)| *dim == 0) {
+            return Err(CatalogError::InvalidSchema(
+                "vector dimension must be positive".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
     pub fn vector_config(&self) -> Option<(usize, DistanceMetric)> {
         self.fields.iter().find_map(|field| match field.field_type {
             FieldType::Vector { dimension, metric } => Some((dimension, metric)),
@@ -68,10 +105,12 @@ pub struct Collection {
     schema: CollectionSchema,
     index: FlatIndex,
     payloads: HashMap<DocumentId, PayloadValue>,
+    dimension: usize,
 }
 
 impl Collection {
     pub fn new(schema: CollectionSchema) -> Result<Self, CatalogError> {
+        schema.validate()?;
         let (dimension, metric) = schema
             .vector_config()
             .ok_or_else(|| CatalogError::InvalidSchema("schema missing vector field".into()))?;
@@ -80,15 +119,24 @@ impl Collection {
             schema,
             index: FlatIndex::new(metric, dimension),
             payloads: HashMap::new(),
+            dimension,
         })
     }
 
     pub fn insert(&mut self, document: Document) -> Result<(), CatalogError> {
+        self.validate_document(&document)?;
         self.index.insert(document.id.clone(), document.vector)?;
         if let Some(payload) = document.payload {
             self.payloads.insert(document.id, payload);
         }
         Ok(())
+    }
+
+    pub fn upsert(&mut self, document: Document) -> Result<(), CatalogError> {
+        if self.payloads.contains_key(&document.id) {
+            self.index.remove(&document.id);
+        }
+        self.insert(document)
     }
 
     pub fn delete(&mut self, id: &DocumentId) -> bool {
@@ -103,6 +151,22 @@ impl Collection {
 
     pub fn schema(&self) -> &CollectionSchema {
         &self.schema
+    }
+
+    pub fn vector_dimension(&self) -> usize {
+        self.dimension
+    }
+
+    fn validate_document(&self, document: &Document) -> Result<(), CatalogError> {
+        document.id.validate()?;
+        if document.vector.len() != self.dimension {
+            return Err(CatalogError::InvalidSchema(format!(
+                "vector dimension mismatch: expected {}, got {}",
+                self.dimension,
+                document.vector.len()
+            )));
+        }
+        Ok(())
     }
 }
 
