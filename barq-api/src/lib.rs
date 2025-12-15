@@ -1783,6 +1783,52 @@ mod tests {
         handle.await.unwrap().unwrap();
     }
 
+    #[tokio::test]
+    async fn missing_credentials_denied_when_required() {
+        init_tracing();
+        let dir = tempfile::tempdir().unwrap();
+        let auth = ApiAuth::new().require_keys();
+
+        let (addr, shutdown, handle) = start_test_server_with_auth(dir.path(), auth).await;
+        let client = Client::new();
+
+        let response = client
+            .get(format!("http://{}/info", addr))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        shutdown.send(()).unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn tenant_mismatch_results_in_forbidden() {
+        init_tracing();
+        let dir = tempfile::tempdir().unwrap();
+        let tenant_a = TenantId::new("tenant-a");
+        let tenant_b = TenantId::new("tenant-b");
+        let auth = ApiAuth::new().require_keys();
+        auth.insert("tenant-a-key", tenant_a.clone(), ApiRole::TenantAdmin);
+
+        let (addr, shutdown, handle) = start_test_server_with_auth(dir.path(), auth).await;
+        let client = Client::new();
+
+        let forbidden = client
+            .get(format!("http://{}/tenants/{}/usage", addr, tenant_b.as_str()))
+            .header("x-api-key", "tenant-a-key")
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+        shutdown.send(()).unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
     #[test]
     fn tls_config_validation_catches_missing_material() {
         let config = TlsConfig::new("/no/such/cert.pem", "/no/such/key.pem");
