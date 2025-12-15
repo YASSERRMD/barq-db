@@ -3,9 +3,14 @@ use barq_index::{
     build_index, DistanceMetric, DocumentId, DocumentIdError, IndexConfig, IndexType, SearchResult,
     VectorIndex,
 };
+use chrono::{DateTime, Utc};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fmt};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, HashMap, HashSet},
+    fmt,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CatalogError {
@@ -26,6 +31,9 @@ pub enum CatalogError {
 
     #[error("invalid document id: {0}")]
     DocumentId(#[from] DocumentIdError),
+
+    #[error("invalid filter: {0}")]
+    Filter(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -65,8 +73,345 @@ pub enum PayloadValue {
     I64(i64),
     F64(f64),
     String(String),
+    Timestamp(DateTime<Utc>),
+    GeoPoint(GeoPoint),
     Array(Vec<PayloadValue>),
     Object(HashMap<String, PayloadValue>),
+}
+
+impl PayloadValue {
+    fn as_object(&self) -> Option<&HashMap<String, PayloadValue>> {
+        match self {
+            PayloadValue::Object(map) => Some(map),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct GeoPoint {
+    pub lat: f64,
+    pub lon: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GeoBoundingBox {
+    pub top_left: GeoPoint,
+    pub bottom_right: GeoPoint,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "op", rename_all = "lowercase")]
+pub enum Filter {
+    And {
+        filters: Vec<Filter>,
+    },
+    Or {
+        filters: Vec<Filter>,
+    },
+    Not {
+        filter: Box<Filter>,
+    },
+    Eq {
+        field: String,
+        value: PayloadValue,
+    },
+    Ne {
+        field: String,
+        value: PayloadValue,
+    },
+    Gt {
+        field: String,
+        value: PayloadValue,
+    },
+    Gte {
+        field: String,
+        value: PayloadValue,
+    },
+    Lt {
+        field: String,
+        value: PayloadValue,
+    },
+    Lte {
+        field: String,
+        value: PayloadValue,
+    },
+    In {
+        field: String,
+        values: Vec<PayloadValue>,
+    },
+    GeoWithin {
+        field: String,
+        bounding_box: GeoBoundingBox,
+    },
+    Exists {
+        field: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ValueKey {
+    Bool(bool),
+    I64(i64),
+    F64(u64),
+    String(String),
+    Timestamp(i64),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum OrderedValue {
+    I64(i64),
+    F64(u64),
+    Timestamp(i64),
+}
+
+impl OrderedValue {
+    fn from_payload(value: &PayloadValue) -> Option<Self> {
+        match value {
+            PayloadValue::I64(v) => Some(Self::I64(*v)),
+            PayloadValue::F64(v) => Some(Self::F64(v.to_bits())),
+            PayloadValue::Timestamp(ts) => Some(Self::Timestamp(ts.timestamp_millis())),
+            _ => None,
+        }
+    }
+}
+
+fn value_key(value: &PayloadValue) -> Option<ValueKey> {
+    match value {
+        PayloadValue::Bool(v) => Some(ValueKey::Bool(*v)),
+        PayloadValue::I64(v) => Some(ValueKey::I64(*v)),
+        PayloadValue::F64(v) => Some(ValueKey::F64(v.to_bits())),
+        PayloadValue::String(v) => Some(ValueKey::String(v.clone())),
+        PayloadValue::Timestamp(ts) => Some(ValueKey::Timestamp(ts.timestamp_millis())),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+struct FieldIndex {
+    equality: HashMap<ValueKey, HashSet<DocumentId>>,
+    ranges: BTreeMap<OrderedValue, HashSet<DocumentId>>,
+    geo: HashMap<DocumentId, GeoPoint>,
+}
+
+impl FieldIndex {
+    fn insert(&mut self, doc_id: &DocumentId, value: &PayloadValue) {
+        match value {
+            PayloadValue::Array(items) => {
+                for item in items {
+                    self.insert(doc_id, item);
+                }
+            }
+            PayloadValue::GeoPoint(point) => {
+                self.geo.insert(doc_id.clone(), *point);
+            }
+            other => {
+                if let Some(key) = value_key(other) {
+                    self.equality.entry(key).or_default().insert(doc_id.clone());
+                }
+                if let Some(order) = OrderedValue::from_payload(other) {
+                    self.ranges.entry(order).or_default().insert(doc_id.clone());
+                }
+            }
+        }
+    }
+
+    fn remove(&mut self, doc_id: &DocumentId, value: &PayloadValue) {
+        match value {
+            PayloadValue::Array(items) => {
+                for item in items {
+                    self.remove(doc_id, item);
+                }
+            }
+            PayloadValue::GeoPoint(_) => {
+                self.geo.remove(doc_id);
+            }
+            other => {
+                if let Some(key) = value_key(other) {
+                    if let Some(set) = self.equality.get_mut(&key) {
+                        set.remove(doc_id);
+                        if set.is_empty() {
+                            self.equality.remove(&key);
+                        }
+                    }
+                }
+                if let Some(order) = OrderedValue::from_payload(other) {
+                    if let Some(set) = self.ranges.get_mut(&order) {
+                        set.remove(doc_id);
+                        if set.is_empty() {
+                            self.ranges.remove(&order);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+struct MetadataIndex {
+    fields: HashMap<String, FieldIndex>,
+}
+
+impl MetadataIndex {
+    fn insert_payload(&mut self, doc_id: &DocumentId, payload: &PayloadValue) {
+        if let Some(map) = payload.as_object() {
+            for (key, value) in map.iter() {
+                self.fields
+                    .entry(key.clone())
+                    .or_default()
+                    .insert(doc_id, value);
+            }
+        }
+    }
+
+    fn remove_payload(&mut self, doc_id: &DocumentId, payload: &PayloadValue) {
+        if let Some(map) = payload.as_object() {
+            for (key, value) in map.iter() {
+                if let Some(index) = self.fields.get_mut(key) {
+                    index.remove(doc_id, value);
+                }
+            }
+        }
+    }
+
+    fn candidates(&self, filter: &Filter) -> Option<HashSet<DocumentId>> {
+        match filter {
+            Filter::And { filters } => {
+                let mut iter = filters.iter().filter_map(|f| self.candidates(f));
+                let first = iter.next()?;
+                let mut acc = first;
+                for set in iter {
+                    acc = acc.intersection(&set).cloned().collect();
+                }
+                Some(acc)
+            }
+            Filter::Or { filters } => {
+                let mut acc: HashSet<DocumentId> = HashSet::new();
+                for f in filters {
+                    if let Some(set) = self.candidates(f) {
+                        acc.extend(set);
+                    } else {
+                        return None;
+                    }
+                }
+                Some(acc)
+            }
+            Filter::Not { .. } => None,
+            Filter::GeoWithin {
+                field,
+                bounding_box,
+            } => self.geo_candidates(field, bounding_box),
+            Filter::Eq { field, value } => self.equality_candidates(field, value),
+            Filter::Ne { .. } => None,
+            Filter::Gt { field, value: _ }
+            | Filter::Gte { field, value: _ }
+            | Filter::Lt { field, value: _ }
+            | Filter::Lte { field, value: _ } => self.range_candidates(field, filter),
+            Filter::In { field, values } => {
+                let mut acc: HashSet<DocumentId> = HashSet::new();
+                for v in values {
+                    if let Some(set) = self.equality_candidates(field, v) {
+                        acc.extend(set);
+                    }
+                }
+                if acc.is_empty() {
+                    None
+                } else {
+                    Some(acc)
+                }
+            }
+            Filter::Exists { field } => self.field_exists(field),
+        }
+    }
+
+    fn equality_candidates(
+        &self,
+        field: &str,
+        value: &PayloadValue,
+    ) -> Option<HashSet<DocumentId>> {
+        let key = value_key(value)?;
+        self.fields
+            .get(field)
+            .and_then(|idx| idx.equality.get(&key).cloned())
+    }
+
+    fn field_exists(&self, field: &str) -> Option<HashSet<DocumentId>> {
+        self.fields.get(field).map(|idx| {
+            idx.equality
+                .values()
+                .flat_map(|set| set.iter().cloned())
+                .chain(idx.geo.keys().cloned())
+                .collect()
+        })
+    }
+
+    fn geo_candidates(
+        &self,
+        field: &str,
+        bounding_box: &GeoBoundingBox,
+    ) -> Option<HashSet<DocumentId>> {
+        let idx = self.fields.get(field)?;
+        let mut set = HashSet::new();
+        for (doc, point) in idx.geo.iter() {
+            if point.lat <= bounding_box.top_left.lat
+                && point.lat >= bounding_box.bottom_right.lat
+                && point.lon >= bounding_box.top_left.lon
+                && point.lon <= bounding_box.bottom_right.lon
+            {
+                set.insert(doc.clone());
+            }
+        }
+        Some(set)
+    }
+
+    fn range_candidates(&self, field: &str, filter: &Filter) -> Option<HashSet<DocumentId>> {
+        let idx = self.fields.get(field)?;
+        let (start, end, inclusive_start, inclusive_end) = match filter {
+            Filter::Gt { value, .. } => (OrderedValue::from_payload(value), None, false, false),
+            Filter::Gte { value, .. } => (OrderedValue::from_payload(value), None, true, false),
+            Filter::Lt { value, .. } => (None, OrderedValue::from_payload(value), false, false),
+            Filter::Lte { value, .. } => (None, OrderedValue::from_payload(value), false, true),
+            _ => return None,
+        };
+        if matches!(filter, Filter::Gt { .. } | Filter::Gte { .. }) && start.is_none() {
+            return None;
+        }
+        if matches!(filter, Filter::Lt { .. } | Filter::Lte { .. }) && end.is_none() {
+            return None;
+        }
+        let mut set: HashSet<DocumentId> = HashSet::new();
+        for (key, docs) in idx.ranges.iter() {
+            let lower_ok = match &start {
+                Some(bound) => {
+                    if inclusive_start {
+                        key >= bound
+                    } else {
+                        key > bound
+                    }
+                }
+                None => true,
+            };
+            let upper_ok = match &end {
+                Some(bound) => {
+                    if inclusive_end {
+                        key <= bound
+                    } else {
+                        key < bound
+                    }
+                }
+                None => true,
+            };
+            if lower_ok && upper_ok {
+                set.extend(docs.iter().cloned());
+            }
+        }
+        if set.is_empty() {
+            None
+        } else {
+            Some(set)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -182,6 +527,7 @@ pub struct Collection {
     metric: DistanceMetric,
     index_type: IndexType,
     text_index: Option<Bm25Index>,
+    metadata_index: MetadataIndex,
 }
 
 impl fmt::Debug for Collection {
@@ -222,6 +568,7 @@ impl Collection {
             } else {
                 None
             },
+            metadata_index: MetadataIndex::default(),
         })
     }
 
@@ -236,6 +583,7 @@ impl Collection {
             index.insert(document.id.clone(), &text_values)?;
         }
         if let Some(payload) = document.payload {
+            self.metadata_index.insert_payload(&document.id, &payload);
             self.payloads.insert(document.id, payload);
         }
         Ok(())
@@ -248,6 +596,9 @@ impl Collection {
             if let Some(index) = &mut self.text_index {
                 index.remove(&document.id);
             }
+            if let Some(existing) = self.payloads.remove(&document.id) {
+                self.metadata_index.remove_payload(&document.id, &existing);
+            }
         }
         self.insert(document)
     }
@@ -255,7 +606,9 @@ impl Collection {
     pub fn delete(&mut self, id: &DocumentId) -> bool {
         let removed = self.index.remove(id);
         self.vectors.remove(id);
-        self.payloads.remove(id);
+        if let Some(payload) = self.payloads.remove(id) {
+            self.metadata_index.remove_payload(id, &payload);
+        }
         if let Some(index) = &mut self.text_index {
             index.remove(id);
         }
@@ -263,7 +616,76 @@ impl Collection {
     }
 
     pub fn search(&self, vector: &[f32], top_k: usize) -> Result<Vec<SearchResult>, CatalogError> {
-        Ok(self.index.search(vector, top_k)?)
+        self.search_with_filter(vector, top_k, None)
+    }
+
+    pub fn search_with_filter(
+        &self,
+        vector: &[f32],
+        top_k: usize,
+        filter: Option<&Filter>,
+    ) -> Result<Vec<SearchResult>, CatalogError> {
+        if let Some(f) = filter {
+            self.validate_filter(f)?;
+        }
+        let candidates = filter.and_then(|f| self.metadata_index.candidates(f));
+        let mut results = if let Some(ids) = candidates {
+            self.search_over_candidates(vector, &ids)?
+        } else {
+            self.index.search(vector, top_k * 2)?
+        };
+
+        results = self.filter_results(results, filter);
+        if results.len() < top_k {
+            let mut fallback = self.index.search(vector, top_k * 4)?;
+            fallback = self.filter_results(fallback, filter);
+            results.extend(fallback);
+        }
+        results.par_sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        results.dedup_by(|a, b| a.id == b.id);
+        results.truncate(top_k.min(results.len()));
+        Ok(results)
+    }
+
+    fn search_over_candidates(
+        &self,
+        vector: &[f32],
+        candidates: &HashSet<DocumentId>,
+    ) -> Result<Vec<SearchResult>, CatalogError> {
+        let mut scored: Vec<SearchResult> = candidates
+            .par_iter()
+            .filter_map(|id| self.vectors.get(id).map(|vec| (id, vec)))
+            .map(|(id, vec)| SearchResult {
+                id: id.clone(),
+                score: score_with_metric(self.metric, vector, vec),
+            })
+            .collect();
+        scored.par_sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        Ok(scored)
+    }
+
+    fn filter_results(
+        &self,
+        mut results: Vec<SearchResult>,
+        filter: Option<&Filter>,
+    ) -> Vec<SearchResult> {
+        if let Some(f) = filter {
+            results.retain(|res| self.matches_filter(&res.id, f));
+        }
+        results
+    }
+
+    fn matches_filter(&self, id: &DocumentId, filter: &Filter) -> bool {
+        let payload = self.payloads.get(id);
+        evaluate_filter(filter, payload)
     }
 
     pub fn search_text(
@@ -271,11 +693,37 @@ impl Collection {
         query: &str,
         top_k: usize,
     ) -> Result<Vec<SearchResult>, CatalogError> {
+        self.search_text_with_filter(query, top_k, None)
+    }
+
+    pub fn search_text_with_filter(
+        &self,
+        query: &str,
+        top_k: usize,
+        filter: Option<&Filter>,
+    ) -> Result<Vec<SearchResult>, CatalogError> {
+        if let Some(f) = filter {
+            self.validate_filter(f)?;
+        }
         let index = self
             .text_index
             .as_ref()
             .ok_or_else(|| CatalogError::InvalidSchema("collection has no text index".into()))?;
-        Ok(index.search(query, top_k)?)
+        let mut results = index.search(query, top_k * 2)?;
+        results = self.filter_results(results, filter);
+        if results.len() < top_k {
+            let mut fallback = index.search(query, top_k * 4)?;
+            fallback = self.filter_results(fallback, filter);
+            results.extend(fallback);
+        }
+        results.par_sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        results.dedup_by(|a, b| a.id == b.id);
+        results.truncate(top_k.min(results.len()));
+        Ok(results)
     }
 
     pub fn search_hybrid(
@@ -284,10 +732,13 @@ impl Collection {
         query: &str,
         top_k: usize,
         weights: Option<HybridWeights>,
+        filter: Option<&Filter>,
     ) -> Result<Vec<HybridSearchResult>, CatalogError> {
+        if let Some(f) = filter {
+            self.validate_filter(f)?;
+        }
         let weights = weights.unwrap_or_default();
-        let text_index = self
-            .text_index
+        self.text_index
             .as_ref()
             .ok_or_else(|| CatalogError::InvalidSchema("collection has no text index".into()))?;
 
@@ -298,8 +749,8 @@ impl Collection {
         }
 
         let (bm25_results, vector_results) = rayon::join(
-            || text_index.search(query, top_k * 2),
-            || self.index.search(vector, top_k * 2),
+            || self.search_text_with_filter(query, top_k * 2, filter),
+            || self.search_with_filter(vector, top_k * 2, filter),
         );
 
         let bm25_results = bm25_results?;
@@ -360,7 +811,7 @@ impl Collection {
         id: &DocumentId,
         weights: Option<HybridWeights>,
     ) -> Result<Option<HybridSearchResult>, CatalogError> {
-        let results = self.search_hybrid(vector, query, top_k, weights)?;
+        let results = self.search_hybrid(vector, query, top_k, weights, None)?;
         Ok(results.into_iter().find(|res| &res.id == id))
     }
 
@@ -471,6 +922,35 @@ impl Collection {
             }
         }
         Ok(values)
+    }
+
+    fn validate_filter(&self, filter: &Filter) -> Result<(), CatalogError> {
+        match filter {
+            Filter::And { filters } | Filter::Or { filters } => {
+                for f in filters {
+                    self.validate_filter(f)?;
+                }
+            }
+            Filter::Not { filter } => self.validate_filter(filter)?,
+            Filter::Eq { field, .. }
+            | Filter::Ne { field, .. }
+            | Filter::Gt { field, .. }
+            | Filter::Gte { field, .. }
+            | Filter::Lt { field, .. }
+            | Filter::Lte { field, .. }
+            | Filter::In { field, .. }
+            | Filter::GeoWithin { field, .. }
+            | Filter::Exists { field } => {
+                let valid = self.schema.fields.iter().any(|f| f.name == *field);
+                if !valid {
+                    return Err(CatalogError::Filter(format!(
+                        "field {} not in schema",
+                        field
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -698,7 +1178,7 @@ mod tests {
             .unwrap();
 
         let results = collection
-            .search_hybrid(&[0.0, 1.0, 0.0], "rust", 2, None)
+            .search_hybrid(&[0.0, 1.0, 0.0], "rust", 2, None, None)
             .unwrap();
         assert_eq!(results.len(), 2);
         let first = &results[0];
@@ -743,4 +1223,138 @@ mod tests {
         let bm25 = collection.text_index.as_ref().unwrap();
         assert_eq!(bm25.config(), schema.bm25_config.unwrap());
     }
+}
+
+fn evaluate_filter(filter: &Filter, payload: Option<&PayloadValue>) -> bool {
+    match filter {
+        Filter::And { filters } => filters.iter().all(|f| evaluate_filter(f, payload)),
+        Filter::Or { filters } => filters.iter().any(|f| evaluate_filter(f, payload)),
+        Filter::Not { filter } => !evaluate_filter(filter, payload),
+        Filter::Eq { field, value } => field_values(payload, field)
+            .iter()
+            .any(|candidate| *candidate == value),
+        Filter::Ne { field, value } => field_values(payload, field)
+            .iter()
+            .all(|candidate| *candidate != value),
+        Filter::Gt { field, value } => compare_field(payload, field, value, Ordering::Greater),
+        Filter::Gte { field, value } => {
+            compare_field(payload, field, value, Ordering::Greater)
+                || field_values(payload, field)
+                    .iter()
+                    .any(|candidate| *candidate == value)
+        }
+        Filter::Lt { field, value } => compare_field(payload, field, value, Ordering::Less),
+        Filter::Lte { field, value } => {
+            compare_field(payload, field, value, Ordering::Less)
+                || field_values(payload, field)
+                    .iter()
+                    .any(|candidate| *candidate == value)
+        }
+        Filter::In { field, values } => field_values(payload, field)
+            .iter()
+            .any(|candidate| values.iter().any(|v| v == *candidate)),
+        Filter::GeoWithin {
+            field,
+            bounding_box,
+        } => field_values(payload, field)
+            .iter()
+            .any(|candidate| match candidate {
+                PayloadValue::GeoPoint(point) => {
+                    point.lat <= bounding_box.top_left.lat
+                        && point.lat >= bounding_box.bottom_right.lat
+                        && point.lon >= bounding_box.top_left.lon
+                        && point.lon <= bounding_box.bottom_right.lon
+                }
+                _ => false,
+            }),
+        Filter::Exists { field } => !field_values(payload, field).is_empty(),
+    }
+}
+
+fn field_values<'a>(payload: Option<&'a PayloadValue>, field: &str) -> Vec<&'a PayloadValue> {
+    let mut result = Vec::new();
+    let parts: Vec<&str> = field.split('.').collect();
+    if let Some(value) = payload {
+        collect_field_values(value, &parts, &mut result);
+    }
+    result
+}
+
+fn collect_field_values<'a>(
+    value: &'a PayloadValue,
+    path: &[&str],
+    output: &mut Vec<&'a PayloadValue>,
+) {
+    if path.is_empty() {
+        output.push(value);
+        return;
+    }
+    match value {
+        PayloadValue::Object(map) => {
+            if let Some(next) = map.get(path[0]) {
+                collect_field_values(next, &path[1..], output);
+            }
+        }
+        PayloadValue::Array(items) => {
+            for item in items {
+                collect_field_values(item, path, output);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn compare_field(
+    payload: Option<&PayloadValue>,
+    field: &str,
+    target: &PayloadValue,
+    ordering: Ordering,
+) -> bool {
+    field_values(payload, field)
+        .iter()
+        .any(|candidate| compare_values(candidate, target, ordering))
+}
+
+fn compare_values(lhs: &PayloadValue, rhs: &PayloadValue, desired: Ordering) -> bool {
+    match (lhs, rhs) {
+        (PayloadValue::I64(a), PayloadValue::I64(b)) => a.cmp(b) == desired,
+        (PayloadValue::F64(a), PayloadValue::F64(b)) => a.partial_cmp(b) == Some(desired),
+        (PayloadValue::Timestamp(a), PayloadValue::Timestamp(b)) => {
+            a.timestamp_millis().cmp(&b.timestamp_millis()) == desired
+        }
+        (PayloadValue::I64(a), PayloadValue::F64(b)) => (*a as f64).partial_cmp(b) == Some(desired),
+        (PayloadValue::F64(a), PayloadValue::I64(b)) => {
+            a.partial_cmp(&(*b as f64)) == Some(desired)
+        }
+        _ => false,
+    }
+}
+
+fn score_with_metric(metric: DistanceMetric, lhs: &[f32], rhs: &[f32]) -> f32 {
+    match metric {
+        DistanceMetric::L2 => -l2_distance(lhs, rhs),
+        DistanceMetric::Cosine => cosine_similarity(lhs, rhs),
+        DistanceMetric::Dot => lhs.iter().zip(rhs).map(|(a, b)| a * b).sum(),
+    }
+}
+
+fn l2_distance(lhs: &[f32], rhs: &[f32]) -> f32 {
+    lhs.iter()
+        .zip(rhs)
+        .map(|(a, b)| {
+            let diff = a - b;
+            diff * diff
+        })
+        .sum::<f32>()
+        .sqrt()
+}
+
+fn cosine_similarity(lhs: &[f32], rhs: &[f32]) -> f32 {
+    let dot: f32 = lhs.iter().zip(rhs).map(|(a, b)| a * b).sum();
+    let norm_l = lhs.iter().map(|v| v * v).sum::<f32>().sqrt();
+    let norm_r = rhs.iter().map(|v| v * v).sum::<f32>().sqrt();
+    if norm_l == 0.0 || norm_r == 0.0 {
+        return 0.0;
+    }
+    dot / (norm_l * norm_r)
 }

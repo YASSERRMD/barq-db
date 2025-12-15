@@ -10,7 +10,7 @@ use axum::{
 };
 use barq_bm25::Bm25Config;
 use barq_core::{
-    CollectionSchema, Document, FieldSchema, FieldType, HybridSearchResult, HybridWeights,
+    CollectionSchema, Document, FieldSchema, FieldType, Filter, HybridSearchResult, HybridWeights,
     PayloadValue,
 };
 use barq_index::{DistanceMetric, DocumentId, DocumentIdError, IndexType};
@@ -109,7 +109,7 @@ pub struct SearchRequest {
     pub vector: Vec<f32>,
     pub top_k: usize,
     #[serde(default)]
-    pub filter: Option<serde_json::Value>,
+    pub filter: Option<Filter>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -121,6 +121,8 @@ pub struct SearchResponse {
 pub struct TextSearchRequest {
     pub query: String,
     pub top_k: usize,
+    #[serde(default)]
+    pub filter: Option<Filter>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -135,6 +137,8 @@ pub struct HybridSearchRequest {
     pub top_k: usize,
     #[serde(default)]
     pub weights: Option<HybridWeights>,
+    #[serde(default)]
+    pub filter: Option<Filter>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -325,9 +329,13 @@ async fn search_collection(
     if payload.top_k == 0 {
         return Err(ApiError::BadRequest("top_k must be positive".into()));
     }
-    let _ = payload.filter;
     let storage = state.storage.lock().await;
-    let results = storage.search(&name, &payload.vector, payload.top_k)?;
+    let results = storage.search(
+        &name,
+        &payload.vector,
+        payload.top_k,
+        payload.filter.as_ref(),
+    )?;
     Ok(Json(SearchResponse { results }))
 }
 
@@ -340,7 +348,12 @@ async fn search_text_collection(
         return Err(ApiError::BadRequest("top_k must be positive".into()));
     }
     let storage = state.storage.lock().await;
-    let results = storage.search_text(&name, &payload.query, payload.top_k)?;
+    let results = storage.search_text(
+        &name,
+        &payload.query,
+        payload.top_k,
+        payload.filter.as_ref(),
+    )?;
     Ok(Json(TextSearchResponse { results }))
 }
 
@@ -359,6 +372,7 @@ async fn search_hybrid_collection(
         &payload.query,
         payload.top_k,
         payload.weights,
+        payload.filter.as_ref(),
     )?;
     Ok(Json(HybridSearchResponse { results }))
 }
