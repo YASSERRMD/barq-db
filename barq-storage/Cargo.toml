@@ -14,5 +14,8 @@ thiserror = { workspace = true }
 metrics = "0.22"
 chrono = { version = "0.4", features = ["clock", "serde"] }
 
+[features]
+default = []
+
 [dev-dependencies]
 tempfile = "3"
