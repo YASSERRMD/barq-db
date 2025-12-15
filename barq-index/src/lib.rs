@@ -872,9 +872,7 @@ mod tests {
 
         let mut stored = Vec::new();
         for i in 0..1_200u64 {
-            let vector: Vec<f32> = (0..dimension)
-                .map(|_| rng.gen_range(-1.0..1.0))
-                .collect();
+            let vector: Vec<f32> = (0..dimension).map(|_| rng.gen_range(-1.0..1.0)).collect();
             let id = DocumentId::U64(i + 1);
             stored.push((id.clone(), vector.clone()));
             index.insert(id, vector).unwrap();
@@ -902,6 +900,9 @@ mod tests {
             "search took {:?}",
             max_elapsed
         );
-        assert_eq!(empty_results, 0, "missing matches for {empty_results} / {evaluated}");
+        assert_eq!(
+            empty_results, 0,
+            "missing matches for {empty_results} / {evaluated}"
+        );
     }
 }

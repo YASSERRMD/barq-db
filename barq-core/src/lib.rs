@@ -189,19 +189,30 @@ fn value_key(value: &PayloadValue) -> Option<ValueKey> {
 
 #[derive(Debug, Default, Clone)]
 struct FieldIndex {
+    presence: HashMap<DocumentId, usize>,
     equality: HashMap<ValueKey, HashSet<DocumentId>>,
     ranges: BTreeMap<OrderedValue, HashSet<DocumentId>>,
     geo: HashMap<DocumentId, GeoPoint>,
 }
 
 impl FieldIndex {
-    fn insert(&mut self, doc_id: &DocumentId, value: &PayloadValue) {
-        match value {
-            PayloadValue::Array(items) => {
-                for item in items {
-                    self.insert(doc_id, item);
-                }
+    fn touch(&mut self, doc_id: &DocumentId) {
+        *self.presence.entry(doc_id.clone()).or_insert(0) += 1;
+    }
+
+    fn untouch(&mut self, doc_id: &DocumentId) {
+        if let Some(count) = self.presence.get_mut(doc_id) {
+            if *count <= 1 {
+                self.presence.remove(doc_id);
+            } else {
+                *count -= 1;
             }
+        }
+    }
+
+    fn insert(&mut self, doc_id: &DocumentId, value: &PayloadValue) {
+        self.touch(doc_id);
+        match value {
             PayloadValue::GeoPoint(point) => {
                 self.geo.insert(doc_id.clone(), *point);
             }
@@ -218,11 +229,6 @@ impl FieldIndex {
 
     fn remove(&mut self, doc_id: &DocumentId, value: &PayloadValue) {
         match value {
-            PayloadValue::Array(items) => {
-                for item in items {
-                    self.remove(doc_id, item);
-                }
-            }
             PayloadValue::GeoPoint(_) => {
                 self.geo.remove(doc_id);
             }
@@ -245,6 +251,14 @@ impl FieldIndex {
                 }
             }
         }
+        self.untouch(doc_id);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.presence.is_empty()
+            && self.equality.is_empty()
+            && self.ranges.is_empty()
+            && self.geo.is_empty()
     }
 }
 
@@ -257,10 +271,7 @@ impl MetadataIndex {
     fn insert_payload(&mut self, doc_id: &DocumentId, payload: &PayloadValue) {
         if let Some(map) = payload.as_object() {
             for (key, value) in map.iter() {
-                self.fields
-                    .entry(key.clone())
-                    .or_default()
-                    .insert(doc_id, value);
+                self.insert_value(doc_id, key, value);
             }
         }
     }
@@ -268,8 +279,62 @@ impl MetadataIndex {
     fn remove_payload(&mut self, doc_id: &DocumentId, payload: &PayloadValue) {
         if let Some(map) = payload.as_object() {
             for (key, value) in map.iter() {
-                if let Some(index) = self.fields.get_mut(key) {
-                    index.remove(doc_id, value);
+                self.remove_value(doc_id, key, value);
+            }
+        }
+    }
+
+    fn insert_value(&mut self, doc_id: &DocumentId, path: &str, value: &PayloadValue) {
+        match value {
+            PayloadValue::Object(map) => {
+                self.fields
+                    .entry(path.to_string())
+                    .or_default()
+                    .touch(doc_id);
+                for (child, child_value) in map.iter() {
+                    let nested_path = format!("{}.{}", path, child);
+                    self.insert_value(doc_id, &nested_path, child_value);
+                }
+            }
+            PayloadValue::Array(items) => {
+                for item in items {
+                    self.insert_value(doc_id, path, item);
+                }
+            }
+            other => {
+                self.fields
+                    .entry(path.to_string())
+                    .or_default()
+                    .insert(doc_id, other);
+            }
+        }
+    }
+
+    fn remove_value(&mut self, doc_id: &DocumentId, path: &str, value: &PayloadValue) {
+        match value {
+            PayloadValue::Object(map) => {
+                if let Some(index) = self.fields.get_mut(path) {
+                    index.untouch(doc_id);
+                    if index.is_empty() {
+                        self.fields.remove(path);
+                    }
+                }
+                for (child, child_value) in map.iter() {
+                    let nested_path = format!("{}.{}", path, child);
+                    self.remove_value(doc_id, &nested_path, child_value);
+                }
+            }
+            PayloadValue::Array(items) => {
+                for item in items {
+                    self.remove_value(doc_id, path, item);
+                }
+            }
+            other => {
+                if let Some(index) = self.fields.get_mut(path) {
+                    index.remove(doc_id, other);
+                    if index.is_empty() {
+                        self.fields.remove(path);
+                    }
                 }
             }
         }
@@ -338,9 +403,10 @@ impl MetadataIndex {
 
     fn field_exists(&self, field: &str) -> Option<HashSet<DocumentId>> {
         self.fields.get(field).map(|idx| {
-            idx.equality
-                .values()
-                .flat_map(|set| set.iter().cloned())
+            idx.presence
+                .keys()
+                .cloned()
+                .chain(idx.equality.values().flat_map(|set| set.iter().cloned()))
                 .chain(idx.geo.keys().cloned())
                 .collect()
         })
@@ -941,7 +1007,11 @@ impl Collection {
             | Filter::In { field, .. }
             | Filter::GeoWithin { field, .. }
             | Filter::Exists { field } => {
-                let valid = self.schema.fields.iter().any(|f| f.name == *field);
+                let valid = field
+                    .split('.')
+                    .next()
+                    .and_then(|root| self.schema.fields.iter().find(|f| f.name == root))
+                    .is_some();
                 if !valid {
                     return Err(CatalogError::Filter(format!(
                         "field {} not in schema",
@@ -1055,6 +1125,34 @@ mod tests {
                     name: "body".to_string(),
                     field_type: FieldType::Text { indexed: true },
                     required: true,
+                },
+            ],
+            bm25_config: None,
+        }
+    }
+
+    fn json_schema() -> CollectionSchema {
+        CollectionSchema {
+            name: "products_meta".to_string(),
+            fields: vec![
+                FieldSchema {
+                    name: "vector".to_string(),
+                    field_type: FieldType::Vector {
+                        dimension: 3,
+                        metric: DistanceMetric::Cosine,
+                        index: None,
+                    },
+                    required: true,
+                },
+                FieldSchema {
+                    name: "attrs".to_string(),
+                    field_type: FieldType::Json,
+                    required: false,
+                },
+                FieldSchema {
+                    name: "tags".to_string(),
+                    field_type: FieldType::Json,
+                    required: false,
                 },
             ],
             bm25_config: None,
@@ -1222,6 +1320,191 @@ mod tests {
         assert_eq!(collection.schema.bm25_config, schema.bm25_config);
         let bm25 = collection.text_index.as_ref().unwrap();
         assert_eq!(bm25.config(), schema.bm25_config.unwrap());
+    }
+
+    #[test]
+    fn metadata_index_tracks_nested_fields() {
+        let mut catalog = Catalog::new();
+        catalog.create_collection(json_schema()).unwrap();
+        let collection = catalog.collection_mut("products_meta").unwrap();
+
+        let mut attrs = HashMap::new();
+        attrs.insert("category".to_string(), PayloadValue::String("tech".into()));
+        let mut dimensions = HashMap::new();
+        dimensions.insert("length".to_string(), PayloadValue::I64(10));
+        attrs.insert("dimensions".to_string(), PayloadValue::Object(dimensions));
+
+        let mut payload1 = HashMap::new();
+        payload1.insert("attrs".to_string(), PayloadValue::Object(attrs.clone()));
+        payload1.insert(
+            "tags".to_string(),
+            PayloadValue::Array(vec![
+                PayloadValue::String("rust".into()),
+                PayloadValue::String("systems".into()),
+            ]),
+        );
+
+        collection
+            .insert(Document {
+                id: DocumentId::U64(1),
+                vector: vec![0.0, 1.0, 0.0],
+                payload: Some(PayloadValue::Object(payload1.clone())),
+            })
+            .unwrap();
+
+        let mut payload2 = HashMap::new();
+        payload2.insert(
+            "attrs".to_string(),
+            PayloadValue::Object({
+                let mut other_attrs = HashMap::new();
+                other_attrs.insert("category".to_string(), PayloadValue::String("home".into()));
+                other_attrs
+            }),
+        );
+        payload2.insert(
+            "tags".to_string(),
+            PayloadValue::Array(vec![PayloadValue::String("decor".into())]),
+        );
+
+        collection
+            .insert(Document {
+                id: DocumentId::U64(2),
+                vector: vec![0.0, 0.5, 1.0],
+                payload: Some(PayloadValue::Object(payload2)),
+            })
+            .unwrap();
+
+        let tech_candidates = collection
+            .metadata_index
+            .candidates(&Filter::Eq {
+                field: "attrs.category".to_string(),
+                value: PayloadValue::String("tech".into()),
+            })
+            .unwrap();
+        assert!(tech_candidates.contains(&DocumentId::U64(1)));
+        assert!(!tech_candidates.contains(&DocumentId::U64(2)));
+
+        let tag_candidates = collection
+            .metadata_index
+            .candidates(&Filter::Eq {
+                field: "tags".to_string(),
+                value: PayloadValue::String("rust".into()),
+            })
+            .unwrap();
+        assert_eq!(tag_candidates.len(), 1);
+        assert!(tag_candidates.contains(&DocumentId::U64(1)));
+
+        let dimension_exists = collection
+            .metadata_index
+            .candidates(&Filter::Exists {
+                field: "attrs.dimensions.length".to_string(),
+            })
+            .unwrap();
+        assert!(dimension_exists.contains(&DocumentId::U64(1)));
+        assert!(!dimension_exists.contains(&DocumentId::U64(2)));
+
+        let mut updated_attrs = attrs.clone();
+        updated_attrs.insert(
+            "category".to_string(),
+            PayloadValue::String("kitchen".into()),
+        );
+        let mut updated_payload = payload1.clone();
+        updated_payload.insert("attrs".to_string(), PayloadValue::Object(updated_attrs));
+
+        collection
+            .upsert(Document {
+                id: DocumentId::U64(1),
+                vector: vec![0.0, 1.0, 0.0],
+                payload: Some(PayloadValue::Object(updated_payload)),
+            })
+            .unwrap();
+
+        let refreshed_candidates = collection
+            .metadata_index
+            .candidates(&Filter::Eq {
+                field: "attrs.category".to_string(),
+                value: PayloadValue::String("tech".into()),
+            })
+            .unwrap_or_default();
+        assert!(!refreshed_candidates.contains(&DocumentId::U64(1)));
+    }
+
+    #[test]
+    fn hybrid_search_respects_metadata_filters() {
+        let mut schema = text_schema();
+        schema.name = "articles_with_meta".to_string();
+        schema.fields.push(FieldSchema {
+            name: "meta".to_string(),
+            field_type: FieldType::Json,
+            required: false,
+        });
+
+        let mut catalog = Catalog::new();
+        catalog.create_collection(schema).unwrap();
+        let collection = catalog.collection_mut("articles_with_meta").unwrap();
+
+        let mut payload1 = HashMap::new();
+        payload1.insert(
+            "body".to_string(),
+            PayloadValue::String("Rust language guide".into()),
+        );
+        payload1.insert(
+            "meta".to_string(),
+            PayloadValue::Object({
+                let mut meta = HashMap::new();
+                meta.insert("category".to_string(), PayloadValue::String("tech".into()));
+                meta
+            }),
+        );
+
+        let mut payload2 = HashMap::new();
+        payload2.insert(
+            "body".to_string(),
+            PayloadValue::String("Cooking tips and recipes".into()),
+        );
+        payload2.insert(
+            "meta".to_string(),
+            PayloadValue::Object({
+                let mut meta = HashMap::new();
+                meta.insert(
+                    "category".to_string(),
+                    PayloadValue::String("lifestyle".into()),
+                );
+                meta
+            }),
+        );
+
+        collection
+            .insert(Document {
+                id: DocumentId::U64(1),
+                vector: vec![0.9, 0.1, 0.0],
+                payload: Some(PayloadValue::Object(payload1)),
+            })
+            .unwrap();
+
+        collection
+            .insert(Document {
+                id: DocumentId::U64(2),
+                vector: vec![0.1, 0.9, 0.0],
+                payload: Some(PayloadValue::Object(payload2)),
+            })
+            .unwrap();
+
+        let results = collection
+            .search_hybrid(
+                &[1.0, 0.0, 0.0],
+                "rust language",
+                2,
+                None,
+                Some(&Filter::Eq {
+                    field: "meta.category".to_string(),
+                    value: PayloadValue::String("tech".into()),
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, DocumentId::U64(1));
     }
 }
 
