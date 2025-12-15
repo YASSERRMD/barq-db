@@ -1,0 +1,5 @@
+target/
+.git/
+.env
+.DS_Store
+*.swp

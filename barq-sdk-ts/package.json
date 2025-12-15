@@ -1,0 +1,20 @@
+{
+    "name": "barq-sdk-ts",
+    "version": "0.1.0",
+    "description": "TypeScript client for Barq DB",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "scripts": {
+        "build": "tsc"
+    },
+    "keywords": [
+        "barq",
+        "vector",
+        "database"
+    ],
+    "author": "Barq DB Contributors",
+    "license": "Apache-2.0",
+    "devDependencies": {
+        "typescript": "^5.0.0"
+    }
+}

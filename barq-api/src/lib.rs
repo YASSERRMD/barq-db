@@ -10,6 +10,7 @@ use axum::{
     Json, Router,
 };
 use barq_bm25::Bm25Config;
+use barq_admin::auth::{JwtVerifier, JwtClaims, AuthMethod};
 use barq_cluster::{ClusterConfig, ClusterError, ClusterRouter};
 use barq_core::{
     CollectionSchema, Document, FieldSchema, FieldType, Filter, HybridSearchResult, HybridWeights,

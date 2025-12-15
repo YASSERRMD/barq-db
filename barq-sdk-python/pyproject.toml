@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "barq-sdk-python"
+version = "0.1.0"
+authors = [
+  { name="Barq DB Contributors", email="..." },
+]
+description = "Python client for Barq DB"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "httpx>=0.23",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/YASSERRMD/barq-db"

@@ -2,39 +2,35 @@
 name = "barq-api"
 version = "0.1.0"
 edition = "2021"
-authors = ["Barq DB Contributors"]
-license = "Apache-2.0"
 
 [dependencies]
-axum = { version = "0.7", features = ["macros"] }
+axum = { version = "0.7", features = ["multipart", "http2"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tower-http = { version = "0.5", features = ["trace", "cors", "limit"] }
+thiserror = { workspace = true }
+metrics = "0.22"
+metrics-exporter-prometheus = "0.13"
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 barq-core = { path = "../barq-core" }
+barq-storage = { path = "../barq-storage" }
 barq-index = { path = "../barq-index" }
 barq-bm25 = { path = "../barq-bm25" }
-barq-admin = { path = "../barq-admin" }
-barq-storage = { path = "../barq-storage" }
 barq-cluster = { path = "../barq-cluster" }
-serde = { workspace = true }
-serde_json = { workspace = true }
-thiserror = { workspace = true }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-tracing = "0.1"
-metrics = "0.22"
+barq-admin = { version = "0.1.0", path = "../barq-admin" }
+clap = { version = "4.4", features = ["derive", "env"] }
 anyhow = "1"
-metrics-exporter-prometheus = "0.13"
-rustls = { version = "0.23", default-features = false, features = ["std", "ring", "logging"] }
-rustls-pemfile = "2"
-clap = { version = "4", features = ["derive", "env"] }
 tracing-appender = "0.2"
 tracing-opentelemetry = "0.22"
-opentelemetry = { version = "0.21", features = ["metrics"] }
+opentelemetry = "0.21"
 opentelemetry_sdk = { version = "0.21", features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.14", features = ["metrics"] }
-tower-http = { version = "0.5", features = ["trace"] }
+opentelemetry-otlp = "0.14"
 
 [dev-dependencies]
-reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
-tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 axum-test = "14.0"
+tempfile = "3"
+reqwest = { version = "0.11", features = ["json"] }
+barq-sdk-rust = { path = "../barq-sdk-rust" }

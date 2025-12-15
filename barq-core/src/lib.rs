@@ -1,5 +1,5 @@
 use barq_bm25::{Bm25Config, Bm25Index, TextIndexError};
-use barq_index::{
+pub use barq_index::{
     build_index, DistanceMetric, DocumentId, DocumentIdError, IndexConfig, IndexType, SearchResult,
     VectorIndex,
 };
