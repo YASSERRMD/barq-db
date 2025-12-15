@@ -112,6 +112,7 @@ pub struct ClusterRouter {
     pub node_id: NodeId,
     pub placements: HashMap<ShardId, ShardPlacement>,
     pub read_preference: ReadPreference,
+    node_addresses: HashMap<NodeId, String>,
 }
 
 #[derive(Debug, Error)]
@@ -139,6 +140,7 @@ pub enum ClusterError {
         shard: ShardId,
         node: NodeId,
         target: NodeId,
+        target_address: Option<String>,
     },
 }
 
@@ -152,6 +154,11 @@ impl ClusterRouter {
         }
 
         let mut placements = config.placements.clone();
+        let node_addresses: HashMap<_, _> = config
+            .nodes
+            .iter()
+            .map(|n| (n.id.clone(), n.address.clone()))
+            .collect();
         if placements.is_empty() {
             let shard_count = config.shard_count.max(1);
             let node_count = config.nodes.len() as u32;
@@ -190,6 +197,7 @@ impl ClusterRouter {
             node_id: config.node_id,
             placements,
             read_preference: config.read_preference,
+            node_addresses,
         })
     }
 
@@ -231,12 +239,14 @@ impl ClusterRouter {
         } else {
             ReplicaRole::Follower
         };
+        let target_address = self.node_addresses.get(&target).cloned();
         ShardRouting {
             shard: placement.shard,
             primary: placement.primary.clone(),
             replicas: placement.replicas.clone(),
             target,
             role,
+            target_address,
         }
     }
 
@@ -257,6 +267,7 @@ impl ClusterRouter {
                 shard: routing.shard,
                 node: self.node_id.clone(),
                 target: routing.target,
+                target_address: routing.target_address,
             })
         }
     }
@@ -274,6 +285,7 @@ impl ClusterRouter {
                 shard: routing.shard,
                 node: self.node_id.clone(),
                 target: routing.target,
+                target_address: routing.target_address,
             })
         }
     }
@@ -286,6 +298,7 @@ pub struct ShardRouting {
     pub replicas: Vec<NodeId>,
     pub target: NodeId,
     pub role: ReplicaRole,
+    pub target_address: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -526,6 +539,43 @@ mod tests {
             assert!(router.ensure_primary(key).is_err());
         } else {
             assert!(router.ensure_primary(key).is_ok());
+        }
+    }
+
+    #[test]
+    fn exposes_target_address_when_not_local() {
+        let config = test_config();
+        let router = ClusterRouter::from_config(config.clone()).unwrap();
+
+        let remote_shard = router
+            .placements
+            .values()
+            .find(|p| p.primary != router.node_id)
+            .expect("expected at least one remote shard");
+
+        let key = (0..10_000)
+            .map(|i| format!("key-{i}"))
+            .find(|candidate| router.shard_for_key(candidate) == remote_shard.shard)
+            .expect("should find a key that hashes to the shard");
+
+        let result = router.ensure_primary(&key);
+        let err = result.expect_err("routing should be remote");
+        match err {
+            ClusterError::NotLocal {
+                target,
+                target_address,
+                ..
+            } => {
+                assert_eq!(target, remote_shard.primary);
+                let expected_address = config
+                    .nodes
+                    .iter()
+                    .find(|n| n.id == target)
+                    .map(|n| n.address.clone())
+                    .expect("node has address");
+                assert_eq!(target_address, Some(expected_address));
+            }
+            _ => panic!("unexpected error: {err:?}"),
         }
     }
 

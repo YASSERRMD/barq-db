@@ -10,7 +10,7 @@ use axum::{
     Json, Router,
 };
 use barq_bm25::Bm25Config;
-use barq_cluster::{ClusterConfig, ClusterError, ClusterRouter};
+use barq_cluster::{ClusterConfig, ClusterError, ClusterRouter, ReadPreference};
 use barq_core::{
     CollectionSchema, Document, FieldSchema, FieldType, Filter, HybridSearchResult, HybridWeights,
     PayloadValue, TenantId,
@@ -33,9 +33,7 @@ struct AppState {
 
 impl AppState {
     fn ensure_primary_for_tenant(&self, tenant: &TenantId) -> Result<(), ApiError> {
-        self.cluster
-            .ensure_primary(tenant.as_str())
-            .map_err(ApiError::Cluster)
+        self.map_cluster_local_result(self.cluster.ensure_primary(tenant.as_str()))
     }
 
     fn ensure_primary_for_document(
@@ -44,13 +42,25 @@ impl AppState {
         document: &DocumentId,
     ) -> Result<(), ApiError> {
         let key = format!("{}:{}", tenant.as_str(), document);
-        self.cluster.ensure_primary(&key).map_err(ApiError::Cluster)
+        self.map_cluster_local_result(self.cluster.ensure_primary(&key))
     }
 
     fn ensure_local_for_tenant(&self, tenant: &TenantId) -> Result<(), ApiError> {
-        self.cluster
-            .ensure_local(tenant.as_str(), None)
-            .map_err(ApiError::Cluster)
+        self.map_cluster_local_result(
+            self.cluster
+                .ensure_local(tenant.as_str(), Some(ReadPreference::Primary)),
+        )
+    }
+
+    fn map_cluster_local_result(&self, result: Result<(), ClusterError>) -> Result<(), ApiError> {
+        match result {
+            Ok(()) => Ok(()),
+            Err(ClusterError::NotLocal {
+                target_address: Some(address),
+                ..
+            }) => Err(ApiError::Redirect(address)),
+            Err(err) => Err(ApiError::Cluster(err)),
+        }
     }
 }
 
@@ -193,6 +203,9 @@ pub enum ApiError {
 
     #[error("forbidden: {0}")]
     Forbidden(String),
+
+    #[error("redirecting to leader at {0}")]
+    Redirect(String),
 }
 
 impl IntoResponse for ApiError {
@@ -203,17 +216,28 @@ impl IntoResponse for ApiError {
             | ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ApiError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
+            ApiError::Redirect(_) => StatusCode::TEMPORARY_REDIRECT,
             ApiError::Cluster(_) => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::Storage(barq_storage::StorageError::QuotaExceeded { .. }) => {
                 StatusCode::TOO_MANY_REQUESTS
             }
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        (
+        let mut response = (
             status,
             Json(serde_json::json!({ "error": self.to_string() })),
         )
-            .into_response()
+            .into_response();
+
+        if let ApiError::Redirect(address) = &self {
+            if let Ok(header_value) = axum::http::HeaderValue::from_str(address) {
+                response
+                    .headers_mut()
+                    .insert(axum::http::header::LOCATION, header_value);
+            }
+        }
+
+        response
     }
 }
 
