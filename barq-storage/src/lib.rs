@@ -1,5 +1,6 @@
 use barq_core::{Catalog, CatalogError, CollectionSchema, Document, Filter, TenantId};
 use barq_index::{DocumentId, IndexType};
+use chrono::{DateTime, Utc};
 use metrics::{counter, gauge};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -18,6 +19,9 @@ pub enum StorageError {
 
     #[error("catalog error: {0}")]
     Catalog(#[from] CatalogError),
+
+    #[error("snapshot not found: {0}")]
+    SnapshotNotFound(String),
 
     #[error("tenant {tenant} quota exceeded: {reason}")]
     QuotaExceeded { tenant: TenantId, reason: String },
@@ -50,6 +54,12 @@ struct TenantUsage {
     memory_bytes: u64,
     window_start: Instant,
     requests_in_window: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotManifest {
+    pub version: String,
+    pub created_at: DateTime<Utc>,
 }
 
 impl Default for TenantUsage {
@@ -99,6 +109,16 @@ impl Storage {
         storage.load_collections()?;
         storage.recalculate_usage();
         Ok(storage)
+    }
+
+    pub fn open_with_snapshot(
+        root: impl AsRef<Path>,
+        snapshot_dir: impl AsRef<Path>,
+    ) -> Result<Self, StorageError> {
+        let root = root.as_ref();
+        let snapshot_dir = snapshot_dir.as_ref();
+        Self::restore_snapshot(root, snapshot_dir)?;
+        Self::open(root)
     }
 
     fn ensure_tenant_state(&mut self, tenant: &TenantId) {
@@ -322,6 +342,65 @@ impl Storage {
             usage.window_start = Instant::now();
         }
         self.emit_usage_metrics(&tenant);
+    }
+
+    pub fn create_snapshot(
+        &self,
+        snapshot_dir: impl AsRef<Path>,
+    ) -> Result<SnapshotManifest, StorageError> {
+        let snapshot_dir = snapshot_dir.as_ref();
+        if snapshot_dir.exists() {
+            fs::remove_dir_all(snapshot_dir)?;
+        }
+        fs::create_dir_all(snapshot_dir)?;
+
+        let manifest = SnapshotManifest {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            created_at: Utc::now(),
+        };
+
+        let manifest_path = snapshot_dir.join("snapshot.json");
+        let mut file = File::create(&manifest_path)?;
+        serde_json::to_writer_pretty(&mut file, &manifest)?;
+        file.flush()?;
+
+        let tenants_root = self.tenants_root();
+        if tenants_root.exists() {
+            let snapshot_tenants = snapshot_dir.join("tenants");
+            Self::copy_dir_recursively(&tenants_root, &snapshot_tenants)?;
+        }
+
+        Ok(manifest)
+    }
+
+    pub fn restore_snapshot(
+        target_root: impl AsRef<Path>,
+        snapshot_dir: impl AsRef<Path>,
+    ) -> Result<(), StorageError> {
+        let target_root = target_root.as_ref();
+        let snapshot_dir = snapshot_dir.as_ref();
+        fs::create_dir_all(target_root)?;
+        let manifest_path = snapshot_dir.join("snapshot.json");
+        if !manifest_path.exists() {
+            return Err(StorageError::SnapshotNotFound(
+                manifest_path.to_string_lossy().to_string(),
+            ));
+        }
+
+        let manifest_file = File::open(&manifest_path)?;
+        let _: SnapshotManifest = serde_json::from_reader(manifest_file)?;
+
+        let tenants_src = snapshot_dir.join("tenants");
+        let tenants_dest = target_root.join("tenants");
+        if tenants_dest.exists() {
+            fs::remove_dir_all(&tenants_dest)?;
+        }
+        if tenants_src.exists() {
+            fs::create_dir_all(&tenants_dest.parent().unwrap_or(target_root))?;
+            Self::copy_dir_recursively(&tenants_src, &tenants_dest)?;
+        }
+
+        Ok(())
     }
 
     pub fn create_collection(&mut self, schema: CollectionSchema) -> Result<(), StorageError> {
@@ -608,6 +687,22 @@ impl Storage {
         Ok(names)
     }
 
+    fn copy_dir_recursively(src: &Path, dest: &Path) -> Result<(), StorageError> {
+        fs::create_dir_all(dest)?;
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            let file_name = entry.file_name();
+            let dest_path = dest.join(file_name);
+            if file_type.is_dir() {
+                Self::copy_dir_recursively(&entry.path(), &dest_path)?;
+            } else {
+                fs::copy(entry.path(), dest_path)?;
+            }
+        }
+        Ok(())
+    }
+
     fn load_collections(&mut self) -> Result<(), StorageError> {
         let tenants_root = self.tenants_root();
         if !tenants_root.exists() {
@@ -776,6 +871,36 @@ mod tests {
         let results = storage.search("items", &[1.0, 0.0, 0.0], 1, None).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, DocumentId::U64(1));
+    }
+
+    #[test]
+    fn snapshot_round_trip_restores_collections() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot_dir = tempfile::tempdir().unwrap();
+
+        {
+            let mut storage = Storage::open(dir.path()).unwrap();
+            storage.create_collection(sample_schema("items")).unwrap();
+            storage
+                .insert(
+                    "items",
+                    Document {
+                        id: DocumentId::U64(42),
+                        vector: vec![0.0, 1.0, 0.0],
+                        payload: Some(PayloadValue::String("snapshot".into())),
+                    },
+                    false,
+                )
+                .unwrap();
+            storage.create_snapshot(snapshot_dir.path()).unwrap();
+        }
+
+        let new_root = tempfile::tempdir().unwrap();
+        Storage::restore_snapshot(new_root.path(), snapshot_dir.path()).unwrap();
+        let mut restored = Storage::open(new_root.path()).unwrap();
+        let results = restored.search("items", &[0.0, 1.0, 0.0], 1, None).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, DocumentId::U64(42));
     }
 
     #[test]
