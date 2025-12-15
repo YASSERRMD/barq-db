@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use axum::{
     extract::{Path as AxumPath, State},
@@ -16,6 +16,7 @@ use barq_core::{
 };
 use barq_index::{DistanceMetric, DocumentId, DocumentIdError, IndexType};
 use barq_storage::{Storage, TenantQuota, TenantUsageReport};
+use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{net::TcpListener, sync::Mutex, task::JoinHandle};
@@ -25,6 +26,7 @@ use tracing_subscriber::EnvFilter;
 struct AppState {
     storage: Arc<Mutex<Storage>>,
     auth: ApiAuth,
+    metrics: PrometheusHandle,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -121,6 +123,17 @@ impl ApiAuth {
             _role: record.role.clone(),
         })
     }
+}
+
+fn init_metrics_recorder() -> PrometheusHandle {
+    static HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
+    HANDLE
+        .get_or_init(|| {
+            PrometheusBuilder::new()
+                .install_recorder()
+                .expect("failed to install metrics recorder")
+        })
+        .clone()
 }
 
 #[derive(Debug, Clone)]
@@ -319,14 +332,17 @@ pub fn build_router(storage: Storage) -> Router {
 }
 
 pub fn build_router_with_auth(storage: Storage, auth: ApiAuth) -> Router {
+    let metrics = init_metrics_recorder();
     let state = AppState {
         storage: Arc::new(Mutex::new(storage)),
         auth,
+        metrics,
     };
 
     Router::new()
         .route("/health", get(health))
         .route("/info", get(info))
+        .route("/metrics", get(render_metrics))
         .route("/collections", post(create_collection))
         .route("/collections/:name", delete(drop_collection))
         .route("/collections/:name/documents", post(insert_document))
@@ -378,6 +394,15 @@ pub async fn start_server_with_auth(
 
 async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "status": "ok" }))
+}
+
+async fn render_metrics(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    state.auth.authenticate(&headers, ApiRole::Admin, None)?;
+    let body = state.metrics.render();
+    Ok((StatusCode::OK, body).into_response())
 }
 
 async fn info(
@@ -899,6 +924,85 @@ mod tests {
             .unwrap();
         assert_eq!(usage.documents, 1);
         assert_eq!(usage.tenant.as_str(), "tenant-a");
+
+        shutdown.send(()).unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn metrics_expose_per_tenant_usage() {
+        init_tracing();
+        let dir = tempfile::tempdir().unwrap();
+        let auth = ApiAuth::new().require_keys();
+        let tenant = TenantId::new("metrics-tenant");
+        auth.insert("metrics-key", tenant.clone(), ApiRole::Admin);
+
+        let (addr, shutdown, handle) = start_test_server_with_auth(dir.path(), auth).await;
+        let client = Client::new();
+
+        let create_body = serde_json::json!({
+            "name": "metrics-coll",
+            "dimension": 3,
+            "metric": "Cosine"
+        });
+
+        client
+            .post(format!("http://{}/collections", addr))
+            .header("x-api-key", "metrics-key")
+            .header("x-tenant-id", tenant.as_str())
+            .json(&create_body)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+
+        let insert_body = serde_json::json!({
+            "id": 42,
+            "vector": [0.1, 0.2, 0.3],
+            "payload": {"tag": "test"}
+        });
+
+        client
+            .post(format!(
+                "http://{}/collections/metrics-coll/documents",
+                addr
+            ))
+            .header("x-api-key", "metrics-key")
+            .header("x-tenant-id", tenant.as_str())
+            .json(&insert_body)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+
+        // Touch usage reporting to ensure gauges are updated.
+        let _: TenantUsageReport = client
+            .get(format!("http://{}/tenants/{}/usage", addr, tenant.as_str()))
+            .header("x-api-key", "metrics-key")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        let metrics_text = client
+            .get(format!("http://{}/metrics", addr))
+            .header("x-api-key", "metrics-key")
+            .header("x-tenant-id", tenant.as_str())
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+
+        assert!(metrics_text.contains("tenant_usage_documents{tenant=\"metrics-tenant\"}"));
+        assert!(metrics_text.contains("tenant_requests_total{tenant=\"metrics-tenant\"}"));
 
         shutdown.send(()).unwrap();
         handle.await.unwrap().unwrap();

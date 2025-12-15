@@ -1,5 +1,6 @@
 use barq_core::{Catalog, CatalogError, CollectionSchema, Document, Filter, TenantId};
 use barq_index::{DocumentId, IndexType};
+use metrics::{counter, gauge};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -130,6 +131,11 @@ impl Storage {
             usage.requests_in_window = usage.requests_in_window.saturating_add(1);
         }
 
+        let tenant_label = tenant.to_string();
+        counter!("tenant_requests_total", "tenant" => tenant_label.clone()).increment(1);
+        gauge!("tenant_usage_current_qps", "tenant" => tenant_label)
+            .set(usage.requests_in_window as f64);
+
         Ok(())
     }
 
@@ -195,15 +201,18 @@ impl Storage {
 
     fn adjust_usage(&mut self, tenant: &TenantId, collections: isize, docs: isize, bytes: isize) {
         self.ensure_tenant_state(tenant);
-        let usage = self
-            .tenant_usage
-            .get_mut(tenant)
-            .expect("usage must exist after ensure_tenant_state");
-        usage.collections = usage.collections.saturating_add_signed(collections);
-        usage.documents = usage.documents.saturating_add_signed(docs);
-        let byte_delta: i64 = bytes as i64;
-        usage.disk_bytes = usage.disk_bytes.saturating_add_signed(byte_delta);
-        usage.memory_bytes = usage.memory_bytes.saturating_add_signed(byte_delta);
+        {
+            let usage = self
+                .tenant_usage
+                .get_mut(tenant)
+                .expect("usage must exist after ensure_tenant_state");
+            usage.collections = usage.collections.saturating_add_signed(collections);
+            usage.documents = usage.documents.saturating_add_signed(docs);
+            let byte_delta: i64 = bytes as i64;
+            usage.disk_bytes = usage.disk_bytes.saturating_add_signed(byte_delta);
+            usage.memory_bytes = usage.memory_bytes.saturating_add_signed(byte_delta);
+        }
+        self.emit_usage_metrics(tenant);
     }
 
     fn document_size_bytes(&self, tenant: &TenantId, collection: &str, id: &DocumentId) -> usize {
@@ -225,6 +234,41 @@ impl Storage {
         vector_bytes + payload_bytes
     }
 
+    fn emit_usage_metrics(&self, tenant: &TenantId) {
+        let quota = self.tenant_quotas.get(tenant).cloned().unwrap_or_default();
+        if let Some(usage) = self.tenant_usage.get(tenant) {
+            self.record_usage_metrics(tenant, usage, &quota);
+        }
+    }
+
+    fn record_usage_metrics(&self, tenant: &TenantId, usage: &TenantUsage, quota: &TenantQuota) {
+        let tenant_label = tenant.to_string();
+
+        gauge!("tenant_usage_collections", "tenant" => tenant_label.clone())
+            .set(usage.collections as f64);
+        gauge!("tenant_usage_documents", "tenant" => tenant_label.clone())
+            .set(usage.documents as f64);
+        gauge!("tenant_usage_disk_bytes", "tenant" => tenant_label.clone())
+            .set(usage.disk_bytes as f64);
+        gauge!("tenant_usage_memory_bytes", "tenant" => tenant_label.clone())
+            .set(usage.memory_bytes as f64);
+        gauge!("tenant_usage_current_qps", "tenant" => tenant_label.clone())
+            .set(usage.requests_in_window as f64);
+
+        if let Some(max) = quota.max_collections {
+            gauge!("tenant_quota_collections", "tenant" => tenant_label.clone()).set(max as f64);
+        }
+        if let Some(max) = quota.max_disk_bytes {
+            gauge!("tenant_quota_disk_bytes", "tenant" => tenant_label.clone()).set(max as f64);
+        }
+        if let Some(max) = quota.max_memory_bytes {
+            gauge!("tenant_quota_memory_bytes", "tenant" => tenant_label.clone()).set(max as f64);
+        }
+        if let Some(max) = quota.max_qps {
+            gauge!("tenant_quota_qps", "tenant" => tenant_label).set(max as f64);
+        }
+    }
+
     fn recalculate_usage(&mut self) {
         self.tenant_usage.clear();
         for (tenant, collections) in self.catalog.tenants() {
@@ -241,12 +285,16 @@ impl Storage {
         // ensure default tenant exists
         let default = self.default_tenant.clone();
         self.ensure_tenant_state(&default);
+        for tenant in self.tenant_usage.keys() {
+            self.emit_usage_metrics(tenant);
+        }
     }
 
     pub fn tenant_usage_report(&mut self, tenant: &TenantId) -> TenantUsageReport {
         self.ensure_tenant_state(tenant);
         let usage = self.tenant_usage.get(tenant).cloned().unwrap_or_default();
         let quota = self.tenant_quotas.get(tenant).cloned().unwrap_or_default();
+        self.record_usage_metrics(tenant, &usage, &quota);
         TenantUsageReport {
             tenant: tenant.clone(),
             collections: usage.collections,
@@ -273,6 +321,7 @@ impl Storage {
             usage.requests_in_window = 0;
             usage.window_start = Instant::now();
         }
+        self.emit_usage_metrics(&tenant);
     }
 
     pub fn create_collection(&mut self, schema: CollectionSchema) -> Result<(), StorageError> {

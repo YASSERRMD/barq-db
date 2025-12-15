@@ -11,6 +11,7 @@ barq-index = { path = "../barq-index" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+metrics = "0.22"
 
 [dev-dependencies]
 tempfile = "3"
