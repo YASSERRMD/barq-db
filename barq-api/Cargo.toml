@@ -11,6 +11,7 @@ barq-core = { path = "../barq-core" }
 barq-index = { path = "../barq-index" }
 barq-bm25 = { path = "../barq-bm25" }
 barq-storage = { path = "../barq-storage" }
+barq-cluster = { path = "../barq-cluster" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
