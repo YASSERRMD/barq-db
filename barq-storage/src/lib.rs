@@ -7,7 +7,11 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::thread;
 use std::time::{Duration, Instant};
+
+mod object_store;
+pub use object_store::{LocalObjectStore, ObjectStore};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -373,6 +377,24 @@ impl Storage {
         Ok(manifest)
     }
 
+    /// Create a point-in-time snapshot and upload it to an object store in the background.
+    ///
+    /// The snapshot is first materialized locally and then copied using the provided
+    /// [`ObjectStore`] implementation. The returned thread handle can be `join`ed by the
+    /// caller to ensure completion or inspected for upload failures.
+    pub fn create_snapshot_and_upload<Store: ObjectStore + 'static + Send + Sync>(
+        &self,
+        snapshot_dir: impl AsRef<Path>,
+        object_store: Store,
+        remote_prefix: impl AsRef<Path>,
+    ) -> Result<thread::JoinHandle<Result<(), StorageError>>, StorageError> {
+        let snapshot_dir = snapshot_dir.as_ref().to_path_buf();
+        let remote_prefix = remote_prefix.as_ref().to_path_buf();
+        self.create_snapshot(&snapshot_dir)?;
+        let handle = thread::spawn(move || object_store.upload_dir(&snapshot_dir, &remote_prefix));
+        Ok(handle)
+    }
+
     pub fn restore_snapshot(
         target_root: impl AsRef<Path>,
         snapshot_dir: impl AsRef<Path>,
@@ -687,7 +709,7 @@ impl Storage {
         Ok(names)
     }
 
-    fn copy_dir_recursively(src: &Path, dest: &Path) -> Result<(), StorageError> {
+    pub(crate) fn copy_dir_recursively(src: &Path, dest: &Path) -> Result<(), StorageError> {
         fs::create_dir_all(dest)?;
         for entry in fs::read_dir(src)? {
             let entry = entry?;
@@ -848,6 +870,14 @@ mod tests {
         }
     }
 
+    fn sample_document(id: u64) -> Document {
+        Document {
+            id: DocumentId::U64(id),
+            vector: vec![1.0, 0.0, 0.0],
+            payload: Some(PayloadValue::String("doc".into())),
+        }
+    }
+
     #[test]
     fn wal_replay_restores_data() {
         let dir = tempfile::tempdir().unwrap();
@@ -930,5 +960,30 @@ mod tests {
             .vector_config()
             .unwrap();
         assert!(matches!(index_type, IndexType::Hnsw(_)));
+    }
+
+    #[test]
+    fn snapshot_uploads_to_object_store() {
+        let root = tempfile::tempdir().unwrap();
+        let mut storage = Storage::open(root.path()).unwrap();
+        let schema = sample_schema("upload");
+        storage.create_collection(schema.clone()).unwrap();
+        let doc = sample_document(1);
+        storage
+            .insert(&schema.name, doc.clone(), false)
+            .unwrap();
+
+        let snapshot_dir = tempfile::tempdir().unwrap();
+        let upload_root = tempfile::tempdir().unwrap();
+        let object_store = LocalObjectStore::new(upload_root.path());
+        let handle = storage
+            .create_snapshot_and_upload(snapshot_dir.path(), object_store.clone(), "snapshots/test")
+            .unwrap();
+        handle.join().unwrap().unwrap();
+
+        let uploaded_dir = upload_root.path().join("snapshots/test");
+        assert!(uploaded_dir.exists());
+        assert!(uploaded_dir.join("snapshot.json").exists());
+        assert!(uploaded_dir.join("tenants").exists());
     }
 }
