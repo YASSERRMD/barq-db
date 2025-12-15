@@ -46,9 +46,7 @@ impl AppState {
     }
 
     fn ensure_local_for_tenant(&self, tenant: &TenantId) -> Result<(), ApiError> {
-        self.map_cluster_local_result(
-            self.cluster.ensure_local(tenant.as_str(), None),
-        )
+        self.map_cluster_local_result(self.cluster.ensure_local(tenant.as_str(), None))
     }
 
     fn map_cluster_local_result(&self, result: Result<(), ClusterError>) -> Result<(), ApiError> {
