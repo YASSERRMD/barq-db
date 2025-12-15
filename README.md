@@ -1,5 +1,9 @@
 # Barq DB
 
+<p align="center">
+  <img src="assets/logo.jpg" alt="Barq DB Logo" width="300"/>
+</p>
+
 **Rust-Native, Cloud-Ready Vector & Hybrid Search Database**
 
 Barq is a lightning-fast vector database and hybrid search engine that unifies dense vectors, BM25-style sparse signals, and rich metadata filters into a single, cloud-native platform for RAG, semantic search, and recommendation workloads. 
