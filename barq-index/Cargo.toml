@@ -1,0 +1,11 @@
+[package]
+name = "barq-index"
+version = "0.1.0"
+edition = "2021"
+authors = ["Barq DB Contributors"]
+license = "Apache-2.0"
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+rayon.workspace = true
