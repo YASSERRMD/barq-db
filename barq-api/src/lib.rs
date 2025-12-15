@@ -1468,6 +1468,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn jwt_roles_enforced_for_admin_endpoints() {
+        init_tracing();
+        let dir = tempfile::tempdir().unwrap();
+        let tenant = TenantId::new("jwt-tenant");
+        let claims = HashMap::from([(
+            "writer-token".to_string(),
+            (tenant.clone(), ApiRole::Writer),
+        )]);
+        let auth = ApiAuth::new()
+            .require_keys()
+            .with_jwt_verifier(Arc::new(MapJwtVerifier { claims }));
+
+        let (addr, shutdown, handle) = start_test_server_with_auth(dir.path(), auth).await;
+        let client = Client::new();
+
+        let quota_body = serde_json::json!({
+            "max_collections": 1,
+            "max_disk_bytes": 1,
+            "max_memory_bytes": 1,
+            "max_qps": 1
+        });
+
+        let response = client
+            .put(format!("http://{}/tenants/{}/quota", addr, tenant.as_str()))
+            .header(axum::http::header::AUTHORIZATION, "Bearer writer-token")
+            .json(&quota_body)
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        shutdown.send(()).unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn writer_cannot_create_collection() {
         init_tracing();
         let dir = tempfile::tempdir().unwrap();
@@ -2069,6 +2106,26 @@ mod tests {
 
         shutdown.send(()).unwrap();
         handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn tls_server_rejects_missing_material() {
+        init_tracing();
+        let dir = tempfile::tempdir().unwrap();
+        let storage = sample_storage(dir.path());
+        let tls = TlsConfig::new("/missing/cert.pem", "/missing/key.pem");
+
+        let err = start_tls_server(
+            "127.0.0.1:0".parse().unwrap(),
+            storage,
+            ApiAuth::new(),
+            tls,
+            async {},
+        )
+        .await
+        .expect_err("server startup should fail when TLS material is missing");
+
+        assert!(matches!(err, ApiError::Tls(_)));
     }
 
     #[test]
