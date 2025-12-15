@@ -159,6 +159,16 @@ impl Storage {
         Ok(())
     }
 
+    pub fn get_document(
+        &self,
+        tenant: &TenantId,
+        collection: &str,
+        id: &DocumentId,
+    ) -> Result<Option<Document>, StorageError> {
+        let coll = self.catalog.collection(tenant, collection)?;
+        Ok(coll.get(id))
+    }
+
     fn ensure_tenant_state(&mut self, tenant: &TenantId) {
         self.tenant_quotas.entry(tenant.clone()).or_default();
         self.tenant_usage.entry(tenant.clone()).or_default();

@@ -218,6 +218,11 @@ pub struct ExplainResponse {
     pub result: Option<HybridSearchResult>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GetDocumentResponse {
+    pub document: Option<Document>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RebuildIndexRequest {
     #[serde(default)]
@@ -278,7 +283,10 @@ fn build_router_with_state(storage: Storage, auth: ApiAuth, cluster: ClusterRout
         .route("/collections", post(create_collection))
         .route("/collections/:name", delete(drop_collection))
         .route("/collections/:name/documents", post(insert_document))
-        .route("/collections/:name/documents/:id", delete(delete_document))
+        .route(
+            "/collections/:name/documents/:id",
+            get(get_document).delete(delete_document),
+        )
         .route(
             "/collections/:name/index/rebuild",
             post(rebuild_collection_index),
@@ -527,6 +535,29 @@ async fn delete_document(
         StatusCode::NOT_FOUND
     })
 }
+
+async fn get_document(
+    AxumPath((name, id)): AxumPath<(String, String)>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<GetDocumentResponse>, ApiError> {
+    let document_id: DocumentId = id.parse()?;
+    let identity = state
+        .auth
+        .authenticate(&headers, ApiPermission::Read, None)?;
+    let tenant = identity.tenant.clone();
+    
+    // Check if primary? Read can usually be from anywhere, but consistent read might need primary.
+    // For now, simple read.
+    
+    let storage = state.storage.lock().await; // Acquire lock
+    // Note: Storage::get_document is synchronous? Yes.
+    
+    let doc = storage.get_document(&tenant, &name, &document_id)?;
+    
+    Ok(Json(GetDocumentResponse { document: doc }))
+}
+
 
 async fn rebuild_collection_index(
     AxumPath(name): AxumPath<String>,
@@ -1145,7 +1176,7 @@ mod tests {
 
         let response = client
             .put(format!("http://{}/tenants/{}/quota", addr, tenant.as_str()))
-            .header(axum::http::header::AUTHORIZATION, "Bearer writer-token")
+            .header("Authorization", "Bearer writer-token")
             .json(&quota_body)
             .send()
             .await
@@ -1665,7 +1696,7 @@ mod tests {
 
         client
             .post(format!("http://{}/collections", addr))
-            .header(axum::http::header::AUTHORIZATION, "Bearer tenant-admin")
+            .header("Authorization", "Bearer tenant-admin")
             .json(&create_body)
             .send()
             .await
@@ -1681,7 +1712,7 @@ mod tests {
 
         client
             .post(format!("http://{}/collections/jwt-coll/documents", addr))
-            .header(axum::http::header::AUTHORIZATION, "Bearer tenant-admin")
+            .header("Authorization", "Bearer tenant-admin")
             .json(&insert_body)
             .send()
             .await
@@ -1696,7 +1727,7 @@ mod tests {
 
         let search = client
             .post(format!("http://{}/collections/jwt-coll/search", addr))
-            .header(axum::http::header::AUTHORIZATION, "Bearer reader-token")
+            .header("Authorization", "Bearer reader-token")
             .json(&search_body)
             .send()
             .await
@@ -1705,7 +1736,7 @@ mod tests {
 
         let metrics = client
             .get(format!("http://{}/metrics", addr))
-            .header(axum::http::header::AUTHORIZATION, "Bearer reader-token")
+            .header("Authorization", "Bearer reader-token")
             .send()
             .await
             .unwrap();

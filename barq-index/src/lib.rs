@@ -5,6 +5,9 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fmt;
 use std::str::FromStr;
 
+mod distance;
+use distance::*;
+
 #[derive(Debug, Copy, Clone, PartialEq)]
 struct OrderedScore(f32);
 
@@ -714,38 +717,9 @@ pub fn build_index(config: IndexConfig) -> Box<dyn VectorIndex> {
     }
 }
 
-fn dot_product(lhs: &[f32], rhs: &[f32]) -> f32 {
-    lhs.iter().zip(rhs).map(|(a, b)| a * b).sum()
-}
+// moved to distance.rs
 
-fn score_with_metric(metric: DistanceMetric, lhs: &[f32], rhs: &[f32]) -> f32 {
-    match metric {
-        DistanceMetric::L2 => -l2_distance(lhs, rhs),
-        DistanceMetric::Cosine => cosine_similarity(lhs, rhs),
-        DistanceMetric::Dot => dot_product(lhs, rhs),
-    }
-}
-
-fn l2_distance(lhs: &[f32], rhs: &[f32]) -> f32 {
-    lhs.iter()
-        .zip(rhs)
-        .map(|(a, b)| {
-            let diff = a - b;
-            diff * diff
-        })
-        .sum::<f32>()
-        .sqrt()
-}
-
-fn cosine_similarity(lhs: &[f32], rhs: &[f32]) -> f32 {
-    let dot = dot_product(lhs, rhs);
-    let norm_l = dot_product(lhs, lhs).sqrt();
-    let norm_r = dot_product(rhs, rhs).sqrt();
-    if norm_l == 0.0 || norm_r == 0.0 {
-        return 0.0;
-    }
-    dot / (norm_l * norm_r)
-}
+// functions moved to distance.rs
 
 #[cfg(test)]
 mod tests {

@@ -774,6 +774,16 @@ impl Collection {
         removed.is_some()
     }
 
+    pub fn get(&self, id: &DocumentId) -> Option<Document> {
+        let vector = self.vectors.get(id)?.clone();
+        let payload = self.payloads.get(id).cloned();
+        Some(Document {
+            id: id.clone(),
+            vector,
+            payload,
+        })
+    }
+
     pub fn search(&self, vector: &[f32], top_k: usize) -> Result<Vec<SearchResult>, CatalogError> {
         self.search_with_filter(vector, top_k, None)
     }
