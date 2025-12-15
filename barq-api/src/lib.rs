@@ -47,8 +47,7 @@ impl AppState {
 
     fn ensure_local_for_tenant(&self, tenant: &TenantId) -> Result<(), ApiError> {
         self.map_cluster_local_result(
-            self.cluster
-                .ensure_local(tenant.as_str(), Some(ReadPreference::Primary)),
+            self.cluster.ensure_local(tenant.as_str(), None),
         )
     }
 
@@ -388,6 +387,10 @@ pub fn build_router_with_auth(storage: Storage, auth: ApiAuth) -> Router {
     let cluster_config =
         ClusterConfig::from_env_or_default().expect("failed to load cluster config");
     let cluster = ClusterRouter::from_config(cluster_config).expect("invalid cluster config");
+    build_router_with_state(storage, auth, cluster)
+}
+
+fn build_router_with_state(storage: Storage, auth: ApiAuth, cluster: ClusterRouter) -> Router {
     let metrics = init_metrics_recorder();
     let state = AppState {
         storage: Arc::new(Mutex::new(storage)),
@@ -778,9 +781,11 @@ pub fn init_tracing() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use barq_cluster::{NodeConfig, NodeId, ShardId, ShardPlacement};
     use barq_core::TenantId;
     use barq_index::DocumentId;
     use reqwest::{Client, StatusCode};
+    use std::collections::HashMap;
     use std::net::SocketAddr;
     use std::path::Path;
     use tokio::sync::oneshot;
@@ -816,6 +821,29 @@ mod tests {
             let _ = rx.await;
         })
         .await;
+        (addr, tx, handle)
+    }
+
+    async fn start_test_server_with_cluster(
+        dir: &Path,
+        cluster: ClusterRouter,
+    ) -> (
+        SocketAddr,
+        oneshot::Sender<()>,
+        JoinHandle<Result<(), std::io::Error>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let storage = sample_storage(dir);
+        let app = super::build_router_with_state(storage, ApiAuth::new(), cluster);
+        let (tx, rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = rx.await;
+                })
+                .await
+        });
         (addr, tx, handle)
     }
 
@@ -885,6 +913,63 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.results.len(), 1);
+
+        shutdown.send(()).unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_routes_follow_configured_preference() {
+        init_tracing();
+        let dir = tempfile::tempdir().unwrap();
+
+        let cluster_config = ClusterConfig {
+            node_id: NodeId::new("node-2"),
+            nodes: vec![
+                NodeConfig {
+                    id: NodeId::new("node-0"),
+                    address: "http://node-0".into(),
+                },
+                NodeConfig {
+                    id: NodeId::new("node-1"),
+                    address: "http://node-1".into(),
+                },
+                NodeConfig {
+                    id: NodeId::new("node-2"),
+                    address: "http://node-2".into(),
+                },
+            ],
+            shard_count: 1,
+            replication_factor: 2,
+            read_preference: ReadPreference::Followers,
+            placements: HashMap::from([(
+                ShardId(0),
+                ShardPlacement {
+                    shard: ShardId(0),
+                    primary: NodeId::new("node-0"),
+                    replicas: vec![NodeId::new("node-1")],
+                },
+            )]),
+        };
+        let cluster = ClusterRouter::from_config(cluster_config).unwrap();
+
+        let (addr, shutdown, handle) = start_test_server_with_cluster(dir.path(), cluster).await;
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+
+        let response = client
+            .get(format!("http://{}/info", addr))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .expect("location header");
+        assert_eq!(location.to_str().unwrap(), "http://node-1");
 
         shutdown.send(()).unwrap();
         handle.await.unwrap().unwrap();
