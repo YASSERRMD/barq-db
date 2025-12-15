@@ -1,9 +1,11 @@
 use barq_core::{Catalog, CatalogError, CollectionSchema, Document, Filter, TenantId};
 use barq_index::{DocumentId, IndexType};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -15,6 +17,51 @@ pub enum StorageError {
 
     #[error("catalog error: {0}")]
     Catalog(#[from] CatalogError),
+
+    #[error("tenant {tenant} quota exceeded: {reason}")]
+    QuotaExceeded { tenant: TenantId, reason: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct TenantQuota {
+    pub max_collections: Option<usize>,
+    pub max_disk_bytes: Option<u64>,
+    pub max_memory_bytes: Option<u64>,
+    pub max_qps: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TenantUsageReport {
+    pub tenant: TenantId,
+    pub collections: usize,
+    pub documents: usize,
+    pub disk_bytes: u64,
+    pub memory_bytes: u64,
+    pub current_qps: u32,
+    pub quota: TenantQuota,
+}
+
+#[derive(Debug, Clone)]
+struct TenantUsage {
+    collections: usize,
+    documents: usize,
+    disk_bytes: u64,
+    memory_bytes: u64,
+    window_start: Instant,
+    requests_in_window: u32,
+}
+
+impl Default for TenantUsage {
+    fn default() -> Self {
+        Self {
+            collections: 0,
+            documents: 0,
+            disk_bytes: 0,
+            memory_bytes: 0,
+            window_start: Instant::now(),
+            requests_in_window: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +80,8 @@ pub struct Storage {
     root: PathBuf,
     catalog: Catalog,
     default_tenant: TenantId,
+    tenant_quotas: HashMap<TenantId, TenantQuota>,
+    tenant_usage: HashMap<TenantId, TenantUsage>,
 }
 
 impl Storage {
@@ -42,10 +91,188 @@ impl Storage {
             root,
             catalog: Catalog::new(),
             default_tenant: TenantId::default(),
+            tenant_quotas: HashMap::new(),
+            tenant_usage: HashMap::new(),
         };
         storage.ensure_tenant_root(&storage.default_tenant)?;
         storage.load_collections()?;
+        storage.recalculate_usage();
         Ok(storage)
+    }
+
+    fn ensure_tenant_state(&mut self, tenant: &TenantId) {
+        self.tenant_quotas.entry(tenant.clone()).or_default();
+        self.tenant_usage.entry(tenant.clone()).or_default();
+    }
+
+    fn enforce_qps(&mut self, tenant: &TenantId) -> Result<(), StorageError> {
+        self.ensure_tenant_state(tenant);
+        let quota = self.tenant_quotas.get(tenant).cloned().unwrap_or_default();
+        let usage = self
+            .tenant_usage
+            .get_mut(tenant)
+            .expect("usage must exist after ensure_tenant_state");
+
+        if let Some(max_qps) = quota.max_qps {
+            let now = Instant::now();
+            if now.duration_since(usage.window_start) >= Duration::from_secs(1) {
+                usage.window_start = now;
+                usage.requests_in_window = 0;
+            }
+            if usage.requests_in_window >= max_qps {
+                return Err(StorageError::QuotaExceeded {
+                    tenant: tenant.clone(),
+                    reason: format!("QPS limit {} exceeded", max_qps),
+                });
+            }
+            usage.requests_in_window += 1;
+        } else {
+            usage.requests_in_window = usage.requests_in_window.saturating_add(1);
+        }
+
+        Ok(())
+    }
+
+    fn enforce_capacity(
+        &mut self,
+        tenant: &TenantId,
+        projected_docs: isize,
+        projected_bytes: isize,
+    ) -> Result<(), StorageError> {
+        self.ensure_tenant_state(tenant);
+        let quota = self.tenant_quotas.get(tenant).cloned().unwrap_or_default();
+        let usage = self.tenant_usage.get(tenant).cloned().unwrap_or_default();
+
+        let docs = usage.documents as isize + projected_docs;
+        let disk = usage.disk_bytes as isize + projected_bytes;
+        let memory = usage.memory_bytes as isize + projected_bytes;
+
+        if let Some(limit) = quota.max_disk_bytes {
+            if disk > limit as isize {
+                return Err(StorageError::QuotaExceeded {
+                    tenant: tenant.clone(),
+                    reason: format!("disk limit {} exceeded", limit),
+                });
+            }
+        }
+
+        if let Some(limit) = quota.max_memory_bytes {
+            if memory > limit as isize {
+                return Err(StorageError::QuotaExceeded {
+                    tenant: tenant.clone(),
+                    reason: format!("memory limit {} exceeded", limit),
+                });
+            }
+        }
+
+        if docs < 0 || disk < 0 || memory < 0 {
+            return Err(StorageError::QuotaExceeded {
+                tenant: tenant.clone(),
+                reason: "calculated negative usage".into(),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn enforce_collection_limit(
+        &self,
+        tenant: &TenantId,
+        additional: usize,
+    ) -> Result<(), StorageError> {
+        let quota = self.tenant_quotas.get(tenant).cloned().unwrap_or_default();
+        let usage = self.tenant_usage.get(tenant).cloned().unwrap_or_default();
+        if let Some(max_collections) = quota.max_collections {
+            if usage.collections + additional > max_collections {
+                return Err(StorageError::QuotaExceeded {
+                    tenant: tenant.clone(),
+                    reason: format!("collection limit {} exceeded", max_collections),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn adjust_usage(&mut self, tenant: &TenantId, collections: isize, docs: isize, bytes: isize) {
+        self.ensure_tenant_state(tenant);
+        let usage = self
+            .tenant_usage
+            .get_mut(tenant)
+            .expect("usage must exist after ensure_tenant_state");
+        usage.collections = usage.collections.saturating_add_signed(collections);
+        usage.documents = usage.documents.saturating_add_signed(docs);
+        let byte_delta: i64 = bytes as i64;
+        usage.disk_bytes = usage.disk_bytes.saturating_add_signed(byte_delta);
+        usage.memory_bytes = usage.memory_bytes.saturating_add_signed(byte_delta);
+    }
+
+    fn document_size_bytes(&self, tenant: &TenantId, collection: &str, id: &DocumentId) -> usize {
+        if let Ok(coll) = self.catalog.collection(tenant, collection) {
+            coll.document_footprint(id).unwrap_or(0)
+        } else {
+            0
+        }
+    }
+
+    fn estimate_document_size(document: &Document) -> usize {
+        let vector_bytes = document.vector.len() * std::mem::size_of::<f32>();
+        let payload_bytes = document
+            .payload
+            .as_ref()
+            .and_then(|p| serde_json::to_vec(p).ok())
+            .map(|v| v.len())
+            .unwrap_or(0);
+        vector_bytes + payload_bytes
+    }
+
+    fn recalculate_usage(&mut self) {
+        self.tenant_usage.clear();
+        for (tenant, collections) in self.catalog.tenants() {
+            let mut usage = TenantUsage::default();
+            usage.collections = collections.len();
+            for collection in collections.values() {
+                let (docs, bytes) = collection.total_footprint();
+                usage.documents += docs;
+                usage.disk_bytes += bytes as u64;
+                usage.memory_bytes += bytes as u64;
+            }
+            self.tenant_usage.insert(tenant.clone(), usage);
+        }
+        // ensure default tenant exists
+        let default = self.default_tenant.clone();
+        self.ensure_tenant_state(&default);
+    }
+
+    pub fn tenant_usage_report(&mut self, tenant: &TenantId) -> TenantUsageReport {
+        self.ensure_tenant_state(tenant);
+        let usage = self.tenant_usage.get(tenant).cloned().unwrap_or_default();
+        let quota = self.tenant_quotas.get(tenant).cloned().unwrap_or_default();
+        TenantUsageReport {
+            tenant: tenant.clone(),
+            collections: usage.collections,
+            documents: usage.documents,
+            disk_bytes: usage.disk_bytes,
+            memory_bytes: usage.memory_bytes,
+            current_qps: usage.requests_in_window,
+            quota,
+        }
+    }
+
+    pub fn tenant_usage_reports(&mut self) -> Vec<TenantUsageReport> {
+        let tenants: Vec<_> = self.tenant_usage.keys().cloned().collect();
+        tenants
+            .iter()
+            .map(|tenant| self.tenant_usage_report(tenant))
+            .collect()
+    }
+
+    pub fn set_tenant_quota(&mut self, tenant: TenantId, quota: TenantQuota) {
+        self.ensure_tenant_state(&tenant);
+        self.tenant_quotas.insert(tenant.clone(), quota);
+        if let Some(usage) = self.tenant_usage.get_mut(&tenant) {
+            usage.requests_in_window = 0;
+            usage.window_start = Instant::now();
+        }
     }
 
     pub fn create_collection(&mut self, schema: CollectionSchema) -> Result<(), StorageError> {
@@ -58,13 +285,18 @@ impl Storage {
         mut schema: CollectionSchema,
     ) -> Result<(), StorageError> {
         let tenant = tenant.into();
+        self.ensure_tenant_state(&tenant);
+        self.enforce_qps(&tenant)?;
+        self.enforce_collection_limit(&tenant, 1)?;
         if schema.tenant_id != tenant {
             schema.tenant_id = tenant.clone();
         }
         self.ensure_tenant_root(&tenant)?;
         self.catalog
             .create_collection(tenant.clone(), schema.clone())?;
-        self.persist_schema(&tenant, &schema)
+        self.persist_schema(&tenant, &schema)?;
+        self.adjust_usage(&tenant, 1, 0, 0);
+        Ok(())
     }
 
     pub fn drop_collection(&mut self, name: &str) -> Result<(), StorageError> {
@@ -76,11 +308,19 @@ impl Storage {
         tenant: &TenantId,
         name: &str,
     ) -> Result<(), StorageError> {
+        self.ensure_tenant_state(tenant);
+        self.enforce_qps(tenant)?;
+        let (docs, bytes) = if let Ok(collection) = self.catalog.collection(tenant, name) {
+            collection.total_footprint()
+        } else {
+            (0, 0)
+        };
         self.catalog.drop_collection(tenant, name)?;
         let dir = self.collection_dir(tenant, name);
         if dir.exists() {
             fs::remove_dir_all(dir)?;
         }
+        self.adjust_usage(tenant, -1, -(docs as isize), -(bytes as isize));
         Ok(())
     }
 
@@ -100,6 +340,14 @@ impl Storage {
         document: Document,
         upsert: bool,
     ) -> Result<(), StorageError> {
+        self.ensure_tenant_state(tenant);
+        self.enforce_qps(tenant)?;
+        let previous_size = self.document_size_bytes(tenant, collection, &document.id);
+        let is_new = previous_size == 0;
+        let projected_docs = if is_new { 1 } else { 0 };
+        let new_size = Self::estimate_document_size(&document);
+        let delta_bytes = new_size as isize - previous_size as isize;
+        self.enforce_capacity(tenant, projected_docs, delta_bytes)?;
         {
             let coll = self.catalog.collection_mut(tenant, collection)?;
             if upsert {
@@ -108,6 +356,7 @@ impl Storage {
                 coll.insert(document.clone())?;
             }
         }
+        self.adjust_usage(tenant, 0, projected_docs, delta_bytes);
         self.append_wal(
             tenant,
             collection,
@@ -127,11 +376,15 @@ impl Storage {
         collection: &str,
         id: DocumentId,
     ) -> Result<bool, StorageError> {
+        self.ensure_tenant_state(tenant);
+        self.enforce_qps(tenant)?;
+        let existing_bytes = self.document_size_bytes(tenant, collection, &id);
         let removed = {
             let coll = self.catalog.collection_mut(tenant, collection)?;
             coll.delete(&id)
         };
         if removed {
+            self.adjust_usage(tenant, 0, -1, -(existing_bytes as isize));
             self.append_wal(
                 tenant,
                 collection,
@@ -144,51 +397,55 @@ impl Storage {
     }
 
     pub fn search(
-        &self,
+        &mut self,
         collection: &str,
         query: &[f32],
         top_k: usize,
         filter: Option<&Filter>,
     ) -> Result<Vec<barq_index::SearchResult>, StorageError> {
-        self.search_for_tenant(&self.default_tenant, collection, query, top_k, filter)
+        let default = self.default_tenant.clone();
+        self.search_for_tenant(&default, collection, query, top_k, filter)
     }
 
     pub fn search_for_tenant(
-        &self,
+        &mut self,
         tenant: &TenantId,
         collection: &str,
         query: &[f32],
         top_k: usize,
         filter: Option<&Filter>,
     ) -> Result<Vec<barq_index::SearchResult>, StorageError> {
+        self.enforce_qps(tenant)?;
         let coll = self.catalog.collection(tenant, collection)?;
         Ok(coll.search_with_filter(query, top_k, filter)?)
     }
 
     pub fn search_text(
-        &self,
+        &mut self,
         collection: &str,
         query: &str,
         top_k: usize,
         filter: Option<&Filter>,
     ) -> Result<Vec<barq_index::SearchResult>, StorageError> {
-        self.search_text_for_tenant(&self.default_tenant, collection, query, top_k, filter)
+        let default = self.default_tenant.clone();
+        self.search_text_for_tenant(&default, collection, query, top_k, filter)
     }
 
     pub fn search_text_for_tenant(
-        &self,
+        &mut self,
         tenant: &TenantId,
         collection: &str,
         query: &str,
         top_k: usize,
         filter: Option<&Filter>,
     ) -> Result<Vec<barq_index::SearchResult>, StorageError> {
+        self.enforce_qps(tenant)?;
         let coll = self.catalog.collection(tenant, collection)?;
         Ok(coll.search_text_with_filter(query, top_k, filter)?)
     }
 
     pub fn search_hybrid(
-        &self,
+        &mut self,
         collection: &str,
         vector: &[f32],
         query: &str,
@@ -196,19 +453,12 @@ impl Storage {
         weights: Option<barq_core::HybridWeights>,
         filter: Option<&Filter>,
     ) -> Result<Vec<barq_core::HybridSearchResult>, StorageError> {
-        self.search_hybrid_for_tenant(
-            &self.default_tenant,
-            collection,
-            vector,
-            query,
-            top_k,
-            weights,
-            filter,
-        )
+        let default = self.default_tenant.clone();
+        self.search_hybrid_for_tenant(&default, collection, vector, query, top_k, weights, filter)
     }
 
     pub fn search_hybrid_for_tenant(
-        &self,
+        &mut self,
         tenant: &TenantId,
         collection: &str,
         vector: &[f32],
@@ -217,12 +467,13 @@ impl Storage {
         weights: Option<barq_core::HybridWeights>,
         filter: Option<&Filter>,
     ) -> Result<Vec<barq_core::HybridSearchResult>, StorageError> {
+        self.enforce_qps(tenant)?;
         let coll = self.catalog.collection(tenant, collection)?;
         Ok(coll.search_hybrid(vector, query, top_k, weights, filter)?)
     }
 
     pub fn explain_hybrid(
-        &self,
+        &mut self,
         collection: &str,
         vector: &[f32],
         query: &str,
@@ -230,19 +481,12 @@ impl Storage {
         id: &barq_index::DocumentId,
         weights: Option<barq_core::HybridWeights>,
     ) -> Result<Option<barq_core::HybridSearchResult>, StorageError> {
-        self.explain_hybrid_for_tenant(
-            &self.default_tenant,
-            collection,
-            vector,
-            query,
-            top_k,
-            id,
-            weights,
-        )
+        let default = self.default_tenant.clone();
+        self.explain_hybrid_for_tenant(&default, collection, vector, query, top_k, id, weights)
     }
 
     pub fn explain_hybrid_for_tenant(
-        &self,
+        &mut self,
         tenant: &TenantId,
         collection: &str,
         vector: &[f32],
@@ -251,6 +495,7 @@ impl Storage {
         id: &barq_index::DocumentId,
         weights: Option<barq_core::HybridWeights>,
     ) -> Result<Option<barq_core::HybridSearchResult>, StorageError> {
+        self.enforce_qps(tenant)?;
         let coll = self.catalog.collection(tenant, collection)?;
         Ok(coll.explain_hybrid(vector, query, top_k, id, weights)?)
     }
@@ -269,6 +514,8 @@ impl Storage {
         collection: &str,
         index: Option<IndexType>,
     ) -> Result<(), StorageError> {
+        self.ensure_tenant_state(tenant);
+        self.enforce_qps(tenant)?;
         {
             let coll = self.catalog.collection_mut(tenant, collection)?;
             coll.rebuild_index(index)?;
@@ -476,7 +723,7 @@ mod tests {
                 .unwrap();
         }
 
-        let storage = Storage::open(dir.path()).unwrap();
+        let mut storage = Storage::open(dir.path()).unwrap();
         let results = storage.search("items", &[1.0, 0.0, 0.0], 1, None).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, DocumentId::U64(1));

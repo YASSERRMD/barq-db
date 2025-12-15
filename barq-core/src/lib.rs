@@ -729,6 +729,39 @@ impl Collection {
         self.insert(document)
     }
 
+    pub fn document_count(&self) -> usize {
+        self.vectors.len()
+    }
+
+    pub fn document_footprint(&self, id: &DocumentId) -> Option<usize> {
+        let vector_bytes = self
+            .vectors
+            .get(id)
+            .map(|v| v.len() * std::mem::size_of::<f32>());
+        let payload_bytes = self
+            .payloads
+            .get(id)
+            .and_then(|payload| serde_json::to_vec(payload).ok().map(|bytes| bytes.len()));
+        match (vector_bytes, payload_bytes) {
+            (Some(v), Some(p)) => Some(v + p),
+            (Some(v), None) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn total_footprint(&self) -> (usize, usize) {
+        let mut bytes = 0;
+        for (id, vector) in &self.vectors {
+            bytes += vector.len() * std::mem::size_of::<f32>();
+            if let Some(payload) = self.payloads.get(id) {
+                if let Ok(encoded) = serde_json::to_vec(payload) {
+                    bytes += encoded.len();
+                }
+            }
+        }
+        (self.document_count(), bytes)
+    }
+
     pub fn delete(&mut self, id: &DocumentId) -> bool {
         let removed = self.index.remove(id);
         self.vectors.remove(id);
@@ -1151,6 +1184,10 @@ impl Catalog {
             .get(tenant)
             .map(|c| c.keys().cloned().collect())
             .unwrap_or_default()
+    }
+
+    pub fn tenants(&self) -> impl Iterator<Item = (&TenantId, &HashMap<String, Collection>)> {
+        self.collections.iter()
     }
 }
 
