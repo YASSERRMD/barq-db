@@ -364,7 +364,7 @@ fn tenant_header(headers: &HeaderMap) -> Option<TenantId> {
         .map(TenantId::new)
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AuthMethod {
     Anonymous,
     ApiKey,
@@ -1104,6 +1104,7 @@ mod tests {
     use barq_cluster::{NodeConfig, NodeId, ReadPreference, ShardId, ShardPlacement};
     use barq_core::TenantId;
     use barq_index::DocumentId;
+    use axum::http::{header, HeaderMap, HeaderValue};
     use reqwest::{Client, StatusCode};
     use std::collections::HashMap;
     use std::net::SocketAddr;
@@ -1184,6 +1185,123 @@ mod tests {
                 subject: Some(format!("subject:{token}")),
             })
         }
+    }
+
+    #[test]
+    fn anonymous_allowed_when_keys_optional() {
+        let auth = ApiAuth::new();
+        let headers = HeaderMap::new();
+
+        let identity = auth
+            .authenticate(&headers, ApiPermission::Read, None)
+            .expect("anonymous access should be allowed when no keys are required");
+
+        assert_eq!(identity.role, ApiRole::Admin);
+        assert_eq!(identity.method, AuthMethod::Anonymous);
+    }
+
+    #[test]
+    fn bearer_token_rejected_without_verifier() {
+        let auth = ApiAuth::new().require_keys();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer token-1"),
+        );
+
+        let err = auth
+            .authenticate(&headers, ApiPermission::Read, None)
+            .expect_err("jwt should be rejected when no verifier is configured");
+
+        match err {
+            ApiError::Unauthorized(message) => {
+                assert!(message.contains("jwt auth not configured"));
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn jwt_enforces_role_and_tenant_scope() {
+        let claims = HashMap::from([(
+            "jwt-token".to_string(),
+            (TenantId::new("tenant-a"), ApiRole::Writer),
+        )]);
+        let auth = ApiAuth::new()
+            .require_keys()
+            .with_jwt_verifier(Arc::new(MapJwtVerifier { claims }));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer jwt-token"),
+        );
+
+        let path_tenant = TenantId::new("tenant-a");
+        let identity = auth
+            .authenticate(&headers, ApiPermission::Write, Some(&path_tenant))
+            .expect("writer role should allow write operations for matching tenant");
+        assert_eq!(identity.role, ApiRole::Writer);
+        assert_eq!(identity.tenant, path_tenant);
+
+        let err = auth
+            .authenticate(&headers, ApiPermission::Admin, Some(&path_tenant))
+            .expect_err("writer role must not have admin access");
+        assert!(matches!(err, ApiError::Forbidden(_)));
+    }
+
+    #[test]
+    fn tenant_mismatch_denied_for_jwt_and_header() {
+        let claims = HashMap::from([(
+            "jwt-token".to_string(),
+            (TenantId::new("tenant-a"), ApiRole::Reader),
+        )]);
+        let auth = ApiAuth::new()
+            .require_keys()
+            .with_jwt_verifier(Arc::new(MapJwtVerifier { claims }));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer jwt-token"),
+        );
+        headers.insert(
+            "x-tenant-id",
+            HeaderValue::from_static("tenant-b"),
+        );
+
+        let err = auth
+            .authenticate(&headers, ApiPermission::Read, None)
+            .expect_err("tenant mismatch should be forbidden");
+        assert!(matches!(err, ApiError::Forbidden(_)));
+    }
+
+    #[test]
+    fn api_key_tenant_mismatch_is_forbidden() {
+        let auth = ApiAuth::new().require_keys();
+        auth.insert("key-1", TenantId::new("tenant-a"), ApiRole::TenantAdmin);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("key-1"));
+
+        let err = auth
+            .authenticate(
+                &headers,
+                ApiPermission::TenantAdmin,
+                Some(&TenantId::new("tenant-b")),
+            )
+            .expect_err("mismatched tenant must be forbidden");
+        assert!(matches!(err, ApiError::Forbidden(_)));
+    }
+
+    #[test]
+    fn tls_config_validation_flags_missing_files() {
+        let tls = TlsConfig::new("/missing/cert.pem", "/missing/key.pem");
+
+        let err = tls
+            .validate()
+            .expect_err("missing files should trigger validation error");
+        assert!(matches!(err, ApiError::Tls(_)));
     }
 
     #[tokio::test]
