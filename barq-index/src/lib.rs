@@ -2,8 +2,6 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 
-pub mod bm25;
-
 #[derive(Debug, thiserror::Error)]
 pub enum VectorIndexError {
     #[error("vector dimension mismatch: expected {expected}, got {actual}")]
@@ -68,8 +66,6 @@ pub enum DistanceMetric {
     Cosine,
     Dot,
 }
-
-pub use bm25::{Analyzer, Bm25Config, Bm25Index, DocumentTerms, TextIndexError};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SearchResult {

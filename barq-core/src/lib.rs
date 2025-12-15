@@ -1,6 +1,6 @@
+use barq_bm25::{Bm25Config, Bm25Index, TextIndexError};
 use barq_index::{
-    Bm25Config, Bm25Index, DistanceMetric, DocumentId, DocumentIdError, FlatIndex, SearchResult,
-    TextIndexError, VectorIndex,
+    DistanceMetric, DocumentId, DocumentIdError, FlatIndex, SearchResult, VectorIndex,
 };
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};

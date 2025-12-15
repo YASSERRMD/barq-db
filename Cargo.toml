@@ -2,6 +2,7 @@
 members = [
     "barq-core",
     "barq-index",
+    "barq-bm25",
     "barq-storage",
     "barq-api",
 ]

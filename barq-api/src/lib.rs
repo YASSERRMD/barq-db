@@ -8,11 +8,12 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
+use barq_bm25::Bm25Config;
 use barq_core::{
     CollectionSchema, Document, FieldSchema, FieldType, HybridSearchResult, HybridWeights,
     PayloadValue,
 };
-use barq_index::{Bm25Config, DistanceMetric, DocumentId, DocumentIdError};
+use barq_index::{DistanceMetric, DocumentId, DocumentIdError};
 use barq_storage::Storage;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

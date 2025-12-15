@@ -2,7 +2,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::{DocumentId, DocumentIdError, SearchResult};
+use barq_index::{DocumentId, DocumentIdError, SearchResult};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TextIndexError {

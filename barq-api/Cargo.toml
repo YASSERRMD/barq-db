@@ -9,6 +9,7 @@ license = "Apache-2.0"
 axum = { version = "0.7", features = ["macros"] }
 barq-core = { path = "../barq-core" }
 barq-index = { path = "../barq-index" }
+barq-bm25 = { path = "../barq-bm25" }
 barq-storage = { path = "../barq-storage" }
 serde = { workspace = true }
 serde_json = { workspace = true }
