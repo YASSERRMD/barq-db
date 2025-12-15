@@ -10,6 +10,7 @@ use axum::{
     Json, Router,
 };
 use barq_bm25::Bm25Config;
+use barq_cluster::{ClusterConfig, ClusterError, ClusterRouter};
 use barq_core::{
     CollectionSchema, Document, FieldSchema, FieldType, Filter, HybridSearchResult, HybridWeights,
     PayloadValue, TenantId,
@@ -27,6 +28,30 @@ struct AppState {
     storage: Arc<Mutex<Storage>>,
     auth: ApiAuth,
     metrics: PrometheusHandle,
+    cluster: ClusterRouter,
+}
+
+impl AppState {
+    fn ensure_primary_for_tenant(&self, tenant: &TenantId) -> Result<(), ApiError> {
+        self.cluster
+            .ensure_primary(tenant.as_str())
+            .map_err(ApiError::Cluster)
+    }
+
+    fn ensure_primary_for_document(
+        &self,
+        tenant: &TenantId,
+        document: &DocumentId,
+    ) -> Result<(), ApiError> {
+        let key = format!("{}:{}", tenant.as_str(), document);
+        self.cluster.ensure_primary(&key).map_err(ApiError::Cluster)
+    }
+
+    fn ensure_local_for_tenant(&self, tenant: &TenantId) -> Result<(), ApiError> {
+        self.cluster
+            .ensure_local(tenant.as_str(), None)
+            .map_err(ApiError::Cluster)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -154,6 +179,9 @@ pub enum ApiError {
     #[error("storage error: {0}")]
     Storage(#[from] barq_storage::StorageError),
 
+    #[error("cluster error: {0}")]
+    Cluster(#[from] ClusterError),
+
     #[error("document id error: {0}")]
     DocumentId(#[from] DocumentIdError),
 
@@ -175,6 +203,7 @@ impl IntoResponse for ApiError {
             | ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ApiError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
+            ApiError::Cluster(_) => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::Storage(barq_storage::StorageError::QuotaExceeded { .. }) => {
                 StatusCode::TOO_MANY_REQUESTS
             }
@@ -332,11 +361,15 @@ pub fn build_router(storage: Storage) -> Router {
 }
 
 pub fn build_router_with_auth(storage: Storage, auth: ApiAuth) -> Router {
+    let cluster_config =
+        ClusterConfig::from_env_or_default().expect("failed to load cluster config");
+    let cluster = ClusterRouter::from_config(cluster_config).expect("invalid cluster config");
     let metrics = init_metrics_recorder();
     let state = AppState {
         storage: Arc::new(Mutex::new(storage)),
         auth,
         metrics,
+        cluster,
     };
 
     Router::new()
@@ -410,6 +443,7 @@ async fn info(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let identity = state.auth.authenticate(&headers, ApiRole::ReadOnly, None)?;
+    state.ensure_local_for_tenant(&identity.tenant)?;
     let mut storage = state.storage.lock().await;
     let usage = storage.tenant_usage_report(&identity.tenant);
     let count = usage.collections;
@@ -458,6 +492,7 @@ async fn create_collection(
         .auth
         .authenticate(&headers, ApiRole::Admin, None)?
         .tenant;
+    state.ensure_primary_for_tenant(&tenant)?;
     let schema = CollectionSchema {
         name: payload.name.clone(),
         fields,
@@ -479,6 +514,7 @@ async fn drop_collection(
         .auth
         .authenticate(&headers, ApiRole::Admin, None)?
         .tenant;
+    state.ensure_primary_for_tenant(&tenant)?;
     let mut storage = state.storage.lock().await;
     storage.drop_collection_for_tenant(&tenant, &name)?;
     Ok(StatusCode::NO_CONTENT)
@@ -495,6 +531,7 @@ async fn insert_document(
         .authenticate(&headers, ApiRole::ReadWrite, None)?
         .tenant;
     let document_id: DocumentId = payload.id.try_into()?;
+    state.ensure_primary_for_document(&tenant, &document_id)?;
     let document = Document {
         id: document_id,
         vector: payload.vector,
@@ -515,6 +552,7 @@ async fn delete_document(
         .auth
         .authenticate(&headers, ApiRole::ReadWrite, None)?
         .tenant;
+    state.ensure_primary_for_document(&tenant, &document_id)?;
     let mut storage = state.storage.lock().await;
     let existed = storage.delete_for_tenant(&tenant, &name, document_id)?;
     Ok(if existed {
@@ -534,6 +572,7 @@ async fn rebuild_collection_index(
         .auth
         .authenticate(&headers, ApiRole::Admin, None)?
         .tenant;
+    state.ensure_primary_for_tenant(&tenant)?;
     {
         let storage = state.storage.lock().await;
         storage.collection_schema_for_tenant(&tenant, &name)?;
@@ -564,6 +603,7 @@ async fn search_collection(
         .auth
         .authenticate(&headers, ApiRole::ReadOnly, None)?
         .tenant;
+    state.ensure_local_for_tenant(&tenant)?;
     if payload.top_k == 0 {
         return Err(ApiError::BadRequest("top_k must be positive".into()));
     }
@@ -588,6 +628,7 @@ async fn search_text_collection(
         .auth
         .authenticate(&headers, ApiRole::ReadOnly, None)?
         .tenant;
+    state.ensure_local_for_tenant(&tenant)?;
     if payload.top_k == 0 {
         return Err(ApiError::BadRequest("top_k must be positive".into()));
     }
@@ -612,6 +653,7 @@ async fn search_hybrid_collection(
         .auth
         .authenticate(&headers, ApiRole::ReadOnly, None)?
         .tenant;
+    state.ensure_local_for_tenant(&tenant)?;
     if payload.top_k == 0 {
         return Err(ApiError::BadRequest("top_k must be positive".into()));
     }
@@ -638,6 +680,7 @@ async fn explain_hybrid_collection(
         .auth
         .authenticate(&headers, ApiRole::ReadOnly, None)?
         .tenant;
+    state.ensure_local_for_tenant(&tenant)?;
     if payload.top_k == 0 {
         return Err(ApiError::BadRequest("top_k must be positive".into()));
     }
@@ -664,6 +707,7 @@ async fn tenant_usage(
     let _ = state
         .auth
         .authenticate(&headers, ApiRole::Admin, Some(&tenant_id))?;
+    state.ensure_local_for_tenant(&tenant_id)?;
     let mut storage = state.storage.lock().await;
     let report = storage.tenant_usage_report(&tenant_id);
     Ok(Json(report))
@@ -679,6 +723,7 @@ async fn set_tenant_quota(
     let _ = state
         .auth
         .authenticate(&headers, ApiRole::Admin, Some(&tenant_id))?;
+    state.ensure_primary_for_tenant(&tenant_id)?;
     let mut storage = state.storage.lock().await;
     storage.set_tenant_quota(tenant_id, payload.into());
     Ok(StatusCode::ACCEPTED)
