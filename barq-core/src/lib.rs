@@ -551,6 +551,27 @@ pub struct HybridSearchResult {
 
 impl CollectionSchema {
     pub fn validate(&self) -> Result<(), CatalogError> {
+        if self.name.trim().is_empty() {
+            return Err(CatalogError::InvalidSchema(
+                "collection name cannot be empty".to_string(),
+            ));
+        }
+
+        let mut seen_fields = HashSet::new();
+        for field in &self.fields {
+            if field.name.trim().is_empty() {
+                return Err(CatalogError::InvalidSchema(
+                    "field name cannot be empty".to_string(),
+                ));
+            }
+            if !seen_fields.insert(field.name.clone()) {
+                return Err(CatalogError::InvalidSchema(format!(
+                    "duplicate field name: {}",
+                    field.name
+                )));
+            }
+        }
+
         let vector_fields: Vec<_> = self
             .fields
             .iter()
@@ -1234,6 +1255,33 @@ mod tests {
             bm25_config: None,
             tenant_id: TenantId::default(),
         }
+    }
+
+    #[test]
+    fn collection_validation_rejects_empty_names() {
+        let mut schema = sample_schema();
+        schema.name = "   ".to_string();
+        let err = schema.validate().expect_err("expected validation failure");
+        assert!(matches!(err, CatalogError::InvalidSchema(msg) if msg.contains("collection name")));
+
+        let mut schema = sample_schema();
+        schema.fields[0].name = "".to_string();
+        let err = schema.validate().expect_err("expected validation failure");
+        assert!(matches!(err, CatalogError::InvalidSchema(msg) if msg.contains("field name")));
+    }
+
+    #[test]
+    fn collection_validation_rejects_duplicate_fields() {
+        let mut schema = json_schema();
+        schema.fields.push(FieldSchema {
+            name: "attrs".to_string(),
+            field_type: FieldType::Json,
+            required: false,
+        });
+        let err = schema.validate().expect_err("expected validation failure");
+        assert!(
+            matches!(err, CatalogError::InvalidSchema(msg) if msg.contains("duplicate field name"))
+        );
     }
 
     #[test]
