@@ -93,6 +93,13 @@ pub struct WalEntry {
     pub op: WalOp,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SegmentMetadata {
+    pub file_name: String,
+    pub created_at: DateTime<Utc>,
+    pub entries: usize,
+}
+
 #[derive(Debug)]
 pub struct Storage {
     root: PathBuf,
@@ -126,6 +133,25 @@ impl Storage {
         let snapshot_dir = snapshot_dir.as_ref();
         Self::restore_snapshot(root, snapshot_dir)?;
         Self::open(root)
+    }
+
+    fn apply_entry(
+        &mut self,
+        tenant: &TenantId,
+        collection: &str,
+        entry: WalEntry,
+    ) -> Result<(), StorageError> {
+        match entry.op {
+            WalOp::Insert(doc) => {
+                let coll = self.catalog.collection_mut(tenant, collection)?;
+                coll.upsert(doc)?;
+            }
+            WalOp::Delete(id) => {
+                let coll = self.catalog.collection_mut(tenant, collection)?;
+                coll.delete(&id);
+            }
+        }
+        Ok(())
     }
 
     fn ensure_tenant_state(&mut self, tenant: &TenantId) {
@@ -442,6 +468,139 @@ impl Storage {
         fs::create_dir_all(snapshot_dir)?;
         object_store.download_dir(remote_prefix.as_ref(), snapshot_dir)?;
         Self::restore_snapshot(target_root, snapshot_dir)
+    }
+
+    /// Flush the current WAL for a collection into an immutable segment.
+    /// This reduces startup replay time and prepares cold data for background upload.
+    pub fn flush_wal_to_segment(
+        &mut self,
+        tenant: &TenantId,
+        collection: &str,
+    ) -> Result<SegmentMetadata, StorageError> {
+        self.ensure_tenant_state(tenant);
+        self.enforce_qps(tenant)?;
+        let wal_path = self.wal_path(tenant, collection);
+        if !wal_path.exists() {
+            return Ok(SegmentMetadata {
+                file_name: String::new(),
+                created_at: Utc::now(),
+                entries: 0,
+            });
+        }
+
+        let segments_dir = self.segments_dir(tenant, collection);
+        fs::create_dir_all(&segments_dir)?;
+        let file_name = format!("segment_{}.jsonl", Utc::now().format("%Y%m%d%H%M%S%3f"));
+        let segment_path = segments_dir.join(&file_name);
+        let mut segment_file = File::create(&segment_path)?;
+        let wal_file = File::open(&wal_path)?;
+        let reader = BufReader::new(wal_file);
+        let mut entries = 0usize;
+        for line in reader.lines() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            segment_file.write_all(line.as_bytes())?;
+            segment_file.write_all(b"\n")?;
+            entries += 1;
+        }
+        segment_file.flush()?;
+        fs::remove_file(&wal_path)?;
+
+        Ok(SegmentMetadata {
+            file_name,
+            created_at: Utc::now(),
+            entries,
+        })
+    }
+
+    /// Merge all existing immutable segments for a collection into a single compacted segment.
+    ///
+    /// Compaction keeps only the latest version of each document and discards tombstones,
+    /// producing a smaller on-disk footprint for backups and uploads.
+    pub fn compact_segments(
+        &mut self,
+        tenant: &TenantId,
+        collection: &str,
+    ) -> Result<SegmentMetadata, StorageError> {
+        self.ensure_tenant_state(tenant);
+        self.enforce_qps(tenant)?;
+        let segments = self.segment_files(tenant, collection)?;
+        if segments.is_empty() {
+            return Ok(SegmentMetadata {
+                file_name: String::new(),
+                created_at: Utc::now(),
+                entries: 0,
+            });
+        }
+
+        let mut latest: HashMap<DocumentId, WalOp> = HashMap::new();
+        for segment in &segments {
+            let file = File::open(segment)?;
+            let reader = BufReader::new(file);
+            for line in reader.lines() {
+                let line = line?;
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let entry: WalEntry = serde_json::from_str(&line)?;
+                match &entry.op {
+                    WalOp::Insert(doc) => {
+                        latest.insert(doc.id.clone(), WalOp::Insert(doc.clone()));
+                    }
+                    WalOp::Delete(id) => {
+                        latest.insert(id.clone(), WalOp::Delete(id.clone()));
+                    }
+                }
+            }
+        }
+
+        let segments_dir = self.segments_dir(tenant, collection);
+        let file_name = format!(
+            "segment_compacted_{}.jsonl",
+            Utc::now().format("%Y%m%d%H%M%S%3f")
+        );
+        let compacted_path = segments_dir.join(&file_name);
+        fs::create_dir_all(&segments_dir)?;
+        let mut compacted_file = File::create(&compacted_path)?;
+        let mut entries = 0usize;
+        for op in latest.values() {
+            let entry = WalEntry { op: op.clone() };
+            let line = serde_json::to_string(&entry)?;
+            compacted_file.write_all(line.as_bytes())?;
+            compacted_file.write_all(b"\n")?;
+            entries += 1;
+        }
+        compacted_file.flush()?;
+
+        for segment in segments {
+            fs::remove_file(segment)?;
+        }
+
+        Ok(SegmentMetadata {
+            file_name,
+            created_at: Utc::now(),
+            entries,
+        })
+    }
+
+    /// Upload all immutable segments for a collection using the provided object store.
+    ///
+    /// This is useful for asynchronous offloading of cold data without blocking writes.
+    pub fn upload_cold_segments<Store: ObjectStore + 'static + Send + Sync + Clone>(
+        &self,
+        tenant: &TenantId,
+        collection: &str,
+        object_store: Store,
+        remote_prefix: impl AsRef<Path>,
+    ) -> Result<thread::JoinHandle<Result<(), StorageError>>, StorageError> {
+        let local_segments = self.segments_dir(tenant, collection);
+        let remote_prefix = remote_prefix.as_ref().to_path_buf();
+        fs::create_dir_all(&local_segments)?;
+        let handle =
+            thread::spawn(move || object_store.upload_dir(&local_segments, &remote_prefix));
+        Ok(handle)
     }
 
     pub fn create_collection(&mut self, schema: CollectionSchema) -> Result<(), StorageError> {
@@ -775,7 +934,25 @@ impl Storage {
                     schema.tenant_id = tenant.clone();
                 }
                 self.catalog.create_collection(tenant.clone(), schema)?;
+                self.replay_segments(&tenant, &name)?;
                 self.replay_wal(&tenant, &name)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn replay_segments(&mut self, tenant: &TenantId, collection: &str) -> Result<(), StorageError> {
+        let segments = self.segment_files(tenant, collection)?;
+        for segment in segments {
+            let file = File::open(&segment)?;
+            let reader = BufReader::new(file);
+            for line in reader.lines() {
+                let line = line?;
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let entry: WalEntry = serde_json::from_str(&line)?;
+                self.apply_entry(tenant, collection, entry)?;
             }
         }
         Ok(())
@@ -794,17 +971,8 @@ impl Storage {
                 continue;
             }
             let entry: WalEntry = serde_json::from_str(&line)?;
-            match entry.op {
-                WalOp::Insert(doc) => {
-                    let coll = self.catalog.collection_mut(tenant, collection)?;
-                    // Use upsert semantics during replay to guarantee last write wins.
-                    coll.upsert(doc)?;
-                }
-                WalOp::Delete(id) => {
-                    let coll = self.catalog.collection_mut(tenant, collection)?;
-                    coll.delete(&id);
-                }
-            }
+            // Use upsert semantics during replay to guarantee last write wins.
+            self.apply_entry(tenant, collection, entry)?;
         }
         Ok(())
     }
@@ -846,6 +1014,24 @@ impl Storage {
 
     fn wal_path(&self, tenant: &TenantId, name: &str) -> PathBuf {
         self.collection_dir(tenant, name).join("wal.jsonl")
+    }
+
+    fn segments_dir(&self, tenant: &TenantId, name: &str) -> PathBuf {
+        self.collection_dir(tenant, name).join("segments")
+    }
+
+    fn segment_files(&self, tenant: &TenantId, name: &str) -> Result<Vec<PathBuf>, StorageError> {
+        let dir = self.segments_dir(tenant, name);
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut files: Vec<PathBuf> = fs::read_dir(&dir)?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().map(|ft| ft.is_file()).unwrap_or(false))
+            .map(|entry| entry.path())
+            .collect();
+        files.sort();
+        Ok(files)
     }
 
     fn collections_root(&self, tenant: &TenantId) -> PathBuf {
@@ -1037,5 +1223,173 @@ mod tests {
         let results = restored.search(&schema.name, &doc.vector, 1, None).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, doc.id);
+    }
+
+    #[test]
+    fn flushes_wal_to_segments_and_recovers() {
+        let root = tempfile::tempdir().unwrap();
+        let tenant = TenantId::default();
+        {
+            let mut storage = Storage::open(root.path()).unwrap();
+            storage.create_collection(sample_schema("items")).unwrap();
+            storage
+                .insert(
+                    "items",
+                    Document {
+                        id: DocumentId::U64(7),
+                        vector: vec![0.0, 0.0, 1.0],
+                        payload: Some(PayloadValue::String("persisted".into())),
+                    },
+                    false,
+                )
+                .unwrap();
+            storage
+                .flush_wal_to_segment(&tenant, "items")
+                .expect("flush should succeed");
+        }
+
+        let mut reopened = Storage::open(root.path()).unwrap();
+        let results = reopened.search("items", &[0.0, 0.0, 1.0], 1, None).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, DocumentId::U64(7));
+    }
+
+    #[test]
+    fn compaction_keeps_latest_versions() {
+        let root = tempfile::tempdir().unwrap();
+        let tenant = TenantId::default();
+        let mut storage = Storage::open(root.path()).unwrap();
+        storage.create_collection(sample_schema("items")).unwrap();
+
+        storage
+            .insert(
+                "items",
+                Document {
+                    id: DocumentId::U64(1),
+                    vector: vec![1.0, 0.0, 0.0],
+                    payload: Some(PayloadValue::String("v1".into())),
+                },
+                false,
+            )
+            .unwrap();
+        storage.flush_wal_to_segment(&tenant, "items").unwrap();
+
+        storage
+            .insert(
+                "items",
+                Document {
+                    id: DocumentId::U64(1),
+                    vector: vec![1.0, 1.0, 0.0],
+                    payload: Some(PayloadValue::String("v2".into())),
+                },
+                true,
+            )
+            .unwrap();
+        storage.flush_wal_to_segment(&tenant, "items").unwrap();
+
+        let meta = storage
+            .compact_segments(&tenant, "items")
+            .expect("compaction should succeed");
+        assert!(meta.entries >= 1);
+
+        drop(storage);
+        let mut restored = Storage::open(root.path()).unwrap();
+        let results = restored.search("items", &[1.0, 1.0, 0.0], 1, None).unwrap();
+        assert_eq!(results.len(), 1);
+        let segments_dir = root
+            .path()
+            .join("tenants")
+            .join(tenant.as_str())
+            .join("collections/items/segments");
+        let files: Vec<_> = std::fs::read_dir(&segments_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().map(|f| f.is_file()).unwrap_or(false))
+            .collect();
+        assert_eq!(files.len(), 1, "compaction should leave one segment");
+    }
+
+    #[test]
+    fn uploads_cold_segments_in_background() {
+        let root = tempfile::tempdir().unwrap();
+        let upload_root = tempfile::tempdir().unwrap();
+        let tenant = TenantId::default();
+        let mut storage = Storage::open(root.path()).unwrap();
+        let schema = sample_schema("bg_upload");
+        storage.create_collection(schema.clone()).unwrap();
+        storage
+            .insert(&schema.name, sample_document(9), false)
+            .unwrap();
+        storage.flush_wal_to_segment(&tenant, &schema.name).unwrap();
+
+        let object_store = LocalObjectStore::new(upload_root.path());
+        let handle = storage
+            .upload_cold_segments(
+                &tenant,
+                &schema.name,
+                object_store.clone(),
+                "segments/upload",
+            )
+            .expect("upload should spawn");
+        handle.join().unwrap().unwrap();
+
+        let uploaded_dir = upload_root.path().join("segments/upload");
+        assert!(uploaded_dir.exists());
+        let files: Vec<_> = std::fs::read_dir(&uploaded_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().map(|f| f.is_file()).unwrap_or(false))
+            .collect();
+        assert!(!files.is_empty());
+    }
+
+    #[test]
+    fn snapshot_round_trip_large_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot_dir = tempfile::tempdir().unwrap();
+        let upload_root = tempfile::tempdir().unwrap();
+
+        let mut storage = Storage::open(dir.path()).unwrap();
+        let schema = sample_schema("large");
+        storage.create_collection(schema.clone()).unwrap();
+        for id in 1..=200 {
+            storage
+                .insert(
+                    &schema.name,
+                    Document {
+                        id: DocumentId::U64(id),
+                        vector: vec![id as f32, 0.0, 0.0],
+                        payload: Some(PayloadValue::String(format!("doc-{id}"))),
+                    },
+                    false,
+                )
+                .unwrap();
+        }
+        storage
+            .flush_wal_to_segment(&TenantId::default(), &schema.name)
+            .unwrap();
+        storage
+            .create_snapshot(snapshot_dir.path())
+            .expect("snapshot should succeed");
+        let object_store = LocalObjectStore::new(upload_root.path());
+        object_store
+            .upload_dir(snapshot_dir.path(), std::path::Path::new("snapshots/large"))
+            .unwrap();
+
+        let restore_root = tempfile::tempdir().unwrap();
+        Storage::restore_snapshot_from_object_store(
+            restore_root.path(),
+            tempfile::tempdir().unwrap().path(),
+            object_store,
+            std::path::Path::new("snapshots/large"),
+        )
+        .expect("restore should succeed");
+
+        let mut restored = Storage::open(restore_root.path()).unwrap();
+        let results = restored
+            .search(&schema.name, &[199.0, 0.0, 0.0], 1, None)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, DocumentId::U64(199));
     }
 }
