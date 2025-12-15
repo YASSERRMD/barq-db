@@ -1347,6 +1347,22 @@ mod tests {
         assert!(matches!(err, ApiError::Tls(_)));
     }
 
+    #[test]
+    fn tls_config_rejects_invalid_certificate_material() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let cert_path = tempdir.path().join("cert.pem");
+        let key_path = tempdir.path().join("key.pem");
+        std::fs::write(&cert_path, b"not-a-pem").unwrap();
+        std::fs::write(&key_path, b"still-not-a-pem").unwrap();
+
+        let tls = TlsConfig::new(&cert_path, &key_path);
+        let err = tls
+            .build_server_config()
+            .expect_err("invalid PEM material should fail TLS setup");
+
+        assert!(matches!(err, ApiError::Tls(_)));
+    }
+
     #[tokio::test]
     async fn integration_flow_restart_persists() {
         init_tracing();
@@ -1413,6 +1429,71 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.results.len(), 1);
+
+        shutdown.send(()).unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn tenant_admin_endpoints_reject_ops_role() {
+        init_tracing();
+        let dir = tempfile::tempdir().unwrap();
+        let tenant = TenantId::new("secure-tenant");
+        let auth = ApiAuth::new().require_keys();
+        auth.insert("ops-key", tenant.clone(), ApiRole::Ops);
+
+        let (addr, shutdown, handle) = start_test_server_with_auth(dir.path(), auth).await;
+        let client = Client::new();
+
+        let quota_body = serde_json::json!({
+            "max_collections": 1,
+            "max_disk_bytes": 1,
+            "max_memory_bytes": 1,
+            "max_qps": 1
+        });
+
+        let response = client
+            .put(format!("http://{}/tenants/{}/quota", addr, tenant.as_str()))
+            .header("x-api-key", "ops-key")
+            .header("x-tenant-id", tenant.as_str())
+            .json(&quota_body)
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        shutdown.send(()).unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn writer_cannot_create_collection() {
+        init_tracing();
+        let dir = tempfile::tempdir().unwrap();
+        let tenant = TenantId::new("writer-tenant");
+        let auth = ApiAuth::new().require_keys();
+        auth.insert("writer-key", tenant.clone(), ApiRole::Writer);
+
+        let (addr, shutdown, handle) = start_test_server_with_auth(dir.path(), auth).await;
+        let client = Client::new();
+
+        let create_body = serde_json::json!({
+            "name": "blocked",
+            "dimension": 3,
+            "metric": "Cosine"
+        });
+
+        let response = client
+            .post(format!("http://{}/collections", addr))
+            .header("x-api-key", "writer-key")
+            .header("x-tenant-id", tenant.as_str())
+            .json(&create_body)
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
 
         shutdown.send(()).unwrap();
         handle.await.unwrap().unwrap();
