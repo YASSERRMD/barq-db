@@ -12,3 +12,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 barq-core = { path = "../barq-core" }
+
+[dev-dependencies]
+chrono = "0.4"
+barq-index = { path = "../barq-index" }
