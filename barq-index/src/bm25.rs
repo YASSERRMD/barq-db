@@ -133,6 +133,24 @@ impl Bm25Index {
         self.documents.len()
     }
 
+    pub fn document_frequency(&self, term: &str) -> usize {
+        self.postings.get(term).map(|p| p.len()).unwrap_or(0)
+    }
+
+    pub fn term_frequency(&self, doc_id: &DocumentId, term: &str) -> Option<usize> {
+        self.documents
+            .get(doc_id)
+            .and_then(|terms| terms.frequencies.get(term).copied())
+    }
+
+    pub fn document_length(&self, doc_id: &DocumentId) -> Option<usize> {
+        self.documents.get(doc_id).map(|terms| terms.length)
+    }
+
+    pub fn config(&self) -> Bm25Config {
+        self.config
+    }
+
     pub fn avg_doc_length(&self) -> f32 {
         if self.documents.is_empty() {
             0.0
@@ -237,5 +255,44 @@ mod tests {
         let index = Bm25Index::new(Bm25Config::default());
         let err = index.search("hi", 0).unwrap_err();
         matches!(err, TextIndexError::InvalidTopK { .. });
+    }
+
+    #[test]
+    fn tracks_document_statistics() {
+        let mut index = Bm25Index::new(Bm25Config::default());
+        index
+            .insert(DocumentId::U64(1), &["Rust language book".to_string()])
+            .unwrap();
+        index
+            .insert(DocumentId::U64(2), &["Rust programming guide".to_string()])
+            .unwrap();
+
+        assert_eq!(index.document_count(), 2);
+        assert_eq!(index.document_frequency("rust"), 2);
+        assert_eq!(index.term_frequency(&DocumentId::U64(1), "rust"), Some(1));
+        assert!(index.avg_doc_length() > 0.0);
+
+        index.remove(&DocumentId::U64(1));
+        assert_eq!(index.document_frequency("rust"), 1);
+        assert_eq!(index.document_length(&DocumentId::U64(2)), Some(3));
+    }
+
+    #[test]
+    fn respects_custom_config() {
+        let config = Bm25Config { k1: 0.9, b: 0.0 };
+        let mut index = Bm25Index::new(config);
+        index
+            .insert(DocumentId::U64(1), &["rust rust guide".to_string()])
+            .unwrap();
+        index
+            .insert(DocumentId::U64(2), &["rust reference".to_string()])
+            .unwrap();
+
+        let results = index.search("rust", 2).unwrap();
+        let idf = (((2.0f32 - 2.0 + 0.5) / (2.0 + 0.5)) + 1.0).ln();
+        let tf = 2.0f32;
+        let expected_score = idf * (tf * (config.k1 + 1.0) / (tf + config.k1));
+        assert!((results[0].score - expected_score).abs() < 1e-5);
+        assert_eq!(index.config(), config);
     }
 }

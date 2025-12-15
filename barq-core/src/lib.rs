@@ -46,10 +46,12 @@ pub struct FieldSchema {
     pub required: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CollectionSchema {
     pub name: String,
     pub fields: Vec<FieldSchema>,
+    #[serde(default)]
+    pub bm25_config: Option<Bm25Config>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -130,6 +132,10 @@ impl CollectionSchema {
         })
     }
 
+    pub fn bm25_config(&self) -> Bm25Config {
+        self.bm25_config.unwrap_or_default()
+    }
+
     pub fn indexed_text_fields(&self) -> Vec<String> {
         self.fields
             .iter()
@@ -157,6 +163,7 @@ impl Collection {
             .vector_config()
             .ok_or_else(|| CatalogError::InvalidSchema("schema missing vector field".into()))?;
         let has_text_index = !schema.indexed_text_fields().is_empty();
+        let bm25_config = schema.bm25_config();
 
         Ok(Self {
             schema,
@@ -164,7 +171,7 @@ impl Collection {
             payloads: HashMap::new(),
             dimension,
             text_index: if has_text_index {
-                Some(Bm25Index::new(Bm25Config::default()))
+                Some(Bm25Index::new(bm25_config))
             } else {
                 None
             },
@@ -477,6 +484,7 @@ mod tests {
                 },
                 required: true,
             }],
+            bm25_config: None,
         }
     }
 
@@ -498,6 +506,7 @@ mod tests {
                     required: true,
                 },
             ],
+            bm25_config: None,
         }
     }
 
@@ -624,5 +633,17 @@ mod tests {
         let first = &results[0];
         assert!(first.bm25_score.is_some());
         assert!(first.vector_score.is_some());
+    }
+
+    #[test]
+    fn bm25_config_is_applied() {
+        let mut schema = text_schema();
+        schema.bm25_config = Some(Bm25Config { k1: 1.7, b: 0.6 });
+        let mut catalog = Catalog::new();
+        catalog.create_collection(schema.clone()).unwrap();
+        let collection = catalog.collection_mut("articles").unwrap();
+        assert_eq!(collection.schema.bm25_config, schema.bm25_config);
+        let bm25 = collection.text_index.as_ref().unwrap();
+        assert_eq!(bm25.config(), schema.bm25_config.unwrap());
     }
 }

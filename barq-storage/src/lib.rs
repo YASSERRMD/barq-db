@@ -251,6 +251,7 @@ mod tests {
                 },
                 required: true,
             }],
+            bm25_config: None,
         }
     }
 

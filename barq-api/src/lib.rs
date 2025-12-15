@@ -12,7 +12,7 @@ use barq_core::{
     CollectionSchema, Document, FieldSchema, FieldType, HybridSearchResult, HybridWeights,
     PayloadValue,
 };
-use barq_index::{DistanceMetric, DocumentId, DocumentIdError};
+use barq_index::{Bm25Config, DistanceMetric, DocumentId, DocumentIdError};
 use barq_storage::Storage;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -59,6 +59,8 @@ pub struct CreateCollectionRequest {
     pub metric: DistanceMetric,
     #[serde(default)]
     pub text_fields: Vec<TextFieldRequest>,
+    #[serde(default)]
+    pub bm25_config: Option<Bm25Config>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -232,6 +234,7 @@ async fn create_collection(
     let schema = CollectionSchema {
         name: payload.name.clone(),
         fields,
+        bm25_config: payload.bm25_config,
     };
 
     let mut storage = state.storage.lock().await;
