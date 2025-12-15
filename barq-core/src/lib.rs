@@ -1,10 +1,11 @@
 use barq_bm25::{Bm25Config, Bm25Index, TextIndexError};
 use barq_index::{
-    DistanceMetric, DocumentId, DocumentIdError, FlatIndex, SearchResult, VectorIndex,
+    build_index, DistanceMetric, DocumentId, DocumentIdError, IndexConfig, IndexType, SearchResult,
+    VectorIndex,
 };
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CatalogError {
@@ -32,6 +33,8 @@ pub enum FieldType {
     Vector {
         dimension: usize,
         metric: DistanceMetric,
+        #[serde(default)]
+        index: Option<IndexType>,
     },
     Text {
         indexed: bool,
@@ -105,6 +108,7 @@ impl CollectionSchema {
                 FieldType::Vector {
                     dimension,
                     metric: _,
+                    index: _,
                 } => Some((field.name.clone(), dimension)),
                 _ => None,
             })
@@ -125,11 +129,33 @@ impl CollectionSchema {
         Ok(())
     }
 
-    pub fn vector_config(&self) -> Option<(usize, DistanceMetric)> {
-        self.fields.iter().find_map(|field| match field.field_type {
-            FieldType::Vector { dimension, metric } => Some((dimension, metric)),
-            _ => None,
-        })
+    pub fn set_vector_index(&mut self, index: IndexType) {
+        if let Some(field) = self
+            .fields
+            .iter_mut()
+            .find(|field| matches!(field.field_type, FieldType::Vector { .. }))
+        {
+            if let FieldType::Vector { index: idx, .. } = &mut field.field_type {
+                *idx = Some(index);
+            }
+        }
+    }
+
+    pub fn vector_config(&self) -> Option<(usize, DistanceMetric, IndexType)> {
+        self.fields
+            .iter()
+            .find_map(|field| match &field.field_type {
+                FieldType::Vector {
+                    dimension,
+                    metric,
+                    index,
+                } => Some((
+                    *dimension,
+                    *metric,
+                    index.clone().unwrap_or(IndexType::Flat),
+                )),
+                _ => None,
+            })
     }
 
     pub fn bm25_config(&self) -> Bm25Config {
@@ -147,29 +173,50 @@ impl CollectionSchema {
     }
 }
 
-#[derive(Debug)]
 pub struct Collection {
     schema: CollectionSchema,
-    index: FlatIndex,
+    index: Box<dyn VectorIndex>,
+    vectors: HashMap<DocumentId, Vec<f32>>,
     payloads: HashMap<DocumentId, PayloadValue>,
     dimension: usize,
+    metric: DistanceMetric,
+    index_type: IndexType,
     text_index: Option<Bm25Index>,
+}
+
+impl fmt::Debug for Collection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Collection")
+            .field("schema", &self.schema)
+            .field("vectors", &self.vectors.len())
+            .field("payloads", &self.payloads.len())
+            .field("dimension", &self.dimension)
+            .field("metric", &self.metric)
+            .field("index_type", &self.index_type)
+            .field("text_index", &self.text_index.is_some())
+            .finish()
+    }
 }
 
 impl Collection {
     pub fn new(schema: CollectionSchema) -> Result<Self, CatalogError> {
+        let mut schema = schema;
         schema.validate()?;
-        let (dimension, metric) = schema
+        let (dimension, metric, index_type) = schema
             .vector_config()
             .ok_or_else(|| CatalogError::InvalidSchema("schema missing vector field".into()))?;
         let has_text_index = !schema.indexed_text_fields().is_empty();
         let bm25_config = schema.bm25_config();
+        schema.set_vector_index(index_type.clone());
 
         Ok(Self {
             schema,
-            index: FlatIndex::new(metric, dimension),
+            index: build_index(IndexConfig::new(metric, dimension, index_type.clone())),
+            vectors: HashMap::new(),
             payloads: HashMap::new(),
             dimension,
+            metric,
+            index_type,
             text_index: if has_text_index {
                 Some(Bm25Index::new(bm25_config))
             } else {
@@ -181,7 +228,10 @@ impl Collection {
     pub fn insert(&mut self, document: Document) -> Result<(), CatalogError> {
         self.validate_document(&document)?;
         let text_values = self.text_field_values(&document.payload)?;
-        self.index.insert(document.id.clone(), document.vector)?;
+        self.index
+            .insert(document.id.clone(), document.vector.clone())?;
+        self.vectors
+            .insert(document.id.clone(), document.vector.clone());
         if let Some(index) = &mut self.text_index {
             index.insert(document.id.clone(), &text_values)?;
         }
@@ -194,6 +244,7 @@ impl Collection {
     pub fn upsert(&mut self, document: Document) -> Result<(), CatalogError> {
         if self.payloads.contains_key(&document.id) {
             self.index.remove(&document.id);
+            self.vectors.remove(&document.id);
             if let Some(index) = &mut self.text_index {
                 index.remove(&document.id);
             }
@@ -203,6 +254,7 @@ impl Collection {
 
     pub fn delete(&mut self, id: &DocumentId) -> bool {
         let removed = self.index.remove(id);
+        self.vectors.remove(id);
         self.payloads.remove(id);
         if let Some(index) = &mut self.text_index {
             index.remove(id);
@@ -310,6 +362,22 @@ impl Collection {
     ) -> Result<Option<HybridSearchResult>, CatalogError> {
         let results = self.search_hybrid(vector, query, top_k, weights)?;
         Ok(results.into_iter().find(|res| &res.id == id))
+    }
+
+    pub fn rebuild_index(&mut self, index_type: Option<IndexType>) -> Result<(), CatalogError> {
+        let target = index_type.unwrap_or_else(|| self.index_type.clone());
+        let mut new_index = build_index(IndexConfig::new(
+            self.metric,
+            self.dimension,
+            target.clone(),
+        ));
+        for (id, vector) in self.vectors.iter() {
+            new_index.insert(id.clone(), vector.clone())?;
+        }
+        self.index = new_index;
+        self.index_type = target.clone();
+        self.schema.set_vector_index(target);
+        Ok(())
     }
 
     pub fn schema(&self) -> &CollectionSchema {
@@ -472,6 +540,7 @@ fn normalize_scores(results: &[SearchResult]) -> HashMap<DocumentId, f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use barq_index::HnswParams;
 
     fn sample_schema() -> CollectionSchema {
         CollectionSchema {
@@ -481,6 +550,7 @@ mod tests {
                 field_type: FieldType::Vector {
                     dimension: 3,
                     metric: DistanceMetric::Cosine,
+                    index: None,
                 },
                 required: true,
             }],
@@ -497,6 +567,7 @@ mod tests {
                     field_type: FieldType::Vector {
                         dimension: 3,
                         metric: DistanceMetric::Cosine,
+                        index: None,
                     },
                     required: true,
                 },
@@ -633,6 +704,32 @@ mod tests {
         let first = &results[0];
         assert!(first.bm25_score.is_some());
         assert!(first.vector_score.is_some());
+    }
+
+    #[test]
+    fn rebuilds_index_with_new_type() {
+        let mut catalog = Catalog::new();
+        catalog.create_collection(sample_schema()).unwrap();
+        let collection = catalog.collection_mut("products").unwrap();
+
+        collection
+            .insert(Document {
+                id: DocumentId::U64(1),
+                vector: vec![0.0, 1.0, 0.0],
+                payload: None,
+            })
+            .unwrap();
+
+        collection
+            .rebuild_index(Some(IndexType::Hnsw(HnswParams::default())))
+            .unwrap();
+
+        let results = collection.search(&[0.0, 0.9, 0.0], 1).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, DocumentId::U64(1));
+
+        let (_, _, configured) = collection.schema().vector_config().unwrap();
+        assert!(matches!(configured, IndexType::Hnsw(_)));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use barq_core::{Catalog, CatalogError, CollectionSchema, Document};
-use barq_index::DocumentId;
+use barq_index::{DocumentId, IndexType};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -48,13 +48,7 @@ impl Storage {
 
     pub fn create_collection(&mut self, schema: CollectionSchema) -> Result<(), StorageError> {
         self.catalog.create_collection(schema.clone())?;
-        let dir = self.collection_dir(&schema.name);
-        fs::create_dir_all(&dir)?;
-        let schema_path = dir.join("schema.json");
-        let mut file = File::create(schema_path)?;
-        serde_json::to_writer_pretty(&mut file, &schema)?;
-        file.flush()?;
-        Ok(())
+        self.persist_schema(&schema)
     }
 
     pub fn drop_collection(&mut self, name: &str) -> Result<(), StorageError> {
@@ -149,6 +143,20 @@ impl Storage {
         Ok(coll.explain_hybrid(vector, query, top_k, id, weights)?)
     }
 
+    pub fn rebuild_index(
+        &mut self,
+        collection: &str,
+        index: Option<IndexType>,
+    ) -> Result<(), StorageError> {
+        {
+            let coll = self.catalog.collection_mut(collection)?;
+            coll.rebuild_index(index)?;
+            let schema = coll.schema().clone();
+            self.persist_schema(&schema)?;
+        }
+        Ok(())
+    }
+
     pub fn collection_schema(&self, name: &str) -> Result<&CollectionSchema, StorageError> {
         Ok(self.catalog.collection(name)?.schema())
     }
@@ -225,6 +233,16 @@ impl Storage {
         Ok(())
     }
 
+    fn persist_schema(&self, schema: &CollectionSchema) -> Result<(), StorageError> {
+        let dir = self.collection_dir(&schema.name);
+        fs::create_dir_all(&dir)?;
+        let schema_path = dir.join("schema.json");
+        let mut file = File::create(schema_path)?;
+        serde_json::to_writer_pretty(&mut file, &schema)?;
+        file.flush()?;
+        Ok(())
+    }
+
     fn collection_dir(&self, name: &str) -> PathBuf {
         self.root.join("collections").join(name)
     }
@@ -238,7 +256,7 @@ impl Storage {
 mod tests {
     use super::*;
     use barq_core::{FieldSchema, FieldType, PayloadValue};
-    use barq_index::{DistanceMetric, DocumentId};
+    use barq_index::{DistanceMetric, DocumentId, HnswParams, IndexType};
 
     fn sample_schema(name: &str) -> CollectionSchema {
         CollectionSchema {
@@ -248,6 +266,7 @@ mod tests {
                 field_type: FieldType::Vector {
                     dimension: 3,
                     metric: DistanceMetric::L2,
+                    index: None,
                 },
                 required: true,
             }],
@@ -278,5 +297,34 @@ mod tests {
         let results = storage.search("items", &[1.0, 0.0, 0.0], 1).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, DocumentId::U64(1));
+    }
+
+    #[test]
+    fn rebuilds_indexes_and_persists_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut storage = Storage::open(dir.path()).unwrap();
+        storage.create_collection(sample_schema("items")).unwrap();
+        storage
+            .insert(
+                "items",
+                Document {
+                    id: DocumentId::U64(1),
+                    vector: vec![0.0, 1.0, 0.0],
+                    payload: None,
+                },
+                false,
+            )
+            .unwrap();
+
+        storage
+            .rebuild_index("items", Some(IndexType::Hnsw(HnswParams::default())))
+            .unwrap();
+
+        let (_, _, index_type) = storage
+            .collection_schema("items")
+            .unwrap()
+            .vector_config()
+            .unwrap();
+        assert!(matches!(index_type, IndexType::Hnsw(_)));
     }
 }

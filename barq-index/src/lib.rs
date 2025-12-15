@@ -106,14 +106,14 @@ pub struct SearchResult {
     pub score: f32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum IndexType {
     Flat,
     Hnsw(HnswParams),
     Ivf(IvfParams),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HnswParams {
     pub m: usize,
     pub ef_construction: usize,
@@ -130,7 +130,7 @@ impl Default for HnswParams {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IvfParams {
     pub nlist: usize,
     pub nprobe: usize,
@@ -147,7 +147,7 @@ impl Default for IvfParams {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PqConfig {
     pub segments: usize,
     pub codebook_bits: u8,
@@ -666,19 +666,22 @@ impl VectorIndex for IvfIndex {
 }
 
 #[derive(Debug)]
-pub struct BackgroundBuildHandle {
-    handle: std::thread::JoinHandle<()>,
+pub struct BackgroundBuildHandle<T> {
+    handle: std::thread::JoinHandle<T>,
 }
 
-impl BackgroundBuildHandle {
-    pub fn join(self) {
-        let _ = self.handle.join();
+impl<T> BackgroundBuildHandle<T> {
+    pub fn join(self) -> T {
+        self.handle
+            .join()
+            .expect("background build thread panicked")
     }
 }
 
-pub fn spawn_background_build<F>(task: F) -> BackgroundBuildHandle
+pub fn spawn_background_build<F, T>(task: F) -> BackgroundBuildHandle<T>
 where
-    F: FnOnce() + Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
 {
     let handle = std::thread::spawn(task);
     BackgroundBuildHandle { handle }
@@ -704,7 +707,9 @@ impl IndexConfig {
 pub fn build_index(config: IndexConfig) -> Box<dyn VectorIndex> {
     match config.index {
         IndexType::Flat => Box::new(FlatIndex::new(config.metric, config.dimension)),
-        IndexType::Hnsw(params) => Box::new(HnswIndex::new(config.metric, config.dimension, params)),
+        IndexType::Hnsw(params) => {
+            Box::new(HnswIndex::new(config.metric, config.dimension, params))
+        }
         IndexType::Ivf(params) => Box::new(IvfIndex::new(config.metric, config.dimension, params)),
     }
 }
@@ -751,15 +756,9 @@ mod tests {
     #[test]
     fn hnsw_insert_and_search() {
         let mut index = HnswIndex::new(DistanceMetric::L2, 2, HnswParams::default());
-        index
-            .insert(DocumentId::U64(1), vec![0.0, 0.0])
-            .unwrap();
-        index
-            .insert(DocumentId::U64(2), vec![1.0, 1.0])
-            .unwrap();
-        index
-            .insert(DocumentId::U64(3), vec![2.0, 2.0])
-            .unwrap();
+        index.insert(DocumentId::U64(1), vec![0.0, 0.0]).unwrap();
+        index.insert(DocumentId::U64(2), vec![1.0, 1.0]).unwrap();
+        index.insert(DocumentId::U64(3), vec![2.0, 2.0]).unwrap();
 
         let results = index.search(&[0.1, 0.1], 2).unwrap();
         assert_eq!(results.len(), 2);
@@ -778,15 +777,9 @@ mod tests {
             },
         );
 
-        index
-            .insert(DocumentId::U64(1), vec![0.0, 0.0])
-            .unwrap();
-        index
-            .insert(DocumentId::U64(2), vec![1.0, 1.0])
-            .unwrap();
-        index
-            .insert(DocumentId::U64(3), vec![0.9, 1.1])
-            .unwrap();
+        index.insert(DocumentId::U64(1), vec![0.0, 0.0]).unwrap();
+        index.insert(DocumentId::U64(2), vec![1.0, 1.0]).unwrap();
+        index.insert(DocumentId::U64(3), vec![0.9, 1.1]).unwrap();
 
         let results = index.search(&[0.95, 1.0], 2).unwrap();
         assert_eq!(results.len(), 2);

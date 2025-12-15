@@ -13,7 +13,7 @@ use barq_core::{
     CollectionSchema, Document, FieldSchema, FieldType, HybridSearchResult, HybridWeights,
     PayloadValue,
 };
-use barq_index::{DistanceMetric, DocumentId, DocumentIdError};
+use barq_index::{DistanceMetric, DocumentId, DocumentIdError, IndexType};
 use barq_storage::Storage;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -58,6 +58,8 @@ pub struct CreateCollectionRequest {
     pub name: String,
     pub dimension: usize,
     pub metric: DistanceMetric,
+    #[serde(default)]
+    pub index: Option<IndexType>,
     #[serde(default)]
     pub text_fields: Vec<TextFieldRequest>,
     #[serde(default)]
@@ -155,6 +157,12 @@ pub struct ExplainResponse {
     pub result: Option<HybridSearchResult>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RebuildIndexRequest {
+    #[serde(default)]
+    pub index: Option<IndexType>,
+}
+
 pub fn build_router(storage: Storage) -> Router {
     let state = AppState {
         storage: Arc::new(Mutex::new(storage)),
@@ -167,6 +175,10 @@ pub fn build_router(storage: Storage) -> Router {
         .route("/collections/:name", delete(drop_collection))
         .route("/collections/:name/documents", post(insert_document))
         .route("/collections/:name/documents/:id", delete(delete_document))
+        .route(
+            "/collections/:name/index/rebuild",
+            post(rebuild_collection_index),
+        )
         .route("/collections/:name/search", post(search_collection))
         .route(
             "/collections/:name/search/text",
@@ -218,6 +230,7 @@ async fn create_collection(
         field_type: FieldType::Vector {
             dimension: payload.dimension,
             metric: payload.metric,
+            index: payload.index,
         },
         required: true,
     }];
@@ -280,6 +293,28 @@ async fn delete_document(
     } else {
         StatusCode::NOT_FOUND
     })
+}
+
+async fn rebuild_collection_index(
+    AxumPath(name): AxumPath<String>,
+    State(state): State<AppState>,
+    Json(payload): Json<RebuildIndexRequest>,
+) -> Result<StatusCode, ApiError> {
+    {
+        let storage = state.storage.lock().await;
+        storage.collection_schema(&name)?;
+    }
+
+    let storage = state.storage.clone();
+    let requested_index = payload.index.clone();
+    tokio::spawn(async move {
+        let mut storage = storage.lock().await;
+        if let Err(err) = storage.rebuild_index(&name, requested_index) {
+            eprintln!("failed to rebuild index for {}: {}", name, err);
+        }
+    });
+
+    Ok(StatusCode::ACCEPTED)
 }
 
 async fn search_collection(
