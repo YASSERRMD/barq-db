@@ -1222,6 +1222,18 @@ mod tests {
     }
 
     #[test]
+    fn missing_api_key_is_unauthorized() {
+        let auth = ApiAuth::new().require_keys();
+        let headers = HeaderMap::new();
+
+        let err = auth
+            .authenticate(&headers, ApiPermission::Read, None)
+            .expect_err("calls without credentials must be rejected when keys are required");
+
+        assert!(matches!(err, ApiError::Unauthorized(_)));
+    }
+
+    #[test]
     fn jwt_enforces_role_and_tenant_scope() {
         let claims = HashMap::from([(
             "jwt-token".to_string(),
@@ -1277,6 +1289,21 @@ mod tests {
     }
 
     #[test]
+    fn ops_role_cannot_access_admin_endpoints() {
+        let auth = ApiAuth::new().require_keys();
+        auth.insert("ops-key", TenantId::new("tenant-a"), ApiRole::Ops);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("ops-key"));
+
+        let err = auth
+            .authenticate(&headers, ApiPermission::TenantAdmin, None)
+            .expect_err("ops role must not be able to perform tenant admin actions");
+
+        assert!(matches!(err, ApiError::Forbidden(_)));
+    }
+
+    #[test]
     fn api_key_tenant_mismatch_is_forbidden() {
         let auth = ApiAuth::new().require_keys();
         auth.insert("key-1", TenantId::new("tenant-a"), ApiRole::TenantAdmin);
@@ -1301,6 +1328,22 @@ mod tests {
         let err = tls
             .validate()
             .expect_err("missing files should trigger validation error");
+        assert!(matches!(err, ApiError::Tls(_)));
+    }
+
+    #[test]
+    fn tls_config_requires_existing_client_ca() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let cert_path = tempdir.path().join("cert.pem");
+        let key_path = tempdir.path().join("key.pem");
+        std::fs::write(&cert_path, b"dummy").unwrap();
+        std::fs::write(&key_path, b"dummy").unwrap();
+
+        let tls = TlsConfig::new(&cert_path, &key_path).with_client_ca(tempdir.path().join("missing-ca.pem"));
+
+        let err = tls
+            .validate()
+            .expect_err("client CA path must exist when provided");
         assert!(matches!(err, ApiError::Tls(_)));
     }
 
