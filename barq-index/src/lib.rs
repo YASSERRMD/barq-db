@@ -752,6 +752,9 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::Arc;
+    use std::time::Duration;
+
+    use rand::{rngs::StdRng, Rng, SeedableRng};
 
     #[test]
     fn hnsw_insert_and_search() {
@@ -851,5 +854,48 @@ mod tests {
             DocumentId::from_str("").unwrap_err(),
             DocumentIdError::EmptyString
         );
+    }
+
+    #[test]
+    fn hnsw_large_collection_latency_budget() {
+        let dimension = 32;
+        let mut rng = StdRng::seed_from_u64(13);
+        let mut index = HnswIndex::new(
+            DistanceMetric::L2,
+            dimension,
+            HnswParams {
+                m: 32,
+                ef_construction: 100,
+                ef_search: 200,
+            },
+        );
+
+        let mut stored = Vec::new();
+        for i in 0..1_200u64 {
+            let vector: Vec<f32> = (0..dimension)
+                .map(|_| rng.gen_range(-1.0..1.0))
+                .collect();
+            let id = DocumentId::U64(i + 1);
+            stored.push((id.clone(), vector.clone()));
+            index.insert(id, vector).unwrap();
+        }
+
+        let mut evaluated = 0;
+        let mut empty_results = 0;
+        let mut max_elapsed = Duration::ZERO;
+
+        for (_, vector) in stored.iter().step_by(75).take(20) {
+            let start = std::time::Instant::now();
+            let results = index.search(vector, 10).unwrap();
+            let elapsed = start.elapsed();
+            max_elapsed = max_elapsed.max(elapsed);
+            evaluated += 1;
+            if results.is_empty() {
+                empty_results += 1;
+            }
+        }
+
+        assert!(max_elapsed < Duration::from_millis(150), "search took {:?}", max_elapsed);
+        assert_eq!(empty_results, 0, "missing matches for {empty_results} / {evaluated}");
     }
 }
