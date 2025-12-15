@@ -7,6 +7,7 @@ license = "Apache-2.0"
 
 [dependencies]
 axum = { version = "0.7", features = ["macros"] }
+axum-server = { version = "0.8", features = ["tls-rustls"] }
 barq-core = { path = "../barq-core" }
 barq-index = { path = "../barq-index" }
 barq-bm25 = { path = "../barq-bm25" }
@@ -17,8 +18,11 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing = "0.1"
 metrics = "0.22"
 metrics-exporter-prometheus = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "logging"] }
+rustls-pemfile = "2"
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
