@@ -114,6 +114,41 @@ impl Storage {
         Ok(coll.search(query, top_k)?)
     }
 
+    pub fn search_text(
+        &self,
+        collection: &str,
+        query: &str,
+        top_k: usize,
+    ) -> Result<Vec<barq_index::SearchResult>, StorageError> {
+        let coll = self.catalog.collection(collection)?;
+        Ok(coll.search_text(query, top_k)?)
+    }
+
+    pub fn search_hybrid(
+        &self,
+        collection: &str,
+        vector: &[f32],
+        query: &str,
+        top_k: usize,
+        weights: Option<barq_core::HybridWeights>,
+    ) -> Result<Vec<barq_core::HybridSearchResult>, StorageError> {
+        let coll = self.catalog.collection(collection)?;
+        Ok(coll.search_hybrid(vector, query, top_k, weights)?)
+    }
+
+    pub fn explain_hybrid(
+        &self,
+        collection: &str,
+        vector: &[f32],
+        query: &str,
+        top_k: usize,
+        id: &barq_index::DocumentId,
+        weights: Option<barq_core::HybridWeights>,
+    ) -> Result<Option<barq_core::HybridSearchResult>, StorageError> {
+        let coll = self.catalog.collection(collection)?;
+        Ok(coll.explain_hybrid(vector, query, top_k, id, weights)?)
+    }
+
     pub fn collection_schema(&self, name: &str) -> Result<&CollectionSchema, StorageError> {
         Ok(self.catalog.collection(name)?.schema())
     }

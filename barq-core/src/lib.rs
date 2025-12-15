@@ -1,6 +1,8 @@
 use barq_index::{
-    DistanceMetric, DocumentId, DocumentIdError, FlatIndex, SearchResult, VectorIndex,
+    Bm25Config, Bm25Index, DistanceMetric, DocumentId, DocumentIdError, FlatIndex, SearchResult,
+    TextIndexError, VectorIndex,
 };
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -18,6 +20,9 @@ pub enum CatalogError {
     #[error("index error: {0}")]
     Index(#[from] barq_index::VectorIndexError),
 
+    #[error("text index error: {0}")]
+    TextIndex(#[from] TextIndexError),
+
     #[error("invalid document id: {0}")]
     DocumentId(#[from] DocumentIdError),
 }
@@ -27,6 +32,9 @@ pub enum FieldType {
     Vector {
         dimension: usize,
         metric: DistanceMetric,
+    },
+    Text {
+        indexed: bool,
     },
     Json,
 }
@@ -61,6 +69,29 @@ pub struct Document {
     pub id: DocumentId,
     pub vector: Vec<f32>,
     pub payload: Option<PayloadValue>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct HybridWeights {
+    pub bm25: f32,
+    pub vector: f32,
+}
+
+impl Default for HybridWeights {
+    fn default() -> Self {
+        Self {
+            bm25: 0.5,
+            vector: 0.5,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HybridSearchResult {
+    pub id: DocumentId,
+    pub bm25_score: Option<f32>,
+    pub vector_score: Option<f32>,
+    pub score: f32,
 }
 
 impl CollectionSchema {
@@ -98,6 +129,16 @@ impl CollectionSchema {
             _ => None,
         })
     }
+
+    pub fn indexed_text_fields(&self) -> Vec<String> {
+        self.fields
+            .iter()
+            .filter_map(|field| match field.field_type {
+                FieldType::Text { indexed } if indexed => Some(field.name.clone()),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug)]
@@ -106,6 +147,7 @@ pub struct Collection {
     index: FlatIndex,
     payloads: HashMap<DocumentId, PayloadValue>,
     dimension: usize,
+    text_index: Option<Bm25Index>,
 }
 
 impl Collection {
@@ -114,18 +156,28 @@ impl Collection {
         let (dimension, metric) = schema
             .vector_config()
             .ok_or_else(|| CatalogError::InvalidSchema("schema missing vector field".into()))?;
+        let has_text_index = !schema.indexed_text_fields().is_empty();
 
         Ok(Self {
             schema,
             index: FlatIndex::new(metric, dimension),
             payloads: HashMap::new(),
             dimension,
+            text_index: if has_text_index {
+                Some(Bm25Index::new(Bm25Config::default()))
+            } else {
+                None
+            },
         })
     }
 
     pub fn insert(&mut self, document: Document) -> Result<(), CatalogError> {
         self.validate_document(&document)?;
+        let text_values = self.text_field_values(&document.payload)?;
         self.index.insert(document.id.clone(), document.vector)?;
+        if let Some(index) = &mut self.text_index {
+            index.insert(document.id.clone(), &text_values)?;
+        }
         if let Some(payload) = document.payload {
             self.payloads.insert(document.id, payload);
         }
@@ -135,6 +187,9 @@ impl Collection {
     pub fn upsert(&mut self, document: Document) -> Result<(), CatalogError> {
         if self.payloads.contains_key(&document.id) {
             self.index.remove(&document.id);
+            if let Some(index) = &mut self.text_index {
+                index.remove(&document.id);
+            }
         }
         self.insert(document)
     }
@@ -142,11 +197,112 @@ impl Collection {
     pub fn delete(&mut self, id: &DocumentId) -> bool {
         let removed = self.index.remove(id);
         self.payloads.remove(id);
+        if let Some(index) = &mut self.text_index {
+            index.remove(id);
+        }
         removed.is_some()
     }
 
     pub fn search(&self, vector: &[f32], top_k: usize) -> Result<Vec<SearchResult>, CatalogError> {
         Ok(self.index.search(vector, top_k)?)
+    }
+
+    pub fn search_text(
+        &self,
+        query: &str,
+        top_k: usize,
+    ) -> Result<Vec<SearchResult>, CatalogError> {
+        let index = self
+            .text_index
+            .as_ref()
+            .ok_or_else(|| CatalogError::InvalidSchema("collection has no text index".into()))?;
+        Ok(index.search(query, top_k)?)
+    }
+
+    pub fn search_hybrid(
+        &self,
+        vector: &[f32],
+        query: &str,
+        top_k: usize,
+        weights: Option<HybridWeights>,
+    ) -> Result<Vec<HybridSearchResult>, CatalogError> {
+        let weights = weights.unwrap_or_default();
+        let text_index = self
+            .text_index
+            .as_ref()
+            .ok_or_else(|| CatalogError::InvalidSchema("collection has no text index".into()))?;
+
+        if top_k == 0 {
+            return Err(CatalogError::InvalidSchema(
+                "top_k must be positive".to_string(),
+            ));
+        }
+
+        let (bm25_results, vector_results) = rayon::join(
+            || text_index.search(query, top_k * 2),
+            || self.index.search(vector, top_k * 2),
+        );
+
+        let bm25_results = bm25_results?;
+        let vector_results = vector_results?;
+
+        let normalized_bm25 = normalize_scores(&bm25_results);
+        let normalized_vectors = normalize_scores(&vector_results);
+
+        let mut combined: HashMap<DocumentId, HybridSearchResult> = HashMap::new();
+
+        for result in bm25_results {
+            let normalized = *normalized_bm25.get(&result.id).unwrap_or(&0.0);
+            combined
+                .entry(result.id.clone())
+                .and_modify(|entry| {
+                    entry.bm25_score = Some(result.score);
+                    entry.score += weights.bm25 * normalized;
+                })
+                .or_insert(HybridSearchResult {
+                    id: result.id,
+                    bm25_score: Some(result.score),
+                    vector_score: None,
+                    score: weights.bm25 * normalized,
+                });
+        }
+
+        for result in vector_results {
+            let normalized = *normalized_vectors.get(&result.id).unwrap_or(&0.0);
+            combined
+                .entry(result.id.clone())
+                .and_modify(|entry| {
+                    entry.vector_score = Some(result.score);
+                    entry.score += weights.vector * normalized;
+                })
+                .or_insert(HybridSearchResult {
+                    id: result.id,
+                    bm25_score: None,
+                    vector_score: Some(result.score),
+                    score: weights.vector * normalized,
+                });
+        }
+
+        let mut results: Vec<HybridSearchResult> = combined.into_values().collect();
+        results.par_sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        results.truncate(top_k.min(results.len()));
+        Ok(results)
+    }
+
+    pub fn explain_hybrid(
+        &self,
+        vector: &[f32],
+        query: &str,
+        top_k: usize,
+        id: &DocumentId,
+        weights: Option<HybridWeights>,
+    ) -> Result<Option<HybridSearchResult>, CatalogError> {
+        let results = self.search_hybrid(vector, query, top_k, weights)?;
+        Ok(results.into_iter().find(|res| &res.id == id))
     }
 
     pub fn schema(&self) -> &CollectionSchema {
@@ -166,7 +322,80 @@ impl Collection {
                 document.vector.len()
             )));
         }
+        self.ensure_text_fields(document)?;
         Ok(())
+    }
+
+    fn ensure_text_fields(&self, document: &Document) -> Result<(), CatalogError> {
+        let text_fields: Vec<_> = self
+            .schema
+            .fields
+            .iter()
+            .filter(|field| matches!(field.field_type, FieldType::Text { .. }))
+            .collect();
+        if text_fields.is_empty() {
+            return Ok(());
+        }
+        let payload_obj = match &document.payload {
+            Some(PayloadValue::Object(map)) => Some(map),
+            Some(_) => None,
+            None => None,
+        };
+
+        for field in text_fields {
+            let value = payload_obj.and_then(|map| map.get(&field.name));
+            match value {
+                Some(PayloadValue::String(_)) => {}
+                Some(_) => {
+                    return Err(CatalogError::InvalidSchema(format!(
+                        "text field {} must be a string",
+                        field.name
+                    )));
+                }
+                None if field.required => {
+                    return Err(CatalogError::InvalidSchema(format!(
+                        "missing required text field {}",
+                        field.name
+                    )));
+                }
+                None => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn text_field_values(
+        &self,
+        payload: &Option<PayloadValue>,
+    ) -> Result<Vec<String>, CatalogError> {
+        if self.text_index.is_none() {
+            return Ok(Vec::new());
+        }
+        let payload_obj = match payload {
+            Some(PayloadValue::Object(map)) => Some(map),
+            _ => None,
+        };
+
+        let mut values = Vec::new();
+        for field in self.schema.fields.iter() {
+            if let FieldType::Text { indexed } = field.field_type {
+                if !indexed {
+                    continue;
+                }
+                if let Some(value) = payload_obj.and_then(|map| map.get(&field.name)) {
+                    match value {
+                        PayloadValue::String(s) => values.push(s.clone()),
+                        _ => {
+                            return Err(CatalogError::InvalidSchema(format!(
+                                "text field {} must be a string",
+                                field.name
+                            )))
+                        }
+                    }
+                }
+            }
+        }
+        Ok(values)
     }
 }
 
@@ -209,6 +438,30 @@ impl Catalog {
     }
 }
 
+fn normalize_scores(results: &[SearchResult]) -> HashMap<DocumentId, f32> {
+    if results.is_empty() {
+        return HashMap::new();
+    }
+    let mut min_score = f32::MAX;
+    let mut max_score = f32::MIN;
+    for result in results {
+        min_score = min_score.min(result.score);
+        max_score = max_score.max(result.score);
+    }
+
+    results
+        .iter()
+        .map(|result| {
+            let normalized = if (max_score - min_score).abs() < f32::EPSILON {
+                1.0
+            } else {
+                (result.score - min_score) / (max_score - min_score)
+            };
+            (result.id.clone(), normalized)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,6 +477,27 @@ mod tests {
                 },
                 required: true,
             }],
+        }
+    }
+
+    fn text_schema() -> CollectionSchema {
+        CollectionSchema {
+            name: "articles".to_string(),
+            fields: vec![
+                FieldSchema {
+                    name: "vector".to_string(),
+                    field_type: FieldType::Vector {
+                        dimension: 3,
+                        metric: DistanceMetric::Cosine,
+                    },
+                    required: true,
+                },
+                FieldSchema {
+                    name: "body".to_string(),
+                    field_type: FieldType::Text { indexed: true },
+                    required: true,
+                },
+            ],
         }
     }
 
@@ -271,5 +545,84 @@ mod tests {
 
         assert!(collection.delete(&DocumentId::U64(1)));
         assert!(collection.search(&[1.0, 0.0, 0.0], 1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn text_search_scores() {
+        let mut catalog = Catalog::new();
+        catalog.create_collection(text_schema()).unwrap();
+        let collection = catalog.collection_mut("articles").unwrap();
+
+        let mut payload1 = HashMap::new();
+        payload1.insert(
+            "body".to_string(),
+            PayloadValue::String("Rust language book".into()),
+        );
+
+        let mut payload2 = HashMap::new();
+        payload2.insert(
+            "body".to_string(),
+            PayloadValue::String("Comprehensive guide to Rust".into()),
+        );
+
+        collection
+            .insert(Document {
+                id: DocumentId::U64(1),
+                vector: vec![0.1, 0.2, 0.3],
+                payload: Some(PayloadValue::Object(payload1)),
+            })
+            .unwrap();
+        collection
+            .insert(Document {
+                id: DocumentId::U64(2),
+                vector: vec![0.2, 0.3, 0.4],
+                payload: Some(PayloadValue::Object(payload2)),
+            })
+            .unwrap();
+
+        let results = collection.search_text("rust guide", 2).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].id, DocumentId::U64(2));
+    }
+
+    #[test]
+    fn hybrid_includes_both_scores() {
+        let mut catalog = Catalog::new();
+        catalog.create_collection(text_schema()).unwrap();
+        let collection = catalog.collection_mut("articles").unwrap();
+
+        let mut payload1 = HashMap::new();
+        payload1.insert(
+            "body".to_string(),
+            PayloadValue::String("Rust systems programming".into()),
+        );
+        let mut payload2 = HashMap::new();
+        payload2.insert(
+            "body".to_string(),
+            PayloadValue::String("Guide to databases".into()),
+        );
+
+        collection
+            .insert(Document {
+                id: DocumentId::U64(1),
+                vector: vec![0.0, 1.0, 0.0],
+                payload: Some(PayloadValue::Object(payload1)),
+            })
+            .unwrap();
+        collection
+            .insert(Document {
+                id: DocumentId::U64(2),
+                vector: vec![1.0, 0.0, 0.0],
+                payload: Some(PayloadValue::Object(payload2)),
+            })
+            .unwrap();
+
+        let results = collection
+            .search_hybrid(&[0.0, 1.0, 0.0], "rust", 2, None)
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        let first = &results[0];
+        assert!(first.bm25_score.is_some());
+        assert!(first.vector_score.is_some());
     }
 }

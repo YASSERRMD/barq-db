@@ -8,7 +8,10 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
-use barq_core::{CollectionSchema, Document, FieldSchema, FieldType, PayloadValue};
+use barq_core::{
+    CollectionSchema, Document, FieldSchema, FieldType, HybridSearchResult, HybridWeights,
+    PayloadValue,
+};
 use barq_index::{DistanceMetric, DocumentId, DocumentIdError};
 use barq_storage::Storage;
 use serde::{Deserialize, Serialize};
@@ -54,6 +57,17 @@ pub struct CreateCollectionRequest {
     pub name: String,
     pub dimension: usize,
     pub metric: DistanceMetric,
+    #[serde(default)]
+    pub text_fields: Vec<TextFieldRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TextFieldRequest {
+    pub name: String,
+    #[serde(default)]
+    pub indexed: bool,
+    #[serde(default)]
+    pub required: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,6 +112,46 @@ pub struct SearchResponse {
     pub results: Vec<barq_index::SearchResult>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct TextSearchRequest {
+    pub query: String,
+    pub top_k: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TextSearchResponse {
+    pub results: Vec<barq_index::SearchResult>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HybridSearchRequest {
+    pub query: String,
+    pub vector: Vec<f32>,
+    pub top_k: usize,
+    #[serde(default)]
+    pub weights: Option<HybridWeights>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HybridSearchResponse {
+    pub results: Vec<HybridSearchResult>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExplainRequest {
+    pub id: DocumentIdInput,
+    pub query: String,
+    pub vector: Vec<f32>,
+    pub top_k: usize,
+    #[serde(default)]
+    pub weights: Option<HybridWeights>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ExplainResponse {
+    pub result: Option<HybridSearchResult>,
+}
+
 pub fn build_router(storage: Storage) -> Router {
     let state = AppState {
         storage: Arc::new(Mutex::new(storage)),
@@ -111,6 +165,18 @@ pub fn build_router(storage: Storage) -> Router {
         .route("/collections/:name/documents", post(insert_document))
         .route("/collections/:name/documents/:id", delete(delete_document))
         .route("/collections/:name/search", post(search_collection))
+        .route(
+            "/collections/:name/search/text",
+            post(search_text_collection),
+        )
+        .route(
+            "/collections/:name/search/hybrid",
+            post(search_hybrid_collection),
+        )
+        .route(
+            "/collections/:name/search/hybrid/explain",
+            post(explain_hybrid_collection),
+        )
         .with_state(state)
 }
 
@@ -144,16 +210,28 @@ async fn create_collection(
     if payload.dimension == 0 {
         return Err(ApiError::BadRequest("dimension must be positive".into()));
     }
+    let mut fields = vec![FieldSchema {
+        name: "vector".to_string(),
+        field_type: FieldType::Vector {
+            dimension: payload.dimension,
+            metric: payload.metric,
+        },
+        required: true,
+    }];
+
+    for text_field in payload.text_fields {
+        fields.push(FieldSchema {
+            name: text_field.name,
+            field_type: FieldType::Text {
+                indexed: text_field.indexed,
+            },
+            required: text_field.required,
+        });
+    }
+
     let schema = CollectionSchema {
         name: payload.name.clone(),
-        fields: vec![FieldSchema {
-            name: "vector".to_string(),
-            field_type: FieldType::Vector {
-                dimension: payload.dimension,
-                metric: payload.metric,
-            },
-            required: true,
-        }],
+        fields,
     };
 
     let mut storage = state.storage.lock().await;
@@ -214,6 +292,59 @@ async fn search_collection(
     Ok(Json(SearchResponse { results }))
 }
 
+async fn search_text_collection(
+    AxumPath(name): AxumPath<String>,
+    State(state): State<AppState>,
+    Json(payload): Json<TextSearchRequest>,
+) -> Result<Json<TextSearchResponse>, ApiError> {
+    if payload.top_k == 0 {
+        return Err(ApiError::BadRequest("top_k must be positive".into()));
+    }
+    let storage = state.storage.lock().await;
+    let results = storage.search_text(&name, &payload.query, payload.top_k)?;
+    Ok(Json(TextSearchResponse { results }))
+}
+
+async fn search_hybrid_collection(
+    AxumPath(name): AxumPath<String>,
+    State(state): State<AppState>,
+    Json(payload): Json<HybridSearchRequest>,
+) -> Result<Json<HybridSearchResponse>, ApiError> {
+    if payload.top_k == 0 {
+        return Err(ApiError::BadRequest("top_k must be positive".into()));
+    }
+    let storage = state.storage.lock().await;
+    let results = storage.search_hybrid(
+        &name,
+        &payload.vector,
+        &payload.query,
+        payload.top_k,
+        payload.weights,
+    )?;
+    Ok(Json(HybridSearchResponse { results }))
+}
+
+async fn explain_hybrid_collection(
+    AxumPath(name): AxumPath<String>,
+    State(state): State<AppState>,
+    Json(payload): Json<ExplainRequest>,
+) -> Result<Json<ExplainResponse>, ApiError> {
+    if payload.top_k == 0 {
+        return Err(ApiError::BadRequest("top_k must be positive".into()));
+    }
+    let id: DocumentId = payload.id.try_into()?;
+    let storage = state.storage.lock().await;
+    let result = storage.explain_hybrid(
+        &name,
+        &payload.vector,
+        &payload.query,
+        payload.top_k,
+        &id,
+        payload.weights,
+    )?;
+    Ok(Json(ExplainResponse { result }))
+}
+
 pub fn init_tracing() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
@@ -223,6 +354,7 @@ pub fn init_tracing() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use barq_index::DocumentId;
     use reqwest::Client;
     use std::net::SocketAddr;
     use std::path::Path;
@@ -316,6 +448,113 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.results.len(), 1);
+
+        shutdown.send(()).unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn text_and_hybrid_search() {
+        init_tracing();
+        let dir = tempfile::tempdir().unwrap();
+        let (addr, shutdown, handle) = start_test_server(dir.path()).await;
+        let client = Client::new();
+
+        let create_body = serde_json::json!({
+            "name": "docs",
+            "dimension": 3,
+            "metric": "Cosine",
+            "text_fields": [
+                {"name": "body", "indexed": true, "required": true}
+            ]
+        });
+
+        client
+            .post(format!("http://{}/collections", addr))
+            .json(&create_body)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+
+        let insert_body = serde_json::json!({
+            "id": 1,
+            "vector": [0.0, 1.0, 0.0],
+            "payload": {"body": "Rust systems programming"}
+        });
+        client
+            .post(format!("http://{}/collections/docs/documents", addr))
+            .json(&insert_body)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+
+        let insert_body2 = serde_json::json!({
+            "id": 2,
+            "vector": [1.0, 0.0, 0.0],
+            "payload": {"body": "Database systems"}
+        });
+        client
+            .post(format!("http://{}/collections/docs/documents", addr))
+            .json(&insert_body2)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+
+        let search_body = serde_json::json!({"query": "rust systems", "top_k": 2});
+        let text_response: TextSearchResponse = client
+            .post(format!("http://{}/collections/docs/search/text", addr))
+            .json(&search_body)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(text_response.results[0].id, DocumentId::U64(1));
+
+        let hybrid_body = serde_json::json!({
+            "vector": [0.0, 1.0, 0.0],
+            "query": "rust systems",
+            "top_k": 2
+        });
+        let hybrid_response: HybridSearchResponse = client
+            .post(format!("http://{}/collections/docs/search/hybrid", addr))
+            .json(&hybrid_body)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(hybrid_response.results.len(), 2);
+        assert!(hybrid_response.results[0].bm25_score.is_some());
+        assert!(hybrid_response.results[0].vector_score.is_some());
+
+        let explain_body = serde_json::json!({
+            "id": 1,
+            "vector": [0.0, 1.0, 0.0],
+            "query": "rust systems",
+            "top_k": 2
+        });
+        let explain_response: ExplainResponse = client
+            .post(format!(
+                "http://{}/collections/docs/search/hybrid/explain",
+                addr
+            ))
+            .json(&explain_body)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(explain_response.result.is_some());
 
         shutdown.send(()).unwrap();
         handle.await.unwrap().unwrap();
