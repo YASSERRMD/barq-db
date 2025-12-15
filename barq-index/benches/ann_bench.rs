@@ -8,7 +8,9 @@ fn random_vector(rng: &mut StdRng, dimension: usize) -> Vec<f32> {
 
 fn build_dataset(count: usize, dimension: usize) -> Vec<Vec<f32>> {
     let mut rng = StdRng::seed_from_u64(42);
-    (0..count).map(|_| random_vector(&mut rng, dimension)).collect()
+    (0..count)
+        .map(|_| random_vector(&mut rng, dimension))
+        .collect()
 }
 
 fn load_index(index: IndexType, dimension: usize, dataset: &[(DocumentId, Vec<f32>)]) {
