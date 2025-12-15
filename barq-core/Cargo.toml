@@ -10,5 +10,6 @@ thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rayon.workspace = true
+chrono = { version = "0.4", features = ["serde", "clock"] }
 barq-index = { path = "../barq-index" }
 barq-bm25 = { path = "../barq-bm25" }

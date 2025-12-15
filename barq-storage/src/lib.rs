@@ -1,4 +1,4 @@
-use barq_core::{Catalog, CatalogError, CollectionSchema, Document};
+use barq_core::{Catalog, CatalogError, CollectionSchema, Document, Filter};
 use barq_index::{DocumentId, IndexType};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
@@ -103,9 +103,10 @@ impl Storage {
         collection: &str,
         query: &[f32],
         top_k: usize,
+        filter: Option<&Filter>,
     ) -> Result<Vec<barq_index::SearchResult>, StorageError> {
         let coll = self.catalog.collection(collection)?;
-        Ok(coll.search(query, top_k)?)
+        Ok(coll.search_with_filter(query, top_k, filter)?)
     }
 
     pub fn search_text(
@@ -113,9 +114,10 @@ impl Storage {
         collection: &str,
         query: &str,
         top_k: usize,
+        filter: Option<&Filter>,
     ) -> Result<Vec<barq_index::SearchResult>, StorageError> {
         let coll = self.catalog.collection(collection)?;
-        Ok(coll.search_text(query, top_k)?)
+        Ok(coll.search_text_with_filter(query, top_k, filter)?)
     }
 
     pub fn search_hybrid(
@@ -125,9 +127,10 @@ impl Storage {
         query: &str,
         top_k: usize,
         weights: Option<barq_core::HybridWeights>,
+        filter: Option<&Filter>,
     ) -> Result<Vec<barq_core::HybridSearchResult>, StorageError> {
         let coll = self.catalog.collection(collection)?;
-        Ok(coll.search_hybrid(vector, query, top_k, weights)?)
+        Ok(coll.search_hybrid(vector, query, top_k, weights, filter)?)
     }
 
     pub fn explain_hybrid(
@@ -294,7 +297,7 @@ mod tests {
         }
 
         let storage = Storage::open(dir.path()).unwrap();
-        let results = storage.search("items", &[1.0, 0.0, 0.0], 1).unwrap();
+        let results = storage.search("items", &[1.0, 0.0, 0.0], 1, None).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, DocumentId::U64(1));
     }
