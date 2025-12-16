@@ -9,6 +9,10 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	pb "github.com/YASSERRMD/barq-db/barq-sdk-go/proto/barq"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 type Config struct {
@@ -133,4 +137,78 @@ func (c *Client) Search(ctx context.Context, collection string, req SearchReques
 		return nil, err
 	}
 	return resp.Results, nil
+}
+
+// gRPC Client
+
+type GrpcClient struct {
+	conn   *grpc.ClientConn
+	client pb.BarqClient
+}
+
+func NewGrpcClient(target string) (*GrpcClient, error) {
+	conn, err := grpc.Dial(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, err
+	}
+	client := pb.NewBarqClient(conn)
+	return &GrpcClient{conn: conn, client: client}, nil
+}
+
+func (c *GrpcClient) Close() error {
+	return c.conn.Close()
+}
+
+func (c *GrpcClient) Health(ctx context.Context) (bool, error) {
+	resp, err := c.client.Health(ctx, &pb.HealthRequest{})
+	if err != nil {
+		return false, err
+	}
+	return resp.Ok, nil
+}
+
+func (c *GrpcClient) CreateCollection(ctx context.Context, name string, dimension int, metric string) error {
+	_, err := c.client.CreateCollection(ctx, &pb.CreateCollectionRequest{
+		Name:      name,
+		Dimension: uint32(dimension),
+		Metric:    metric,
+	})
+	return err
+}
+
+func (c *GrpcClient) InsertDocument(ctx context.Context, collection string, id interface{}, vector []float32, payload interface{}) error {
+	idStr := fmt.Sprintf("%v", id)
+	
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	_, err = c.client.InsertDocument(ctx, &pb.InsertDocumentRequest{
+		Collection:  collection,
+		Id:          idStr,
+		Vector:      vector,
+		PayloadJson: string(payloadBytes),
+	})
+	return err
+}
+
+func (c *GrpcClient) Search(ctx context.Context, collection string, vector []float32, topK int) ([]SearchResult, error) {
+	resp, err := c.client.Search(ctx, &pb.SearchRequest{
+		Collection: collection,
+		Vector:     vector,
+		TopK:       uint32(topK),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var results []SearchResult
+	for _, r := range resp.Results {
+		results = append(results, SearchResult{
+			ID:    r.Id,
+			Score: r.Score, // Proto definition must enable Score
+		})
+	}
+	return results, nil
 }

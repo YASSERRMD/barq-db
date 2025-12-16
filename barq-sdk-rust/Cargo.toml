@@ -12,6 +12,8 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 barq-core = { path = "../barq-core" }
+tonic = { version = "0.10", features = ["tls", "transport"] }
+barq-proto = { path = "../barq-proto" }
 
 [dev-dependencies]
 chrono = "0.4"

@@ -72,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
     let app = build_router_from_state(state.clone()).layer(TraceLayer::new_for_http());
 
     // Spawn gRPC server
-    let grpc_addr = "[::1]:50051".parse().unwrap();
+    let grpc_addr = "0.0.0.0:50051".parse().unwrap();
     info!("gRPC server listening on {}", grpc_addr);
     tokio::spawn(async move {
         TonicServer::builder()

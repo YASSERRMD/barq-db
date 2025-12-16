@@ -2,7 +2,10 @@ use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::time::Duration;
-pub use barq_core::{CollectionSchema, DistanceMetric, DocumentId, Filter, HybridWeights};
+pub use barq_core::{CollectionSchema, DistanceMetric, DocumentId, Filter, HybridWeights, PayloadValue};
+use tonic::transport::Channel;
+use barq_proto::barq::barq_client::BarqClient as TonicBarqClient;
+use barq_proto::barq::{CreateCollectionRequest, InsertDocumentRequest, SearchRequest, HealthRequest};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BarqError {
@@ -12,6 +15,10 @@ pub enum BarqError {
     Api { status: StatusCode, message: String },
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
+    #[error("gRPC error: {0}")]
+    Grpc(#[from] tonic::Status),
+    #[error("Transport error: {0}")]
+    Transport(#[from] tonic::transport::Error),
 }
 
 pub type Result<T> = std::result::Result<T, BarqError>;
@@ -60,7 +67,7 @@ impl BarqClient {
         name: &str, 
         dimension: usize, 
         metric: DistanceMetric,
-        index: Option<serde_json::Value>, // Using Value for flexibility with HNSW/IVF params
+        index: Option<serde_json::Value>, 
         text_fields: Option<Vec<TextFieldRequest>>,
     ) -> Result<()> {
         let url = format!("{}/collections", self.base_url);
@@ -137,14 +144,10 @@ impl Collection {
     ) -> Result<Vec<serde_json::Value>> {
         let mut url = format!("{}/collections/{}/search", self.client.base_url, self.name);
         
-        // Determine endpoint based on what's provided
-        // Logic mirroring the API routing preference
         if vector.is_some() && query.is_some() {
             url.push_str("/hybrid");
         } else if query.is_some() {
             url.push_str("/text");
-        } else {
-            // Default vector search
         }
 
         let payload = json!({
@@ -182,4 +185,89 @@ pub struct TextFieldRequest {
     pub name: String,
     pub indexed: bool,
     pub required: bool,
+}
+
+// gRPC Client Implementation
+#[derive(Clone, Debug)]
+pub struct BarqGrpcClient {
+    client: TonicBarqClient<Channel>,
+}
+
+impl BarqGrpcClient {
+    pub async fn connect(dst: String) -> Result<Self> {
+        let client = TonicBarqClient::connect(dst).await?;
+        Ok(Self { client })
+    }
+
+    pub async fn health(&mut self) -> Result<bool> {
+        let response = self.client.health(HealthRequest {}).await?;
+        Ok(response.into_inner().ok)
+    }
+
+    pub async fn create_collection(
+        &mut self,
+        name: &str,
+        dimension: u32,
+        metric: DistanceMetric,
+    ) -> Result<()> {
+        let metric_str = match metric {
+            DistanceMetric::Cosine => "Cosine",
+            DistanceMetric::Dot => "Dot",
+            DistanceMetric::L2 => "L2",
+        };
+        
+        self.client.create_collection(CreateCollectionRequest {
+            name: name.to_string(),
+            dimension: dimension,
+            metric: metric_str.to_string(),
+        }).await?;
+        Ok(())
+    }
+
+    pub async fn insert_document(
+        &mut self,
+        collection: &str,
+        id: impl Into<DocumentId>,
+        vector: Vec<f32>,
+        payload: serde_json::Value,
+    ) -> Result<()> {
+        let id_str = match id.into() {
+            DocumentId::U64(v) => v.to_string(),
+            DocumentId::Str(s) => s,
+        };
+        
+        self.client.insert_document(InsertDocumentRequest {
+            collection: collection.to_string(),
+            id: id_str,
+            vector,
+            payload_json: payload.to_string(),
+        }).await?;
+        Ok(())
+    }
+    
+    pub async fn search(
+        &mut self,
+        collection: &str,
+        vector: Vec<f32>,
+        top_k: u32,
+    ) -> Result<Vec<serde_json::Value>> { // Simplification: return basic result
+        let res = self.client.search(SearchRequest {
+            collection: collection.to_string(),
+            vector,
+            top_k,
+        }).await?;
+        
+        let results = res.into_inner().results;
+        let mut json_results = Vec::new();
+        
+        for r in results {
+             json_results.push(json!({
+                 "id": r.id,
+                 "score": r.score,
+                 "payload": serde_json::from_str::<serde_json::Value>(&r.payload_json).unwrap_or(json!({}))
+             }));
+        }
+        
+        Ok(json_results)
+    }
 }

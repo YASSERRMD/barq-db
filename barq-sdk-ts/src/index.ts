@@ -86,7 +86,7 @@ export class Collection {
     ): Promise<SearchResult[]> {
         let path = `/collections/${this.name}/search`;
         if (vector && query) path += "/hybrid";
-        elif(query) path += "/text";
+        else if (query) path += "/text";
 
         const body = {
             vector,
@@ -100,5 +100,81 @@ export class Collection {
             body: JSON.stringify(body),
         });
         return res.results;
+    }
+}
+
+import * as grpc from '@grpc/grpc-js';
+import * as protoLoader from '@grpc/proto-loader';
+import * as path from 'path';
+
+export class GrpcClient {
+    private client: any; // Dynamic grpc client
+    private packageDefinition: any;
+    private protoDescriptor: any;
+
+    constructor(address: string, protoPath: string) {
+        // Resolve proto path relative to current execution or package
+        // For SDK, user might pass absolute path or we can try to resolve it
+        this.packageDefinition = protoLoader.loadSync(protoPath, {
+            keepCase: true,
+            longs: String,
+            enums: String,
+            defaults: true,
+            oneofs: true
+        });
+        this.protoDescriptor = grpc.loadPackageDefinition(this.packageDefinition);
+        const BarqService = this.protoDescriptor.barq.Barq;
+        this.client = new BarqService(address, grpc.credentials.createInsecure());
+    }
+
+    health(): Promise<boolean> {
+        return new Promise((resolve, reject) => {
+            this.client.Health({}, (err: any, response: any) => {
+                if (err) return reject(err);
+                resolve(response.ok);
+            });
+        });
+    }
+
+    createCollection(name: string, dimension: number, metric: string = "L2"): Promise<void> {
+        return new Promise((resolve, reject) => {
+            this.client.CreateCollection({ name, dimension, metric }, (err: any, response: any) => {
+                if (err) return reject(err);
+                resolve();
+            });
+        });
+    }
+
+    insertDocument(collection: string, id: string | number, vector: number[], payload: any = {}): Promise<void> {
+        const payloadJson = JSON.stringify(payload);
+        return new Promise((resolve, reject) => {
+            this.client.InsertDocument({
+                collection,
+                id: String(id),
+                vector,
+                payload_json: payloadJson
+            }, (err: any, response: any) => {
+                if (err) return reject(err);
+                resolve();
+            });
+        });
+    }
+
+    search(collection: string, vector: number[], topK: number = 10): Promise<SearchResult[]> {
+        return new Promise((resolve, reject) => {
+            this.client.Search({
+                collection,
+                vector,
+                top_k: topK
+            }, (err: any, response: any) => {
+                if (err) return reject(err);
+                const results = response.results.map((r: any) => ({
+                    id: r.id,
+                    score: r.score,
+                    payload: JSON.parse(r.payload_json || "{}")
+                }));
+                resolve(results);
+            });
+        });
     }
 }
