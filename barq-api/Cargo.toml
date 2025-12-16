@@ -34,3 +34,5 @@ axum-test = "14.0"
 tempfile = "3"
 reqwest = { version = "0.11", features = ["json"] }
 barq-sdk-rust = { path = "../barq-sdk-rust" }
+rand = "0.8"
+chrono = "0.4"
