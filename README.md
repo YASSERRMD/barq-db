@@ -125,4 +125,4 @@ This project is a Cargo Workspace containing the following crates:
 - `barq-sdk-python`: Python client.
 
 ## License
-Apache-2.0
+ MIT license
