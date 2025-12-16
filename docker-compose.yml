@@ -7,6 +7,7 @@ services:
     container_name: barq-db
     ports:
       - "8080:8080"
+      - "50051:50051"
     volumes:
       - barq_data:/app/data
     environment:

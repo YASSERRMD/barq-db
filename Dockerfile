@@ -3,6 +3,11 @@ FROM rust:1-bookworm AS builder
 
 WORKDIR /app
 
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy entire workspace
 COPY . .
 
@@ -32,8 +37,9 @@ ENV BARQ_ADDR=0.0.0.0:8080
 ENV BARQ_STORAGE_DIR=/app/data
 ENV RUST_LOG=info,barq_api=info,barq_storage=info
 
-# Expose API port
+# Expose API port (HTTP) and gRPC port
 EXPOSE 8080
+EXPOSE 50051
 
 # Run the server by default
 ENTRYPOINT ["barq-server"]

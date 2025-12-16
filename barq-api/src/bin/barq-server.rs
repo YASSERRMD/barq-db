@@ -1,8 +1,12 @@
-use barq_api::{start_server_with_auth, start_tls_server, ApiAuth, TlsConfig};
+use barq_api::{ApiAuth, TlsConfig, AppState, build_router_from_state, ClusterConfig, ClusterRouter};
+use barq_api::grpc::GrpcService;
+use barq_proto::barq::barq_server::BarqServer;
 use barq_storage::Storage;
 use clap::Parser;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use tonic::transport::Server as TonicServer;
+use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -32,6 +36,10 @@ struct Cli {
     /// TLS client CA path (for mTLS)
     #[arg(long, env = "BARQ_TLS_CLIENT_CA")]
     tls_client_ca: Option<PathBuf>,
+
+    /// Cluster configuration file path
+    #[arg(long, env = "BARQ_CLUSTER_CONFIG")]
+    cluster: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -49,29 +57,64 @@ async fn main() -> anyhow::Result<()> {
     // Setup auth (default to no auth for now, can be enhanced)
     let auth = ApiAuth::new();
 
+    // Setup cluster
+    let cluster_config = if let Some(path) = cli.cluster {
+        ClusterConfig::from_path(path).expect("failed to load cluster config")
+    } else {
+        ClusterConfig::from_env_or_default().expect("failed to load cluster config")
+    };
+    let cluster = ClusterRouter::from_config(cluster_config).expect("invalid cluster config");
+
+    let state = AppState::new(storage, auth, cluster);
+    let grpc_service = GrpcService::new(state.clone());
+
+    // Axum Router
+    let app = build_router_from_state(state.clone()).layer(TraceLayer::new_for_http());
+
+    // Spawn gRPC server
+    let grpc_addr = "[::1]:50051".parse().unwrap();
+    info!("gRPC server listening on {}", grpc_addr);
+    tokio::spawn(async move {
+        TonicServer::builder()
+            .add_service(BarqServer::new(grpc_service))
+            .serve(grpc_addr)
+            .await
+            .expect("gRPC server failed");
+    });
+
     let shutdown = async {
         tokio::signal::ctrl_c()
             .await
-            .expect("failed to install Ctrl+C handler");
-        info!("Shutdown signal received");
+            .expect("failed to install CTRL+C signal handler");
+        info!("shutdown signal received");
     };
 
-    if cli.tls {
-        let cert = cli.tls_cert.expect("TLS certificate path required if TLS enabled");
-        let key = cli.tls_key.expect("TLS private key path required if TLS enabled");
-        let mut tls_config = TlsConfig::new(cert, key);
-        if let Some(ca) = cli.tls_client_ca {
-            tls_config = tls_config.with_client_ca(ca);
-        }
+    let listener = tokio::net::TcpListener::bind(cli.addr).await?;
+
+    if let (Some(cert_path), Some(key_path)) = (cli.tls_cert, cli.tls_key) {
+        use axum_server::tls_rustls::RustlsConfig;
         
-        info!("Listening on https://{}", cli.addr);
-        start_tls_server(cli.addr, storage, auth, tls_config, shutdown)
-            .await?
-            .await??;
+        let config = RustlsConfig::from_pem_file(cert_path, key_path)
+            .await
+            .expect("failed to load TLS config");
+            
+        info!("Barq (TLS) listening on {}", cli.addr);
+        
+        // Convert tokio listener to std for axum_server
+        let std_listener = listener.into_std().expect("failed to convert listener");
+        std_listener.set_nonblocking(true).expect("failed to set nonblocking");
+
+        axum_server::from_tcp_rustls(std_listener, config)
+            .expect("TLS bind failed")
+            .serve(app.into_make_service())
+            .await
+            .expect("server failed");
     } else {
-        let listener = tokio::net::TcpListener::bind(cli.addr).await?;
-        info!("Listening on http://{}", cli.addr);
-        start_server_with_auth(listener, storage, auth, shutdown).await.await??;
+        info!("Barq listening on {}", cli.addr);
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown)
+            .await
+            .expect("server failed");
     }
 
     info!("Server stopped successfully");

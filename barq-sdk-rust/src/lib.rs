@@ -2,7 +2,7 @@ use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::time::Duration;
-use barq_core::{CollectionSchema, DistanceMetric, DocumentId, Filter, HybridWeights};
+pub use barq_core::{CollectionSchema, DistanceMetric, DocumentId, Filter, HybridWeights};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BarqError {

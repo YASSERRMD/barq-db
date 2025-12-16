@@ -20,6 +20,9 @@ barq-storage = { path = "../barq-storage" }
 barq-index = { path = "../barq-index" }
 barq-bm25 = { path = "../barq-bm25" }
 barq-cluster = { path = "../barq-cluster" }
+barq-proto = { path = "../barq-proto" }
+tonic = "0.10"
+uuid = { version = "1.4", features = ["v4", "fast-rng"] }
 barq-admin = { version = "0.1.0", path = "../barq-admin" }
 clap = { version = "4.4", features = ["derive", "env"] }
 anyhow = "1"
@@ -36,3 +39,4 @@ reqwest = { version = "0.11", features = ["json"] }
 barq-sdk-rust = { path = "../barq-sdk-rust" }
 rand = "0.8"
 chrono = "0.4"
+tokio-stream = { version = "0.1", features = ["net"] }

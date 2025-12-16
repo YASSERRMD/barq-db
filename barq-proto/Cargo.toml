@@ -1,0 +1,12 @@
+[package]
+name = "barq-proto"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tonic = "0.10"
+prost = "0.12"
+tokio = { workspace = true }     # Usually needed for generated code to compile if it uses async traits
+
+[build-dependencies]
+tonic-build = "0.10"

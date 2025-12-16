@@ -11,7 +11,7 @@ use axum::{
 };
 use barq_bm25::Bm25Config;
 use barq_admin::auth::{JwtVerifier, JwtClaims, AuthMethod};
-use barq_cluster::{ClusterConfig, ClusterError, ClusterRouter};
+pub use barq_cluster::{ClusterConfig, ClusterError, ClusterRouter};
 use barq_core::{
     CollectionSchema, Document, FieldSchema, FieldType, Filter, HybridSearchResult, HybridWeights,
     PayloadValue, TenantId,
@@ -28,13 +28,25 @@ use std::time::Instant;
 // Re-export auth types for convenience and backward compatibility
 pub use barq_admin::auth::{ApiAuth, ApiError, ApiPermission, ApiRole, ApiIdentity, TlsConfig};
 pub use barq_admin::{admin_routes, AdminState};
+pub mod grpc;
 
 #[derive(Clone)]
-struct AppState {
-    storage: Arc<Mutex<Storage>>,
-    auth: ApiAuth,
-    metrics: PrometheusHandle,
-    cluster: ClusterRouter,
+pub struct AppState {
+    pub storage: Arc<Mutex<Storage>>,
+    pub auth: ApiAuth,
+    pub metrics: PrometheusHandle,
+    pub cluster: ClusterRouter,
+}
+
+impl AppState {
+    pub fn new(storage: Storage, auth: ApiAuth, cluster: ClusterRouter) -> Self {
+        Self {
+            storage: Arc::new(Mutex::new(storage)),
+            auth,
+            metrics: init_metrics_recorder(),
+            cluster,
+        }
+    }
 }
 
 // Implement conversion from AppState to AdminState
@@ -266,13 +278,11 @@ pub fn build_router_with_auth(storage: Storage, auth: ApiAuth) -> Router {
 }
 
 fn build_router_with_state(storage: Storage, auth: ApiAuth, cluster: ClusterRouter) -> Router {
-    let metrics = init_metrics_recorder();
-    let state = AppState {
-        storage: Arc::new(Mutex::new(storage)),
-        auth,
-        metrics,
-        cluster,
-    };
+    let state = AppState::new(storage, auth, cluster);
+    build_router_from_state(state)
+}
+
+pub fn build_router_from_state(state: AppState) -> Router {
 
     let admin_state = AdminState::from(state.clone());
 

@@ -130,6 +130,10 @@ impl Storage {
         &mut self.catalog
     }
 
+    pub fn catalog(&self) -> &Catalog {
+        &self.catalog
+    }
+
     pub fn open_with_snapshot(
         root: impl AsRef<Path>,
         snapshot_dir: impl AsRef<Path>,
