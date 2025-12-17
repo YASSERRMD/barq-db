@@ -6,11 +6,12 @@ build-backend = "hatchling.build"
 name = "barq-sdk-python"
 version = "0.1.0"
 authors = [
-  { name="Barq DB Contributors", email="..." },
+  { name = "Barq DB Contributors", email = "..." },
 ]
 description = "Python client for Barq DB"
 readme = "README.md"
 requires-python = ">=3.8"
+
 dependencies = [
     "httpx>=0.23",
     "grpcio>=1.50.0",
@@ -18,4 +19,8 @@ dependencies = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/YASSERRMD/barq-db"
+Homepage = "https://github.com/YASSERRMD/barq-db"
+
+# 👇 THIS IS REQUIRED
+[tool.hatch.build.targets.wheel]
+packages = ["barq"]
