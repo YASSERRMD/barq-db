@@ -5,7 +5,7 @@
   <a href="https://github.com/YASSERRMD/barq-db/blob/main/LICENSE"><img src="https://img.shields.io/github/license/YASSERRMD/barq-db" alt="License"></a>
 </p>
 
-The official TypeScript/Node.js SDK for [Barq DB](https://github.com/YASSERRMD/barq-db) — a high-performance vector database built in Rust.
+The official TypeScript/Node.js SDK for [Barq DB](https://github.com/YASSERRMD/barq-db) - a high-performance vector database built in Rust.
 
 ---
 
@@ -235,7 +235,7 @@ interface SearchResult {
 
 | Method | Parameters | Returns | Description |
 |--------|------------|---------|-------------|
-| `health()` | — | `Promise<boolean>` | Check server health |
+| `health()` | - | `Promise<boolean>` | Check server health |
 | `createCollection()` | `CreateCollectionRequest` | `Promise<void>` | Create collection |
 | `collection()` | `name: string` | `Collection` | Get collection reference |
 
@@ -250,7 +250,7 @@ interface SearchResult {
 
 | Method | Parameters | Returns | Description |
 |--------|------------|---------|-------------|
-| `health()` | — | `Promise<boolean>` | Check health |
+| `health()` | - | `Promise<boolean>` | Check health |
 | `createCollection()` | `name`, `dimension`, `metric` | `Promise<void>` | Create collection |
 | `insertDocument()` | `collection`, `id`, `vector`, `payload` | `Promise<void>` | Insert |
 | `search()` | `collection`, `vector`, `topK` | `Promise<SearchResult[]>` | Search |
@@ -312,8 +312,8 @@ const results = await barq.collection('docs').search(queryVec, undefined, 5);
 
 ### Dependencies
 
-- `@grpc/grpc-js` — gRPC client
-- `@grpc/proto-loader` — Proto file loading
+- `@grpc/grpc-js` - gRPC client
+- `@grpc/proto-loader` - Proto file loading
 
 ---
 
@@ -333,10 +333,10 @@ We welcome contributions! See the [main repository](https://github.com/YASSERRMD
 
 ## License
 
-MIT License — see [LICENSE](https://github.com/YASSERRMD/barq-db/blob/main/LICENSE)
+MIT License - see [LICENSE](https://github.com/YASSERRMD/barq-db/blob/main/LICENSE)
 
 ---
 
 <p align="center">
-  <a href="https://github.com/YASSERRMD/barq-db">Barq DB</a> — Vector search at lightning speed
+  <a href="https://github.com/YASSERRMD/barq-db">Barq DB</a> - Vector search at lightning speed
 </p>

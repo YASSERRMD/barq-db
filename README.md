@@ -20,11 +20,11 @@ Barq is a **high-performance vector database** built in Rust, designed for seman
 
 ## Key Features
 
-- **Vector Search** — HNSW, IVF, and flat indexes with SIMD-optimized distance calculations
-- **Hybrid Retrieval** — Combine vector similarity + BM25 keyword search with RRF fusion
-- **Multi-Tenancy** — Namespace isolation, RBAC, and per-tenant quotas
-- **Cloud-Native** — Sharded architecture with replication and consensus
-- **Multi-Language SDKs** — Python, TypeScript, Go, and Rust clients
+- **Vector Search** - HNSW, IVF, and flat indexes with SIMD-optimized distance calculations
+- **Hybrid Retrieval** - Combine vector similarity + BM25 keyword search with RRF fusion
+- **Multi-Tenancy** - Namespace isolation, RBAC, and per-tenant quotas
+- **Cloud-Native** - Sharded architecture with replication and consensus
+- **Multi-Language SDKs** - Python, TypeScript, Go, and Rust clients
 
 ---
 
@@ -145,16 +145,16 @@ let results = collection.search(Some(query_vec), None, 10, None, None).await?;
 ### Collections
 
 Collections store vectors with associated metadata. Each collection specifies:
-- **Dimension** — Vector size (e.g., 384, 768, 1536)
-- **Metric** — Distance function (`L2`, `Cosine`, `Dot`)
-- **Index** — Algorithm (`HNSW`, `IVF`, `Flat`)
+- **Dimension** - Vector size (e.g., 384, 768, 1536)
+- **Metric** - Distance function (`L2`, `Cosine`, `Dot`)
+- **Index** - Algorithm (`HNSW`, `IVF`, `Flat`)
 
 ### Documents
 
 Each document contains:
-- **ID** — Unique identifier (string or integer)
-- **Vector** — Dense embedding
-- **Payload** — JSON metadata for filtering
+- **ID** - Unique identifier (string or integer)
+- **Vector** - Dense embedding
+- **Payload** - JSON metadata for filtering
 
 ### Search Types
 
@@ -207,7 +207,7 @@ Each document contains:
 | `BARQ_HTTP_PORT` | `8080` | HTTP API port |
 | `BARQ_GRPC_PORT` | `50051` | gRPC API port |
 | `BARQ_DATA_DIR` | `./data` | Data directory |
-| `BARQ_API_KEY` | — | API key for authentication |
+| `BARQ_API_KEY` | - | API key for authentication |
 
 ### Docker Compose
 
@@ -233,9 +233,9 @@ We welcome contributions from the community!
 
 ### How to Contribute
 
-1. **Report Issues** — Found a bug? Open an issue with reproduction steps
-2. **Feature Requests** — Describe your use case and proposed solution
-3. **Pull Requests** — Fork, branch, and submit a PR
+1. **Report Issues** - Found a bug? Open an issue with reproduction steps
+2. **Feature Requests** - Describe your use case and proposed solution
+3. **Pull Requests** - Fork, branch, and submit a PR
 
 ### Development Setup
 
@@ -258,10 +258,10 @@ cargo test
 
 ## License
 
-MIT License — see [LICENSE](./LICENSE) for details.
+MIT License - see [LICENSE](./LICENSE) for details.
 
 ---
 
 <p align="center">
-  <b>Barq DB</b> — Vector search at lightning speed
+  <b>Barq DB</b> - Vector search at lightning speed
 </p>
