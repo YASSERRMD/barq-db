@@ -6,28 +6,7 @@
 
 use std::collections::HashSet;
 
-/// Common Arabic verb patterns (أوزان الأفعال)
-/// These are the most common patterns used in Arabic morphology
-static TRILITERAL_PATTERNS: &[&str] = &[
-    // Form I - فَعَلَ (basic)
-    "فعل",
-    // Form II - فَعَّلَ (intensive/causative)
-    "فعّل",
-    // Form III - فاعَلَ (reciprocal)
-    "فاعل",
-    // Form IV - أَفْعَلَ (causative)
-    "أفعل",
-    // Form V - تَفَعَّلَ (reflexive of II)
-    "تفعّل",
-    // Form VI - تَفاعَلَ (reciprocal/reflexive)
-    "تفاعل",
-    // Form VII - اِنْفَعَلَ (passive/reflexive)
-    "انفعل",
-    // Form VIII - اِفْتَعَلَ (reflexive)
-    "افتعل",
-    // Form X - اِسْتَفْعَلَ (request/consider)
-    "استفعل",
-];
+
 
 
 
