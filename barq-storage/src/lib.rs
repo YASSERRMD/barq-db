@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -128,6 +129,7 @@ pub struct Storage {
     default_tenant: TenantId,
     tenant_quotas: HashMap<TenantId, TenantQuota>,
     tenant_usage: HashMap<TenantId, TenantUsage>,
+    tiering_manager: Option<Arc<TieringManager>>,
 }
 
 impl Storage {
@@ -139,12 +141,18 @@ impl Storage {
             default_tenant: TenantId::default(),
             tenant_quotas: HashMap::new(),
             tenant_usage: HashMap::new(),
+            tiering_manager: None,
         };
         storage.ensure_tenant_root(&storage.default_tenant)?;
         storage.load_collections()?;
         storage.recalculate_usage();
         storage.recalculate_usage();
+        storage.recalculate_usage();
         Ok(storage)
+    }
+
+    pub fn set_tiering_manager(&mut self, manager: Arc<TieringManager>) {
+        self.tiering_manager = Some(manager);
     }
 
     pub fn catalog_mut(&mut self) -> &mut Catalog {

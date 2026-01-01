@@ -16,7 +16,7 @@ metrics = "0.22"
 metrics-exporter-prometheus = "0.13"
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 barq-core = { path = "../barq-core" }
-barq-storage = { path = "../barq-storage" }
+barq-storage = { path = "../barq-storage", features = ["cloud-all"] }
 barq-index = { path = "../barq-index" }
 barq-bm25 = { path = "../barq-bm25" }
 barq-cluster = { path = "../barq-cluster" }
