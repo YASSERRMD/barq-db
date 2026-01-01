@@ -92,3 +92,49 @@ pub trait ObjectStore: Send + Sync {
     /// Get the name/type of this object store for logging.
     fn store_type(&self) -> &'static str;
 }
+
+impl<T: ObjectStore + ?Sized> ObjectStore for std::sync::Arc<T> {
+    fn upload_dir(&self, local_dir: &Path, remote_prefix: &Path) -> Result<(), ObjectStoreError> {
+        (**self).upload_dir(local_dir, remote_prefix)
+    }
+
+    fn download_dir(&self, remote_prefix: &Path, local_dir: &Path) -> Result<(), ObjectStoreError> {
+        (**self).download_dir(remote_prefix, local_dir)
+    }
+
+    fn upload_file(&self, local_path: &Path, remote_key: &Path) -> Result<(), ObjectStoreError> {
+        (**self).upload_file(local_path, remote_key)
+    }
+
+    fn download_file(&self, remote_key: &Path, local_path: &Path) -> Result<(), ObjectStoreError> {
+        (**self).download_file(remote_key, local_path)
+    }
+
+    fn delete(&self, remote_key: &Path) -> Result<(), ObjectStoreError> {
+        (**self).delete(remote_key)
+    }
+
+    fn exists(&self, remote_key: &Path) -> Result<bool, ObjectStoreError> {
+        (**self).exists(remote_key)
+    }
+
+    fn get_metadata(&self, remote_key: &Path) -> Result<ObjectMetadata, ObjectStoreError> {
+        (**self).get_metadata(remote_key)
+    }
+
+    fn list(&self, prefix: &Path) -> Result<Vec<String>, ObjectStoreError> {
+        (**self).list(prefix)
+    }
+
+    fn copy(&self, src: &Path, dst: &Path) -> Result<(), ObjectStoreError> {
+        (**self).copy(src, dst)
+    }
+
+    fn move_object(&self, src: &Path, dst: &Path) -> Result<(), ObjectStoreError> {
+        (**self).move_object(src, dst)
+    }
+
+    fn store_type(&self) -> &'static str {
+        (**self).store_type()
+    }
+}

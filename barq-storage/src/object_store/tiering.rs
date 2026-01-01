@@ -3,6 +3,7 @@
 //! Provides automatic data movement between hot, warm, and cold storage tiers.
 
 use super::traits::{ObjectStore, ObjectStoreError};
+use super::RetryingObjectStore;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -110,6 +111,9 @@ pub struct TieringManager {
 impl TieringManager {
     /// Create a new TieringManager with only hot storage.
     pub fn new(hot_store: Arc<dyn ObjectStore>) -> Self {
+        // Enforce retry logic
+        let hot_store: Arc<dyn ObjectStore> = Arc::new(RetryingObjectStore::new(hot_store));
+
         Self {
             hot_store,
             warm_store: None,
@@ -126,6 +130,19 @@ impl TieringManager {
         cold_store: Option<Arc<dyn ObjectStore>>,
         policy: TieringPolicy,
     ) -> Self {
+        // Enforce retry logic for all stores
+        let hot_store: Arc<dyn ObjectStore> = Arc::new(RetryingObjectStore::new(hot_store));
+        
+        let warm_store = warm_store.map(|s| {
+            let s: Arc<dyn ObjectStore> = Arc::new(RetryingObjectStore::new(s));
+            s
+        });
+
+        let cold_store = cold_store.map(|s| {
+            let s: Arc<dyn ObjectStore> = Arc::new(RetryingObjectStore::new(s));
+            s
+        });
+
         Self {
             hot_store,
             warm_store,
