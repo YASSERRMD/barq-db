@@ -76,6 +76,43 @@ tolerations: []
 # Affinity rules
 affinity: {}
 
+# Pod Disruption Budget for high availability
+pdb:
+  enabled: false
+  # Minimum available pods during voluntary disruptions
+  minAvailable: 1
+  # Maximum unavailable pods during voluntary disruptions (alternative to minAvailable)
+  # maxUnavailable: 1
+
+# Network Policy for security isolation
+networkPolicy:
+  enabled: false
+  # Allow external traffic (set to false to only allow in-cluster traffic)
+  allowExternal: true
+  # Namespace selector for ingress (if allowExternal is false)
+  ingressNamespaceSelector: {}
+  # Namespace selector for metrics scraping
+  metricsNamespaceSelector: {}
+  # Extra egress rules
+  extraEgress: []
+
+# Init container configuration
+initContainers:
+  enabled: false
+  # Wait for dependencies
+  waitForDeps:
+    enabled: false
+    image: busybox:1.36
+    # Custom command to run
+    command: []
+  # Run custom initialization
+  custom: []
+  # Example:
+  # - name: init-data
+  #   image: busybox:1.36
+  #   command: ['sh', '-c', 'echo initializing']
+
+
 # Persistence configuration
 persistence:
   enabled: true

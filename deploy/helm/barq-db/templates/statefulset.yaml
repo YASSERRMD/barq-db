@@ -26,6 +26,22 @@ spec:
       serviceAccountName: {{ include "barq-db.serviceAccountName" . }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if .Values.initContainers.enabled }}
+      initContainers:
+        {{- if .Values.initContainers.waitForDeps.enabled }}
+        - name: wait-for-deps
+          image: {{ .Values.initContainers.waitForDeps.image }}
+          {{- if .Values.initContainers.waitForDeps.command }}
+          command:
+            {{- toYaml .Values.initContainers.waitForDeps.command | nindent 12 }}
+          {{- else }}
+          command: ['sh', '-c', 'echo "Ready to start Barq DB"']
+          {{- end }}
+        {{- end }}
+        {{- with .Values.initContainers.custom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
       containers:
         - name: {{ .Chart.Name }}
           securityContext:
