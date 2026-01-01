@@ -3,7 +3,7 @@
 use super::traits::{ObjectMetadata, ObjectStore, ObjectStoreError};
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
-use std::collections::HashMap;
+
 use std::path::{Path, PathBuf};
 use tokio::runtime::Runtime;
 use walkdir::WalkDir;

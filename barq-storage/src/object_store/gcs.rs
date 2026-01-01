@@ -8,7 +8,7 @@ use google_cloud_storage::http::objects::get::GetObjectRequest;
 use google_cloud_storage::http::objects::list::ListObjectsRequest;
 use google_cloud_storage::http::objects::upload::{Media, UploadObjectRequest, UploadType};
 use google_cloud_storage::http::objects::copy::CopyObjectRequest;
-use std::collections::HashMap;
+
 use std::path::{Path, PathBuf};
 use tokio::runtime::Runtime;
 use walkdir::WalkDir;
