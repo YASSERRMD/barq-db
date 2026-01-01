@@ -128,9 +128,17 @@ tiering:
 ## Development
 
 ### Building the Operator
-
+ 
 ```bash
 cargo build --release -p barq-operator
+```
+
+### Building Docker Image
+
+From the project root:
+
+```bash
+docker build -t yasserrmd/barq-operator:latest -f deploy/k8s-operator/Dockerfile .
 ```
 
 ### Running Locally
