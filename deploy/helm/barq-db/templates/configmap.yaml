@@ -1,0 +1,54 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "barq-db.fullname" . }}-config
+  labels:
+    {{- include "barq-db.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    server:
+      http_port: {{ .Values.service.httpPort }}
+      grpc_port: {{ .Values.service.grpcPort }}
+      data_dir: {{ .Values.barq.dataDir }}
+      log_level: {{ .Values.barq.logLevel }}
+    
+    index:
+      type: {{ .Values.barq.index.type }}
+      m: {{ .Values.barq.index.m }}
+      ef_construction: {{ .Values.barq.index.efConstruction }}
+    
+    cluster:
+      mode: {{ .Values.barq.mode }}
+      {{- if .Values.barq.peers }}
+      peers:
+        {{- range .Values.barq.peers }}
+        - {{ . }}
+        {{- end }}
+      {{- end }}
+    
+    {{- if .Values.tiering.enabled }}
+    tiering:
+      enabled: true
+      hot:
+        max_age_days: {{ .Values.tiering.hot.maxAgeDays }}
+        max_size_gi: {{ .Values.tiering.hot.maxSizeGi }}
+      {{- if .Values.tiering.warm.enabled }}
+      warm:
+        enabled: true
+        provider: {{ .Values.tiering.warm.provider }}
+        bucket: {{ .Values.tiering.warm.bucket }}
+        prefix: {{ .Values.tiering.warm.prefix }}
+        max_age_days: {{ .Values.tiering.warm.maxAgeDays }}
+      {{- end }}
+      {{- if .Values.tiering.cold.enabled }}
+      cold:
+        enabled: true
+        provider: {{ .Values.tiering.cold.provider }}
+        bucket: {{ .Values.tiering.cold.bucket }}
+        prefix: {{ .Values.tiering.cold.prefix }}
+      {{- end }}
+    {{- end }}
+    
+    metrics:
+      enabled: {{ .Values.metrics.enabled }}
+      port: {{ .Values.metrics.port }}

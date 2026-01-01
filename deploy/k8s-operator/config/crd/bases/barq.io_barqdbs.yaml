@@ -1,0 +1,168 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: barqdbs.barq.io
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.14.0
+spec:
+  group: barq.io
+  names:
+    kind: BarqDB
+    listKind: BarqDBList
+    plural: barqdbs
+    singular: barqdb
+    shortNames:
+      - bdb
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+        scale:
+          specReplicasPath: .spec.replicas
+          statusReplicasPath: .status.replicas
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - replicas
+              properties:
+                replicas:
+                  type: integer
+                  minimum: 1
+                  maximum: 100
+                  default: 1
+                  description: Number of Barq DB replicas
+                image:
+                  type: string
+                  default: "yasserrmd/barq-db:latest"
+                  description: Docker image to use
+                resources:
+                  type: object
+                  properties:
+                    requests:
+                      type: object
+                      properties:
+                        cpu:
+                          type: string
+                          default: "500m"
+                        memory:
+                          type: string
+                          default: "1Gi"
+                    limits:
+                      type: object
+                      properties:
+                        cpu:
+                          type: string
+                          default: "2000m"
+                        memory:
+                          type: string
+                          default: "4Gi"
+                storage:
+                  type: object
+                  properties:
+                    size:
+                      type: string
+                      default: "10Gi"
+                      description: Storage size for each replica
+                    storageClassName:
+                      type: string
+                      description: Storage class to use
+                config:
+                  type: object
+                  properties:
+                    logLevel:
+                      type: string
+                      enum: ["debug", "info", "warn", "error"]
+                      default: "info"
+                    indexType:
+                      type: string
+                      enum: ["HNSW", "IVF", "Flat"]
+                      default: "HNSW"
+                    mode:
+                      type: string
+                      enum: ["standalone", "cluster"]
+                      default: "standalone"
+                tiering:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                    warmStorage:
+                      type: object
+                      properties:
+                        provider:
+                          type: string
+                          enum: ["s3", "gcs", "azure"]
+                        bucket:
+                          type: string
+                        secretRef:
+                          type: string
+                    coldStorage:
+                      type: object
+                      properties:
+                        provider:
+                          type: string
+                          enum: ["s3", "gcs", "azure"]
+                        bucket:
+                          type: string
+                        secretRef:
+                          type: string
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: ["Pending", "Running", "Scaling", "Failed", "Terminating"]
+                replicas:
+                  type: integer
+                readyReplicas:
+                  type: integer
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                endpoints:
+                  type: object
+                  properties:
+                    http:
+                      type: string
+                    grpc:
+                      type: string
+      additionalPrinterColumns:
+        - name: Replicas
+          type: integer
+          jsonPath: .spec.replicas
+        - name: Ready
+          type: integer
+          jsonPath: .status.readyReplicas
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

@@ -1,0 +1,171 @@
+# Default values for barq-db
+# This is a YAML-formatted file
+
+# Number of replicas for the StatefulSet
+replicaCount: 1
+
+image:
+  repository: yasserrmd/barq-db
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  fsGroup: 1000
+
+securityContext:
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: false
+  runAsNonRoot: true
+  runAsUser: 1000
+
+# HTTP and gRPC service configuration
+service:
+  type: ClusterIP
+  httpPort: 8080
+  grpcPort: 50051
+  annotations: {}
+
+# Ingress configuration for external access
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: barq.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# Resource limits and requests
+resources:
+  limits:
+    cpu: 2000m
+    memory: 4Gi
+  requests:
+    cpu: 500m
+    memory: 1Gi
+
+# Horizontal Pod Autoscaler
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
+
+# Node selector for scheduling
+nodeSelector: {}
+
+# Tolerations for scheduling
+tolerations: []
+
+# Affinity rules
+affinity: {}
+
+# Persistence configuration
+persistence:
+  enabled: true
+  storageClassName: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 10Gi
+  annotations: {}
+
+# Barq DB configuration
+barq:
+  # API key for authentication
+  apiKey: ""
+  # Use existing secret for API key
+  existingSecret: ""
+  existingSecretKey: "api-key"
+  
+  # Data directory
+  dataDir: /data
+  
+  # Logging configuration
+  logLevel: info
+  
+  # Index configuration
+  index:
+    type: HNSW
+    m: 16
+    efConstruction: 200
+  
+  # Cluster mode (standalone, cluster)
+  mode: standalone
+  
+  # Cluster peer discovery
+  peers: []
+
+# Metrics and monitoring
+metrics:
+  enabled: true
+  port: 9090
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+
+# Health check configuration
+healthCheck:
+  enabled: true
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+  successThreshold: 1
+
+# Object storage tiering configuration
+tiering:
+  enabled: false
+  # Hot tier configuration
+  hot:
+    maxAgeDays: 1
+    maxSizeGi: 10
+  # Warm tier configuration  
+  warm:
+    enabled: false
+    provider: ""  # s3, gcs, azure
+    bucket: ""
+    prefix: "warm/"
+    maxAgeDays: 30
+  # Cold tier configuration
+  cold:
+    enabled: false
+    provider: ""
+    bucket: ""
+    prefix: "cold/"
+
+# Cloud provider credentials (if using tiering)
+cloudCredentials:
+  # AWS credentials
+  aws:
+    accessKeyId: ""
+    secretAccessKey: ""
+    region: "us-east-1"
+    existingSecret: ""
+  # GCS credentials
+  gcs:
+    projectId: ""
+    serviceAccountKey: ""
+    existingSecret: ""
+  # Azure credentials
+  azure:
+    storageAccount: ""
+    storageKey: ""
+    existingSecret: ""

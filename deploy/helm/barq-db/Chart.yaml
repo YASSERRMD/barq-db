@@ -1,0 +1,19 @@
+apiVersion: v2
+name: barq-db
+description: A Helm chart for deploying Barq DB - High-Performance Vector Database
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/YASSERRMD/barq-db
+sources:
+  - https://github.com/YASSERRMD/barq-db
+maintainers:
+  - name: YASSERRMD
+    url: https://github.com/YASSERRMD
+keywords:
+  - vector-database
+  - search
+  - ai
+  - embeddings
+  - semantic-search
+  - rag
