@@ -12,8 +12,9 @@ use std::time::{Duration, Instant};
 
 pub mod object_store;
 pub use object_store::{
-    LocalObjectStore, ObjectStore, ObjectStoreError, 
+    LocalObjectStore, ObjectStore, ObjectStoreError, ObjectMetadata,
     StorageTier, TieringPolicy, TieringManager, TierConfig,
+    RetryConfig, RetryingObjectStore, with_retry, is_retryable,
 };
 
 #[cfg(feature = "s3")]
@@ -1223,7 +1224,7 @@ mod tests {
 
         let snapshot_dir = tempfile::tempdir().unwrap();
         let upload_root = tempfile::tempdir().unwrap();
-        let object_store = LocalObjectStore::new(upload_root.path());
+        let object_store = LocalObjectStore::new(upload_root.path()).unwrap();
         let handle = storage
             .create_snapshot_and_upload(snapshot_dir.path(), object_store.clone(), "snapshots/test")
             .unwrap();
@@ -1246,7 +1247,7 @@ mod tests {
 
         let snapshot_dir = tempfile::tempdir().unwrap();
         let upload_root = tempfile::tempdir().unwrap();
-        let object_store = LocalObjectStore::new(upload_root.path());
+        let object_store = LocalObjectStore::new(upload_root.path()).unwrap();
         storage
             .create_snapshot(snapshot_dir.path())
             .expect("snapshot should succeed");
@@ -1366,7 +1367,7 @@ mod tests {
             .unwrap();
         storage.flush_wal_to_segment(&tenant, &schema.name).unwrap();
 
-        let object_store = LocalObjectStore::new(upload_root.path());
+        let object_store = LocalObjectStore::new(upload_root.path()).unwrap();
         let handle = storage
             .upload_cold_segments(
                 &tenant,
@@ -1415,7 +1416,7 @@ mod tests {
         storage
             .create_snapshot(snapshot_dir.path())
             .expect("snapshot should succeed");
-        let object_store = LocalObjectStore::new(upload_root.path());
+        let object_store = LocalObjectStore::new(upload_root.path()).unwrap();
         object_store
             .upload_dir(snapshot_dir.path(), std::path::Path::new("snapshots/large"))
             .unwrap();

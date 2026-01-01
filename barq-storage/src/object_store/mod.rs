@@ -5,6 +5,7 @@
 
 mod local;
 mod traits;
+mod retry;
 
 #[cfg(feature = "s3")]
 mod s3;
@@ -19,8 +20,9 @@ mod tiering;
 
 // Re-exports
 pub use local::LocalObjectStore;
-pub use traits::{ObjectStore, ObjectStoreError};
+pub use traits::{ObjectMetadata, ObjectStore, ObjectStoreError};
 pub use tiering::{StorageTier, TieringPolicy, TieringManager, TierConfig};
+pub use retry::{RetryConfig, RetryingObjectStore, with_retry, is_retryable};
 
 #[cfg(feature = "s3")]
 pub use s3::S3ObjectStore;
@@ -30,3 +32,4 @@ pub use gcs::GcsObjectStore;
 
 #[cfg(feature = "azure")]
 pub use azure::AzureBlobStore;
+
