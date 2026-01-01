@@ -29,24 +29,7 @@ static TRILITERAL_PATTERNS: &[&str] = &[
     "استفعل",
 ];
 
-/// Common noun patterns (أوزان الأسماء)
-static NOUN_PATTERNS: &[&str] = &[
-    // Agent nouns
-    "فاعل",    // doer (كاتب - writer)
-    "فعّال",   // intensive doer (قتّال - killer)
-    "مفعّل",   // one who does (مدرّب - trainer)
-    // Place/instrument nouns
-    "مفعل",    // place/instrument (مكتب - office)
-    "مفعلة",   // place (مدرسة - school)
-    // Abstract nouns
-    "فعالة",   // abstract (كتابة - writing)
-    "فعول",    // abstract (دخول - entry)
-    "فعيل",    // result (قتيل - killed)
-    // Plurals
-    "أفعال",   // plural pattern (أقلام - pens)
-    "فعول",    // plural pattern (قلوب - hearts)
-    "فعال",    // plural pattern (كتاب - books)
-];
+
 
 /// Arabic root extractor.
 pub struct ArabicRootExtractor {
