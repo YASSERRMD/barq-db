@@ -1,6 +1,4 @@
 //! Google Cloud Storage Object Store Implementation
-//!
-//! Provides GCS object storage backend using the Google Cloud SDK.
 
 use super::traits::{ObjectMetadata, ObjectStore, ObjectStoreError};
 use google_cloud_storage::client::{Client, ClientConfig};
@@ -16,10 +14,6 @@ use tokio::runtime::Runtime;
 use walkdir::WalkDir;
 
 /// Google Cloud Storage object store implementation.
-///
-/// Uses Application Default Credentials (ADC) for authentication.
-/// Set GOOGLE_APPLICATION_CREDENTIALS environment variable to point
-/// to your service account key file.
 #[derive(Clone)]
 pub struct GcsObjectStore {
     client: Client,
@@ -29,14 +23,10 @@ pub struct GcsObjectStore {
 }
 
 impl GcsObjectStore {
-    /// Create a new GcsObjectStore with the given bucket name.
-    ///
-    /// Uses Application Default Credentials for authentication.
     pub fn new(bucket: impl Into<String>) -> Result<Self, ObjectStoreError> {
         Self::with_prefix(bucket, None::<PathBuf>)
     }
 
-    /// Create a new GcsObjectStore with a key prefix.
     pub fn with_prefix(
         bucket: impl Into<String>,
         prefix: Option<impl AsRef<Path>>,
@@ -62,7 +52,6 @@ impl GcsObjectStore {
         })
     }
 
-    /// Create without authentication (for public buckets or emulator).
     pub fn anonymous(bucket: impl Into<String>) -> Result<Self, ObjectStoreError> {
         let runtime = Runtime::new()
             .map_err(|e| ObjectStoreError::Configuration(e.to_string()))?;
@@ -160,7 +149,7 @@ impl ObjectStore for GcsObjectStore {
                 self.upload_bytes(&key, data).await?;
             }
             Ok(())
-        })?
+        })
     }
 
     fn download_dir(&self, remote_prefix: &Path, local_dir: &Path) -> Result<(), ObjectStoreError> {
@@ -209,7 +198,7 @@ impl ObjectStore for GcsObjectStore {
                 }
             }
             Ok(())
-        })?
+        })
     }
 
     fn upload_file(&self, local_path: &Path, remote_key: &Path) -> Result<(), ObjectStoreError> {
@@ -217,7 +206,7 @@ impl ObjectStore for GcsObjectStore {
         self.run_async(async {
             let data = std::fs::read(local_path)?;
             self.upload_bytes(&key, data).await
-        })?
+        })
     }
 
     fn download_file(&self, remote_key: &Path, local_path: &Path) -> Result<(), ObjectStoreError> {
@@ -229,7 +218,7 @@ impl ObjectStore for GcsObjectStore {
             let data = self.download_bytes(&key).await?;
             std::fs::write(local_path, data)?;
             Ok(())
-        })?
+        })
     }
 
     fn delete(&self, remote_key: &Path) -> Result<(), ObjectStoreError> {
@@ -244,7 +233,7 @@ impl ObjectStore for GcsObjectStore {
                 .await
                 .map_err(|e| ObjectStoreError::Provider(e.to_string()))?;
             Ok(())
-        })?
+        })
     }
 
     fn exists(&self, remote_key: &Path) -> Result<bool, ObjectStoreError> {
@@ -269,7 +258,7 @@ impl ObjectStore for GcsObjectStore {
                     }
                 }
             }
-        })?
+        })
     }
 
     fn get_metadata(&self, remote_key: &Path) -> Result<ObjectMetadata, ObjectStoreError> {
@@ -294,10 +283,10 @@ impl ObjectStore for GcsObjectStore {
                 size: obj.size as u64,
                 last_modified,
                 content_type: obj.content_type,
-                etag: obj.etag,
+                etag: Some(obj.etag),
                 custom_metadata: obj.metadata.unwrap_or_default(),
             })
-        })?
+        })
     }
 
     fn list(&self, prefix: &Path) -> Result<Vec<String>, ObjectStoreError> {
@@ -331,7 +320,7 @@ impl ObjectStore for GcsObjectStore {
                 }
             }
             Ok(results)
-        })?
+        })
     }
 
     fn copy(&self, src: &Path, dst: &Path) -> Result<(), ObjectStoreError> {
@@ -350,7 +339,7 @@ impl ObjectStore for GcsObjectStore {
                 .await
                 .map_err(|e| ObjectStoreError::Provider(e.to_string()))?;
             Ok(())
-        })?
+        })
     }
 
     fn store_type(&self) -> &'static str {

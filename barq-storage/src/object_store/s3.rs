@@ -1,6 +1,4 @@
 //! AWS S3 Object Store Implementation
-//!
-//! Provides S3-compatible object storage backend using the AWS SDK.
 
 use super::traits::{ObjectMetadata, ObjectStore, ObjectStoreError};
 use aws_sdk_s3::primitives::ByteStream;
@@ -11,12 +9,6 @@ use tokio::runtime::Runtime;
 use walkdir::WalkDir;
 
 /// AWS S3 object store implementation.
-///
-/// Supports any S3-compatible storage including:
-/// - Amazon S3
-/// - MinIO
-/// - DigitalOcean Spaces
-/// - Backblaze B2
 #[derive(Clone)]
 pub struct S3ObjectStore {
     client: Client,
@@ -26,19 +18,10 @@ pub struct S3ObjectStore {
 }
 
 impl S3ObjectStore {
-    /// Create a new S3ObjectStore with the given bucket name.
-    ///
-    /// Uses environment variables for credentials:
-    /// - AWS_ACCESS_KEY_ID
-    /// - AWS_SECRET_ACCESS_KEY
-    /// - AWS_REGION (optional, defaults to us-east-1)
     pub fn new(bucket: impl Into<String>) -> Result<Self, ObjectStoreError> {
         Self::with_prefix(bucket, None::<PathBuf>)
     }
 
-    /// Create a new S3ObjectStore with a key prefix.
-    ///
-    /// All operations will be scoped under this prefix.
     pub fn with_prefix(
         bucket: impl Into<String>,
         prefix: Option<impl AsRef<Path>>,
@@ -61,7 +44,6 @@ impl S3ObjectStore {
         })
     }
 
-    /// Create with custom endpoint URL for S3-compatible services.
     pub fn with_endpoint(
         bucket: impl Into<String>,
         endpoint_url: impl Into<String>,
@@ -179,34 +161,33 @@ impl S3ObjectStore {
                 .await
                 .map_err(|e| ObjectStoreError::Provider(e.to_string()))?;
 
-            if let Some(contents) = resp.contents() {
-                for object in contents {
-                    if let Some(key) = object.key() {
-                        let rel = key.trim_start_matches(&prefix);
-                        let rel_path = Path::new(rel.trim_start_matches('/'));
-                        if rel_path.as_os_str().is_empty() {
-                            continue;
-                        }
-                        let dest_path = local_dir.join(rel_path);
-                        if let Some(parent) = dest_path.parent() {
-                            std::fs::create_dir_all(parent)?;
-                        }
-                        let body = self
-                            .client
-                            .get_object()
-                            .bucket(&self.bucket)
-                            .key(key)
-                            .send()
-                            .await
-                            .map_err(|e| ObjectStoreError::Provider(e.to_string()))?
-                            .body
-                            .collect()
-                            .await
-                            .map_err(|e| ObjectStoreError::Network(e.to_string()))?;
-                        std::fs::write(&dest_path, body.into_bytes())?;
+            for object in resp.contents() {
+                if let Some(key) = object.key() {
+                    let rel = key.trim_start_matches(&prefix);
+                    let rel_path = Path::new(rel.trim_start_matches('/'));
+                    if rel_path.as_os_str().is_empty() {
+                        continue;
                     }
+                    let dest_path = local_dir.join(rel_path);
+                    if let Some(parent) = dest_path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    let body = self
+                        .client
+                        .get_object()
+                        .bucket(&self.bucket)
+                        .key(key)
+                        .send()
+                        .await
+                        .map_err(|e| ObjectStoreError::Provider(e.to_string()))?
+                        .body
+                        .collect()
+                        .await
+                        .map_err(|e| ObjectStoreError::Network(e.to_string()))?;
+                    std::fs::write(&dest_path, body.into_bytes())?;
                 }
             }
+            
             if let Some(token) = resp.next_continuation_token() {
                 continuation_token = Some(token.to_string());
             } else {
@@ -219,11 +200,11 @@ impl S3ObjectStore {
 
 impl ObjectStore for S3ObjectStore {
     fn upload_dir(&self, local_dir: &Path, remote_prefix: &Path) -> Result<(), ObjectStoreError> {
-        self.run_async(self.upload_dir_async(local_dir, remote_prefix))?
+        self.run_async(self.upload_dir_async(local_dir, remote_prefix))
     }
 
     fn download_dir(&self, remote_prefix: &Path, local_dir: &Path) -> Result<(), ObjectStoreError> {
-        self.run_async(self.download_dir_async(remote_prefix, local_dir))?
+        self.run_async(self.download_dir_async(remote_prefix, local_dir))
     }
 
     fn upload_file(&self, local_path: &Path, remote_key: &Path) -> Result<(), ObjectStoreError> {
@@ -241,7 +222,7 @@ impl ObjectStore for S3ObjectStore {
                 .await
                 .map_err(|e| ObjectStoreError::Provider(e.to_string()))?;
             Ok(())
-        })?
+        })
     }
 
     fn download_file(&self, remote_key: &Path, local_path: &Path) -> Result<(), ObjectStoreError> {
@@ -265,7 +246,7 @@ impl ObjectStore for S3ObjectStore {
                 .map_err(|e| ObjectStoreError::Network(e.to_string()))?;
             std::fs::write(local_path, body.into_bytes())?;
             Ok(())
-        })?
+        })
     }
 
     fn delete(&self, remote_key: &Path) -> Result<(), ObjectStoreError> {
@@ -279,7 +260,7 @@ impl ObjectStore for S3ObjectStore {
                 .await
                 .map_err(|e| ObjectStoreError::Provider(e.to_string()))?;
             Ok(())
-        })?
+        })
     }
 
     fn exists(&self, remote_key: &Path) -> Result<bool, ObjectStoreError> {
@@ -303,7 +284,7 @@ impl ObjectStore for S3ObjectStore {
                     }
                 }
             }
-        })?
+        })
     }
 
     fn get_metadata(&self, remote_key: &Path) -> Result<ObjectMetadata, ObjectStoreError> {
@@ -333,7 +314,7 @@ impl ObjectStore for S3ObjectStore {
                     .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
                     .unwrap_or_default(),
             })
-        })?
+        })
     }
 
     fn list(&self, prefix: &Path) -> Result<Vec<String>, ObjectStoreError> {
@@ -356,11 +337,9 @@ impl ObjectStore for S3ObjectStore {
                     .await
                     .map_err(|e| ObjectStoreError::Provider(e.to_string()))?;
 
-                if let Some(contents) = resp.contents() {
-                    for object in contents {
-                        if let Some(key) = object.key() {
-                            results.push(key.to_string());
-                        }
+                for object in resp.contents() {
+                    if let Some(key) = object.key() {
+                        results.push(key.to_string());
                     }
                 }
 
@@ -371,7 +350,7 @@ impl ObjectStore for S3ObjectStore {
                 }
             }
             Ok(results)
-        })?
+        })
     }
 
     fn copy(&self, src: &Path, dst: &Path) -> Result<(), ObjectStoreError> {
@@ -389,7 +368,7 @@ impl ObjectStore for S3ObjectStore {
                 .await
                 .map_err(|e| ObjectStoreError::Provider(e.to_string()))?;
             Ok(())
-        })?
+        })
     }
 
     fn store_type(&self) -> &'static str {

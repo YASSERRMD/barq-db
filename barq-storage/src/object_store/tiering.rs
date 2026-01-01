@@ -108,6 +108,17 @@ pub struct TieringManager {
     metadata: Arc<RwLock<HashMap<String, TieredObjectInfo>>>,
 }
 
+impl std::fmt::Debug for TieringManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TieringManager")
+         .field("hot_store", &"ObjectStore")
+         .field("warm_store", &self.warm_store.as_ref().map(|_| "ObjectStore"))
+         .field("cold_store", &self.cold_store.as_ref().map(|_| "ObjectStore"))
+         .field("policy", &self.policy)
+         .finish()
+    }
+}
+
 impl TieringManager {
     /// Create a new TieringManager with only hot storage.
     pub fn new(hot_store: Arc<dyn ObjectStore>) -> Self {
