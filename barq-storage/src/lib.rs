@@ -10,8 +10,21 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-mod object_store;
-pub use object_store::{LocalObjectStore, ObjectStore};
+pub mod object_store;
+pub use object_store::{
+    LocalObjectStore, ObjectStore, ObjectStoreError, 
+    StorageTier, TieringPolicy, TieringManager, TierConfig,
+};
+
+#[cfg(feature = "s3")]
+pub use object_store::S3ObjectStore;
+
+#[cfg(feature = "gcs")]
+pub use object_store::GcsObjectStore;
+
+#[cfg(feature = "azure")]
+pub use object_store::AzureBlobStore;
+
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -33,6 +46,13 @@ pub enum StorageError {
     #[error("tenant {tenant} quota exceeded: {reason}")]
     QuotaExceeded { tenant: TenantId, reason: String },
 }
+
+impl From<ObjectStoreError> for StorageError {
+    fn from(err: ObjectStoreError) -> Self {
+        StorageError::ObjectStore(err.to_string())
+    }
+}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct TenantQuota {
@@ -439,7 +459,10 @@ impl Storage {
         let snapshot_dir = snapshot_dir.as_ref().to_path_buf();
         let remote_prefix = remote_prefix.as_ref().to_path_buf();
         self.create_snapshot(&snapshot_dir)?;
-        let handle = thread::spawn(move || object_store.upload_dir(&snapshot_dir, &remote_prefix));
+        let handle = thread::spawn(move || {
+            object_store.upload_dir(&snapshot_dir, &remote_prefix)
+                .map_err(StorageError::from)
+        });
         Ok(handle)
     }
 
@@ -485,7 +508,7 @@ impl Storage {
             fs::remove_dir_all(snapshot_dir)?;
         }
         fs::create_dir_all(snapshot_dir)?;
-        object_store.download_dir(remote_prefix.as_ref(), snapshot_dir)?;
+        object_store.download_dir(remote_prefix.as_ref(), snapshot_dir).map_err(StorageError::from)?;
         Self::restore_snapshot(target_root, snapshot_dir)
     }
 
@@ -617,8 +640,10 @@ impl Storage {
         let local_segments = self.segments_dir(tenant, collection);
         let remote_prefix = remote_prefix.as_ref().to_path_buf();
         fs::create_dir_all(&local_segments)?;
-        let handle =
-            thread::spawn(move || object_store.upload_dir(&local_segments, &remote_prefix));
+        let handle = thread::spawn(move || {
+            object_store.upload_dir(&local_segments, &remote_prefix)
+                .map_err(StorageError::from)
+        });
         Ok(handle)
     }
 
