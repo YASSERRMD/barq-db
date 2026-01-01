@@ -4,6 +4,13 @@ use std::collections::HashMap;
 
 use barq_index::{DocumentId, DocumentIdError, SearchResult};
 
+pub mod analyzers;
+pub use analyzers::{
+    ArabicAnalyzer, ArabicNormalizer, ArabicStemmer, ArabicStopWords,
+    EnglishAnalyzer, MultilingualAnalyzer,
+    Analyzer as TextAnalyzer, AnalyzerConfig, Language,
+};
+
 #[derive(Debug, thiserror::Error)]
 pub enum TextIndexError {
     #[error("document id error: {0}")]
