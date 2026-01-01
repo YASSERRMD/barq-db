@@ -4,125 +4,264 @@
   <img src="assets/logo.jpg" alt="Barq DB Logo" width="300"/>
 </p>
 
-**Rust-Native, Cloud-Ready Vector & Hybrid Search Database**
+<p align="center">
+  <b>Blazing-Fast Vector Database for AI Applications</b>
+</p>
 
-Barq is a lightning-fast vector database and hybrid search engine that unifies dense vectors, BM25-style sparse signals, and rich metadata filters into a single, cloud-native platform for RAG, semantic search, and recommendation workloads. 
-
-Its architecture focuses on three pillars: **extreme performance**, **multi-tenant cloud architecture**, and **first-class hybrid retrieval** tailored for global use cases.
+<p align="center">
+  <a href="https://github.com/YASSERRMD/barq-db/blob/main/LICENSE"><img src="https://img.shields.io/github/license/YASSERRMD/barq-db" alt="License"></a>
+  <a href="https://github.com/YASSERRMD/barq-db/releases"><img src="https://img.shields.io/github/v/release/YASSERRMD/barq-db" alt="Release"></a>
+  <a href="https://pypi.org/project/barq-sdk-python/"><img src="https://img.shields.io/pypi/v/barq-sdk-python.svg" alt="PyPI"></a>
+</p>
 
 ---
 
-## ⚡ Getting Started
+Barq is a **high-performance vector database** built in Rust, designed for semantic search, RAG applications, and AI-powered recommendations. It combines dense vector search with BM25 text retrieval in a single, unified API.
 
-### Option 1: Docker (Recommended)
-The easiest way to run Barq DB is via Docker Compose.
+## Key Features
+
+- **Vector Search** — HNSW, IVF, and flat indexes with SIMD-optimized distance calculations
+- **Hybrid Retrieval** — Combine vector similarity + BM25 keyword search with RRF fusion
+- **Multi-Tenancy** — Namespace isolation, RBAC, and per-tenant quotas
+- **Cloud-Native** — Sharded architecture with replication and consensus
+- **Multi-Language SDKs** — Python, TypeScript, Go, and Rust clients
+
+---
+
+## Quick Start
+
+### Start the Server
 
 ```bash
-# Start Barq DB
+# Using Docker (Recommended)
 docker-compose up -d
 
-# Check logs
-docker-compose logs -f
-```
-The API will be available at `http://localhost:8080`.
-
-### Option 2: Build from Source
-If you have Rust installed (1.74+):
-
-```bash
-# Run the server
+# Or build from source (Rust 1.74+)
 cargo run --bin barq-server
 ```
 
----
-
-## 🚀 Usage Example (Python RAG Demo)
-
-Barq comes with a ready-to-run RAG demo using the Python SDK.
-
-1. **Install Dependencies** (or ensure `httpx` is installed):
-   ```bash
-   pip install httpx
-   ```
-
-2. **Run the Demo**:
-   ```bash
-   python3 examples/rag_demo.py
-   ```
-   This script creates a collection, ingests document chunks, and performs a hybrid search.
+The API is available at `http://localhost:8080` (HTTP) and `localhost:50051` (gRPC).
 
 ---
 
-## Capabilities & Architecture
+## SDK Quick Start
 
-### Core Architecture
-- **Rust + Tokio**: Async-first core with verifiable safety and performance.
-- **Storage**: Pluggable engine architecture (File-based WAL + Snapshots implemented, object-storage hooks designed).
-- **Indexing**: Multi-index support including **HNSW**, **IVF**, and **Flat** (exact) search with SIMD-optimized distance kernels (L2, Cosine, Dot Product).
-- **Clustering**: Sharded, replicated storage with Raft-based consensus for high availability.
+Choose your language to get started:
 
-### Hybrid Search & Relevance
-- **Native BM25**: Integrated sparse scoring engine with tokenization and term statistics.
-- **Hybrid Pipeline**: Single-query execution of Vector + Keyword search with RRF/Weighted fusion.
-- **Languages**: Tokenization support for English and others; extensible analyzer pipeline.
-
-### Data Model & APIs
-- **Collections**: Typed schema with configurable dimensions, metrics, and index types.
-- **Rich Filtering**: Boolean, Numeric Range, and Metadata filters pushed down to the index.
-- **APIs**: REST (Axum) and internal RPCs.
-- **SDKs**: First-party clients for **Rust**, **Python**, **TypeScript/Node**, and **Go**.
-
-### Multi-Tenancy & Security
-- **Hard Multi-Tenancy**: Namespace isolation per tenant.
-- **RBAC**: Role-Based Access Control (Admin, Writer, Reader) enforced at the API level.
-- **Isolation**: Per-tenant quota tracking and usage metrics.
-
-### Observability
-- **Metrics**: Native Prometheus integration (latency, QPS, index stats).
-- **Tracing**: OpenTelemetry hooks.
-- **Admin**: CLI and API for topology management and compaction.
+| Language | Package | Documentation |
+|----------|---------|---------------|
+| **Python** | `pip install barq-sdk-python` | [barq-sdk-python/README.md](./barq-sdk-python/README.md) |
+| **TypeScript** | `npm install barq-sdk-ts` | [barq-sdk-ts/README.md](./barq-sdk-ts/README.md) |
+| **Go** | `go get github.com/YASSERRMD/barq-db/barq-sdk-go` | [barq-sdk-go/README.md](./barq-sdk-go/README.md) |
+| **Rust** | `barq-sdk-rust` (workspace crate) | [barq-sdk-rust/README.md](./barq-sdk-rust/README.md) |
 
 ---
 
-## Implementation Status (Phases 1-10 Complete)
+### Python
 
-Barq DB development is organized into 10 phases, all of which are currently implemented in the codebase:
+```python
+from barq import BarqClient
 
-| Phase | Feature Set | Status |
-|-------|-------------|--------|
-| **1** | **Core & Persistence** | ✅ Implemented (WAL, Snapshots, CRUD) |
-| **2** | **Hybrid Search** | ✅ Implemented (BM25, RRF, Hybrid Query) |
-| **3** | **ANN Indexes** | ✅ Implemented (HNSW, IVF, PQ) |
-| **4** | **Filtering** | ✅ Implemented (Metadata filters) |
-| **5** | **Multi-Tenancy** | ✅ Implemented (Tenant Isolation) |
-| **6** | **Cluster/Sharding** | ✅ Implemented (Sharding, basic Replication) |
-| **7** | **Storage Engine v2** | ✅ Implemented (Snapshots, compaction) |
-| **8** | **Security** | ✅ Implemented (RBAC, API Keys) |
-| **9** | **Observability** | ✅ Implemented (Metrics, Admin API) |
-| **10** | **SDKs & Ecosystem** | ✅ Implemented (Rust, Python, TS, Go available) |
+client = BarqClient("http://localhost:8080", api_key="your-key")
 
-### Roadmap / In-Progress
-- 🚧 Object Storage Tiering (S3/GCS) - *Architecture Ready*
-- 🚧 Helm Charts & K8s Operator - *Planned*
-- 🚧 Advanced Arabic Analyzers - *Planned*
+# Create collection
+client.create_collection(name="products", dimension=384, metric="Cosine")
+
+# Insert vectors
+client.insert_document(
+    collection="products",
+    id=1,
+    vector=[0.1, 0.2, ...],  # 384-dim embedding
+    payload={"name": "Widget", "price": 29.99}
+)
+
+# Search
+results = client.search(collection="products", vector=query_vector, top_k=10)
+for r in results:
+    print(f"{r['id']}: {r['score']:.4f}")
+```
+
+### TypeScript
+
+```typescript
+import { BarqClient } from 'barq-sdk-ts';
+
+const client = new BarqClient({ baseUrl: 'http://localhost:8080', apiKey: 'your-key' });
+
+// Create collection
+await client.createCollection({ name: 'products', dimension: 384, metric: 'Cosine' });
+
+// Insert & search
+const collection = client.collection('products');
+await collection.insert(1, vector, { name: 'Widget' });
+
+const results = await collection.search(queryVector, undefined, 10);
+results.forEach(r => console.log(`${r.id}: ${r.score}`));
+```
+
+### Go
+
+```go
+import barq "github.com/YASSERRMD/barq-db/barq-sdk-go"
+
+client := barq.NewClient(barq.Config{
+    BaseURL: "http://localhost:8080",
+    APIKey:  "your-key",
+})
+
+// Create collection
+client.CreateCollection(ctx, barq.CreateCollectionRequest{
+    Name:      "products",
+    Dimension: 384,
+    Metric:    "Cosine",
+})
+
+// Insert & search
+client.Insert(ctx, "products", barq.InsertRequest{ID: 1, Vector: vector})
+results, _ := client.Search(ctx, "products", barq.SearchRequest{Vector: queryVec, TopK: 10})
+```
+
+### Rust
+
+```rust
+use barq_sdk_rust::{BarqClient, DistanceMetric};
+
+let client = BarqClient::new("http://localhost:8080", "your-key");
+
+// Create collection
+client.create_collection("products", 384, DistanceMetric::Cosine, None, None).await?;
+
+// Insert & search
+let collection = client.collection("products");
+collection.insert(1u64, vector, Some(json!({"name": "Widget"}))).await?;
+
+let results = collection.search(Some(query_vec), None, 10, None, None).await?;
+```
 
 ---
 
-## Crate Layout
+## Core Concepts
 
-This project is a Cargo Workspace containing the following crates:
+### Collections
 
-- `barq-core`: Core data structures, catalog, and type system.
-- `barq-index`: Vector indexes (HNSW, IVF, Flat) and distance kernels.
-- `barq-bm25`: Text search engine and analyzers.
-- `barq-storage`: Persistence, WAL, and snapshot management.
-- `barq-cluster`: Distributed node logic, sharding, and consensus.
-- `barq-api`: HTTP REST API, Auth, and Request validation.
-- `barq-admin`: Admin tooling and CLI.
-- `barq-sdk-rust`: Official Rust client.
-- `barq-sdk-ts`: TypeScript client.
-- `barq-sdk-go`: Go client.
-- `barq-sdk-python`: Python client.
+Collections store vectors with associated metadata. Each collection specifies:
+- **Dimension** — Vector size (e.g., 384, 768, 1536)
+- **Metric** — Distance function (`L2`, `Cosine`, `Dot`)
+- **Index** — Algorithm (`HNSW`, `IVF`, `Flat`)
+
+### Documents
+
+Each document contains:
+- **ID** — Unique identifier (string or integer)
+- **Vector** — Dense embedding
+- **Payload** — JSON metadata for filtering
+
+### Search Types
+
+| Type | Description |
+|------|-------------|
+| **Vector** | Similarity search using embeddings |
+| **Text** | BM25 keyword search |
+| **Hybrid** | Combined vector + text with RRF fusion |
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    Barq DB                          │
+├─────────────────────────────────────────────────────┤
+│  REST API (Axum)  │  gRPC API  │  Admin CLI        │
+├───────────────────┴────────────┴────────────────────┤
+│                Query Engine                         │
+│  ┌─────────┐  ┌─────────┐  ┌─────────────────────┐ │
+│  │  HNSW   │  │   IVF   │  │   BM25 + Analyzer   │ │
+│  └─────────┘  └─────────┘  └─────────────────────┘ │
+├─────────────────────────────────────────────────────┤
+│  Storage Engine (WAL + Snapshots + Compaction)     │
+├─────────────────────────────────────────────────────┤
+│  Cluster Layer (Sharding + Raft Consensus)         │
+└─────────────────────────────────────────────────────┘
+```
+
+### Crate Structure
+
+| Crate | Description |
+|-------|-------------|
+| `barq-core` | Data structures, catalog, type system |
+| `barq-index` | HNSW, IVF, flat indexes, SIMD kernels |
+| `barq-bm25` | Text search engine, analyzers |
+| `barq-storage` | WAL, snapshots, persistence |
+| `barq-cluster` | Sharding, replication, consensus |
+| `barq-api` | HTTP/gRPC APIs, auth, validation |
+
+---
+
+## Configuration
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BARQ_HTTP_PORT` | `8080` | HTTP API port |
+| `BARQ_GRPC_PORT` | `50051` | gRPC API port |
+| `BARQ_DATA_DIR` | `./data` | Data directory |
+| `BARQ_API_KEY` | — | API key for authentication |
+
+### Docker Compose
+
+```yaml
+version: '3.8'
+services:
+  barq:
+    image: yasserrmd/barq-db:latest
+    ports:
+      - "8080:8080"
+      - "50051:50051"
+    volumes:
+      - ./data:/data
+    environment:
+      - BARQ_API_KEY=your-secret-key
+```
+
+---
+
+## Contributing
+
+We welcome contributions from the community!
+
+### How to Contribute
+
+1. **Report Issues** — Found a bug? Open an issue with reproduction steps
+2. **Feature Requests** — Describe your use case and proposed solution
+3. **Pull Requests** — Fork, branch, and submit a PR
+
+### Development Setup
+
+```bash
+git clone https://github.com/YASSERRMD/barq-db.git
+cd barq-db
+cargo build
+cargo test
+```
+
+### Priority Areas
+
+- SDK improvements and async support
+- Additional language analyzers
+- Kubernetes operator and Helm charts
+- Object storage tiering (S3/GCS)
+- Performance benchmarks
+
+---
 
 ## License
- MIT license
+
+MIT License — see [LICENSE](./LICENSE) for details.
+
+---
+
+<p align="center">
+  <b>Barq DB</b> — Vector search at lightning speed
+</p>
