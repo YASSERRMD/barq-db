@@ -11,64 +11,7 @@
 use super::traits::{Analyzer, AnalyzerConfig};
 use std::collections::HashSet;
 
-/// Arabic stop words list.
-pub struct ArabicStopWords {
-    words: HashSet<String>,
-}
 
-impl Default for ArabicStopWords {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ArabicStopWords {
-    /// Create a new Arabic stop words filter.
-    pub fn new() -> Self {
-        let stop_words: HashSet<String> = [
-            // Particles and prepositions
-            "من", "في", "على", "إلى", "عن", "مع", "بين", "حتى", "منذ",
-            // Conjunctions  
-            "و", "أو", "ثم", "لكن", "بل", "أم", "إما", "لو", "لولا",
-            // Pronouns
-            "هو", "هي", "هم", "هن", "أنا", "نحن", "أنت", "أنتم", "أنتن",
-            // Demonstratives
-            "هذا", "هذه", "ذلك", "تلك", "هؤلاء", "أولئك",
-            // Relative pronouns
-            "الذي", "التي", "الذين", "اللواتي", "اللاتي",
-            // Question words
-            "ما", "ماذا", "من", "أين", "متى", "كيف", "لماذا", "كم", "أي",
-            // Auxiliary verbs
-            "كان", "يكون", "كانت", "كانوا", "ليس", "ليست",
-            // Common particles
-            "قد", "لقد", "سوف", "لن", "لم", "لا", "إن", "أن", "إذا", "إذ",
-            // Articles and prefixes often found standalone
-            "ال", "ب", "ل", "ك", "ف",
-            // Common words
-            "كل", "بعض", "غير", "عند", "ذات", "أي", "هناك", "هنا",
-            "فقط", "أيضا", "جدا", "معظم", "كثير", "قليل",
-            "بعد", "قبل", "خلال", "أثناء", "ضد", "نحو", "حول",
-            "فوق", "تحت", "أمام", "خلف", "بجانب",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-
-        Self { words: stop_words }
-    }
-
-    /// Check if a word is a stop word.
-    pub fn is_stop_word(&self, word: &str) -> bool {
-        self.words.contains(word)
-    }
-
-    /// Add custom stop words.
-    pub fn add_words(&mut self, words: &[&str]) {
-        for word in words {
-            self.words.insert(word.to_string());
-        }
-    }
-}
 
 /// Arabic text normalizer.
 pub struct ArabicNormalizer {
@@ -329,12 +272,16 @@ impl ArabicStemmer {
     }
 }
 
+use super::roots::ArabicRootExtractor;
+use super::stop_words::StopWords;
+
 /// Advanced Arabic text analyzer.
 pub struct ArabicAnalyzer {
     config: AnalyzerConfig,
     normalizer: ArabicNormalizer,
     stemmer: ArabicStemmer,
-    stop_words: ArabicStopWords,
+    root_extractor: ArabicRootExtractor,
+    stop_words: StopWords,
 }
 
 impl Default for ArabicAnalyzer {
@@ -359,13 +306,14 @@ impl ArabicAnalyzer {
             config,
             normalizer,
             stemmer: ArabicStemmer::new(),
-            stop_words: ArabicStopWords::new(),
+            root_extractor: ArabicRootExtractor::new(),
+            stop_words: StopWords::arabic(),
         }
     }
 
     /// Create with custom stop words.
-    pub fn with_stop_words(mut self, words: &[&str]) -> Self {
-        self.stop_words.add_words(words);
+    pub fn with_stop_words(mut self, words: StopWords) -> Self {
+        self.stop_words = words;
         self
     }
 
@@ -419,13 +367,19 @@ impl Analyzer for ArabicAnalyzer {
                 }
 
                 // Remove stop words
-                if self.config.remove_stop_words && self.stop_words.is_stop_word(&token) {
+                if self.config.remove_stop_words && self.stop_words.contains(&token) {
                     return None;
                 }
 
-                // Apply stemming
+                // Apply stemming or root extraction
                 let processed = if self.config.stemming {
-                    self.stemmer.stem(&token)
+                    // Try root extraction first (more aggressive)
+                    if let Some(root) = self.root_extractor.extract(&token) {
+                        root
+                    } else {
+                        // Fallback to light stemming
+                        self.stemmer.stem(&token)
+                    }
                 } else {
                     token
                 };

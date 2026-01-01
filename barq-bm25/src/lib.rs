@@ -6,9 +6,11 @@ use barq_index::{DocumentId, DocumentIdError, SearchResult};
 
 pub mod analyzers;
 pub use analyzers::{
-    ArabicAnalyzer, ArabicNormalizer, ArabicStemmer, ArabicStopWords,
+    ArabicAnalyzer, ArabicNormalizer, ArabicStemmer,
     EnglishAnalyzer, MultilingualAnalyzer,
     Analyzer as TextAnalyzer, AnalyzerConfig, Language,
+    ArabicRootExtractor, common_arabic_roots,
+    StopWords, DEFAULT_ARABIC_STOP_WORDS, DEFAULT_ENGLISH_STOP_WORDS,
 };
 
 #[derive(Debug, thiserror::Error)]
