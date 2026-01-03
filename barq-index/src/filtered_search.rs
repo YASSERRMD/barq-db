@@ -73,6 +73,51 @@ impl<F> MatchScorer for F where F: Fn(&DocumentId, &[f32]) -> Option<f32> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{VectorIndex, SearchResult, VectorIndexError};
+    use crate::types::PayloadValue;
+    
+    struct MockIndex;
+    impl VectorIndex for MockIndex {
+        fn search(&self, _query: &[f32], _top_k: usize) -> Result<Vec<SearchResult>, VectorIndexError> {
+            Ok(vec![SearchResult { id: crate::DocumentId::U64(1), score: 0.9 }])
+        }
+        fn insert(&mut self, _: crate::DocumentId, _: Vec<f32>) -> Result<(), VectorIndexError> { Ok(()) }
+        fn remove(&mut self, _: &crate::DocumentId) -> Option<Vec<f32>> { Some(vec![0.0]) }
+        fn len(&self) -> usize { 100 }
+        fn is_empty(&self) -> bool { false } 
+    }
+    
+    #[test]
+    fn test_strategy_selection() {
+        let mut cards = HashMap::new();
+        cards.insert("category".to_string(), 100);
+        let estimator = SelectivityEstimator::new(cards, 1000);
+        
+        let filter_selective = Filter::Eq { field: "category".to_string(), value: PayloadValue::String("x".into()) };
+        // Selectivity: 1/100 = 0.01. Threshold 0.1. Should use PreFilter.
+        
+        let index = MockIndex;
+        let searcher = FilteredVectorSearch::new(&index)
+            .with_filter(&filter_selective)
+            .with_estimator(&estimator)
+            .with_strategy(FilterStrategy::Auto { selectivity_threshold: 0.1 });
+            
+        assert_eq!(searcher.choose_strategy(), FilterStrategy::PreFilter);
+
+        let filter_broad = Filter::Gt { field: "price".to_string(), value: PayloadValue::I64(10) };
+        // Heuristic 0.5 > 0.1. PostFilter.
+         let searcher_broad = FilteredVectorSearch::new(&index)
+            .with_filter(&filter_broad)
+            .with_estimator(&estimator)
+            .with_strategy(FilterStrategy::Auto { selectivity_threshold: 0.1 });
+            
+        assert_eq!(searcher_broad.choose_strategy(), FilterStrategy::PostFilter);
+    }
+}
+
 /// Filtered vector search executor
 pub struct FilteredVectorSearch<'a> {
     index: &'a dyn VectorIndex,
