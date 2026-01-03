@@ -1,0 +1,18 @@
+# Summary
+
+- [Introduction](introduction.md)
+- [Getting Started](getting-started/README.md)
+    - [Installation](getting-started/installation.md)
+    - [Configuration](getting-started/configuration.md)
+    - [Architecture](getting-started/architecture.md)
+- [Guides](guides/README.md)
+    - [Vector Search](guides/vector-search.md)
+    - [Hybrid Search](guides/hybrid-search.md)
+    - [Storage Tiering](guides/tiering.md)
+    - [Multi-tenancy](guides/multi-tenancy.md)
+- [Deployment](deployment/README.md)
+    - [Kubernetes Operator](deployment/operator.md)
+    - [Helm Charts](deployment/helm.md)
+- [Reference](reference/README.md)
+    - [API Specification](reference/api.md)
+    - [SDKs](reference/sdks.md)
