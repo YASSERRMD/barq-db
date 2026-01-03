@@ -247,13 +247,20 @@ cargo build
 cargo test
 ```
 
-### Priority Areas
-
 - SDK improvements and async support
 - Additional language analyzers
-- Kubernetes operator and Helm charts
-- Object storage tiering (S3/GCS)
-- Performance benchmarks
+- Distributed Cluster Consensus (Raft)
+- Performance benchmarks (In Progress)
+- [Storage Tiering (S3/GCS/Azure)](docs/src/guides/tiering.md) - **Completed**
+- [Kubernetes Operator](docs/src/deployment/operator.md) - **Completed**
+
+## Documentation
+
+Comprehensive documentation is available in the `docs/` directory. You can build it using `mdbook`:
+
+```bash
+mdbook serve docs
+```
 
 ---
 
