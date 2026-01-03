@@ -76,17 +76,17 @@ impl<'a> BatchSearch<'a> {
     
     /// Execute batch search with per-query filters
     /// Note: This requires FilteredVectorSearch logic.
-    pub fn search_filtered<F, C, M>(
+    pub fn search_filtered<Check, Candidates, M>(
         &self,
         queries: &[(Vec<f32>, Option<Filter>)],
         top_k: usize,
         match_scorer: &M,
-        candidates_fn: &C,
-        check_fn: &F,
+        candidates_provider: &Candidates,
+        check_provider: &Check,
     ) -> Result<Vec<Vec<SearchResult>>, VectorIndexError>
     where
-        F: Fn(&crate::DocumentId) -> bool + Sync + Send,
-        C: Fn() -> Option<Vec<crate::DocumentId>> + Sync + Send,
+        Check: Fn(&crate::DocumentId, &Filter) -> bool + Sync + Send,
+        Candidates: Fn(&Filter) -> Option<Vec<crate::DocumentId>> + Sync + Send,
         M: MatchScorer + Sync + Send,
     {
          let chunk_size = self.config.chunk_size.max(1);
@@ -98,9 +98,16 @@ impl<'a> BatchSearch<'a> {
                      let mut searcher = FilteredVectorSearch::new(self.index);
                      if let Some(f) = filter {
                          searcher = searcher.with_filter(f);
+                         // Create closures that capture the provider and the specific filter
+                         let check_fn = |id: &crate::DocumentId| check_provider(id, f);
+                         let candidates_fn = || candidates_provider(f);
+                         searcher.search(query, top_k, match_scorer, candidates_fn, check_fn)
+                     } else {
+                         // No filter case - dummies (won't be called because filter is None)
+                         let check_fn = |_: &crate::DocumentId| true;
+                         let candidates_fn = || None;
+                         searcher.search(query, top_k, match_scorer, candidates_fn, check_fn)
                      }
-                     
-                     searcher.search(query, top_k, match_scorer, candidates_fn, check_fn)
                 }).collect::<Vec<_>>()
             })
             .collect();
