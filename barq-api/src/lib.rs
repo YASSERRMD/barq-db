@@ -23,11 +23,14 @@ use tokio::{net::TcpListener, sync::Mutex, task::JoinHandle};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use std::time::Instant;
+use utoipa::{ToSchema, OpenApi};
+use utoipa_swagger_ui::SwaggerUi;
 
 // Re-export auth types for convenience and backward compatibility
 pub use barq_admin::auth::{ApiAuth, ApiError, ApiPermission, ApiRole, ApiIdentity, TlsConfig};
 pub use barq_admin::{admin_routes, AdminState};
 pub mod grpc;
+pub mod openapi;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -121,20 +124,23 @@ impl AppState {
 
 // ... (Restoring missing structs)
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateCollectionRequest {
     pub name: String,
     pub dimension: usize,
+    #[schema(value_type = crate::openapi::UtoipaDistanceMetric)]
     pub metric: DistanceMetric,
     #[serde(default)]
+    #[schema(value_type = Option<String>)]
     pub index: Option<IndexType>,
     #[serde(default)]
     pub text_fields: Vec<TextFieldRequest>,
     #[serde(default)]
+    #[schema(value_type = Option<Object>)]
     pub bm25_config: Option<Bm25Config>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct TextFieldRequest {
     pub name: String,
     #[serde(default)]
@@ -143,7 +149,7 @@ pub struct TextFieldRequest {
     pub required: bool,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, ToSchema)]
 #[serde(untagged)]
 pub enum DocumentIdInput {
     U64(u64),
@@ -163,107 +169,121 @@ impl TryFrom<DocumentIdInput> for DocumentId {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct InsertDocumentRequest {
     pub id: DocumentIdInput,
     pub vector: Vec<f32>,
+    #[schema(value_type = Option<Object>)]
     pub payload: Option<PayloadValue>,
     #[serde(default)]
     pub upsert: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct SearchRequest {
     pub vector: Vec<f32>,
     pub top_k: usize,
     #[serde(default)]
+    #[schema(value_type = Option<Object>)]
     pub filter: Option<Filter>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct SearchResponse {
+    #[schema(value_type = Vec<crate::openapi::UtoipaSearchResult>)]
     pub results: Vec<barq_index::SearchResult>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct SearchQuery {
     pub vector: Vec<f32>,
     #[serde(default)]
+    #[schema(value_type = Option<Object>)]
     pub filter: Option<Filter>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct BatchSearchRequest {
     pub queries: Vec<SearchQuery>,
     pub top_k: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct BatchSearchResults {
+    #[schema(value_type = Vec<crate::openapi::UtoipaSearchResult>)]
     pub hits: Vec<barq_index::SearchResult>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct BatchSearchResponse {
     pub results: Vec<BatchSearchResults>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct TextSearchRequest {
     pub query: String,
     pub top_k: usize,
     #[serde(default)]
+    #[schema(value_type = Option<Object>)]
     pub filter: Option<Filter>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TextSearchResponse {
+    #[schema(value_type = Vec<crate::openapi::UtoipaSearchResult>)]
     pub results: Vec<barq_index::SearchResult>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct HybridSearchRequest {
     pub query: String,
     pub vector: Vec<f32>,
     pub top_k: usize,
     #[serde(default)]
+    #[schema(value_type = Option<Object>)]
     pub weights: Option<HybridWeights>,
     #[serde(default)]
+    #[schema(value_type = Option<Object>)]
     pub filter: Option<Filter>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct HybridSearchResponse {
+    #[schema(value_type = Vec<crate::openapi::UtoipaHybridSearchResult>)]
     pub results: Vec<HybridSearchResult>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct ExplainRequest {
     pub id: DocumentIdInput,
     pub query: String,
     pub vector: Vec<f32>,
     pub top_k: usize,
     #[serde(default)]
+    #[schema(value_type = Option<Object>)]
     pub weights: Option<HybridWeights>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ExplainResponse {
+    #[schema(value_type = Option<crate::openapi::UtoipaHybridSearchResult>)]
     pub result: Option<HybridSearchResult>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct GetDocumentResponse {
+    #[schema(value_type = Option<crate::openapi::UtoipaDocument>)]
     pub document: Option<Document>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct RebuildIndexRequest {
     #[serde(default)]
+    #[schema(value_type = Option<String>)]
     pub index: Option<IndexType>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct TenantQuotaRequest {
     pub max_collections: Option<usize>,
     pub max_disk_bytes: Option<u64>,
@@ -282,11 +302,52 @@ impl From<TenantQuotaRequest> for TenantQuota {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct ApiKeyRequest {
     pub key: String,
+    #[schema(value_type = crate::openapi::UtoipaApiRole)]
     pub role: ApiRole,
 }
+
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        health,
+        create_collection,
+        drop_collection,
+        insert_document,
+        get_document,
+        delete_document,
+        search_collection,
+        batch_search_collection,
+        search_text_collection,
+        search_hybrid_collection,
+        explain_hybrid_collection,
+        rebuild_collection_index,
+        tenant_usage,
+        set_tenant_quota,
+        register_api_key
+    ),
+    components(
+        schemas(
+            CreateCollectionRequest, TextFieldRequest, DocumentIdInput, InsertDocumentRequest,
+            SearchRequest, SearchResponse, SearchQuery, BatchSearchRequest, BatchSearchResults, BatchSearchResponse,
+            TextSearchRequest, TextSearchResponse, HybridSearchRequest, HybridSearchResponse,
+            ExplainRequest, ExplainResponse, GetDocumentResponse, RebuildIndexRequest,
+            TenantQuotaRequest, ApiKeyRequest,
+            crate::openapi::UtoipaTenantUsageReport, crate::openapi::UtoipaTenantQuota,
+            crate::openapi::UtoipaDistanceMetric, crate::openapi::UtoipaIndexType, crate::openapi::UtoipaApiRole,
+            crate::openapi::UtoipaDocument, crate::openapi::UtoipaSearchResult, crate::openapi::UtoipaHybridSearchResult,
+        )
+    ),
+    tags(
+        (name = "collections", description = "Collection management endpoints"),
+        (name = "documents", description = "Document operations"),
+        (name = "search", description = "Search endpoints"),
+        (name = "tenants", description = "Multi-tenancy management")
+    )
+)]
+pub struct ApiDoc;
 
 pub fn build_router(storage: Storage) -> Router {
     build_router_with_auth(storage, ApiAuth::new())
@@ -341,6 +402,7 @@ pub fn build_router_from_state(state: AppState) -> Router {
         .route("/tenants/:tenant/quota", put(set_tenant_quota))
         .route("/tenants/:tenant/api-keys", post(register_api_key))
         .nest("/admin", admin_routes().with_state(admin_state))
+        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .with_state(state)
         .layer(tower_http::trace::TraceLayer::new_for_http())
 }
@@ -395,6 +457,13 @@ pub async fn start_tls_server(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/health",
+    responses(
+        (status = 200, description = "Service is healthy", body = serde_json::Value)
+    )
+)]
 async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "status": "ok" }))
 }
@@ -434,6 +503,16 @@ async fn info(
     })))
 }
 
+#[utoipa::path(
+    post,
+    path = "/collections",
+    request_body = CreateCollectionRequest,
+    responses(
+        (status = 201, description = "Collection created successfully"),
+        (status = 400, description = "Invalid request/dimension"),
+        (status = 401, description = "Unauthorized")
+    )
+)]
 async fn create_collection(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -489,6 +568,18 @@ async fn create_collection(
     Ok(StatusCode::CREATED)
 }
 
+#[utoipa::path(
+    delete,
+    path = "/collections/{name}",
+    params(
+        ("name" = String, Path, description = "Collection name")
+    ),
+    responses(
+        (status = 204, description = "Collection deleted"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Collection not found")
+    )
+)]
 async fn drop_collection(
     AxumPath(name): AxumPath<String>,
     State(state): State<AppState>,
@@ -509,6 +600,19 @@ async fn drop_collection(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    post,
+    path = "/collections/{name}/documents",
+    params(
+        ("name" = String, Path, description = "Collection name")
+    ),
+    request_body = InsertDocumentRequest,
+    responses(
+        (status = 201, description = "Document inserted"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Collection not found")
+    )
+)]
 async fn insert_document(
     AxumPath(name): AxumPath<String>,
     State(state): State<AppState>,
@@ -543,6 +647,19 @@ async fn insert_document(
     Ok(StatusCode::CREATED)
 }
 
+#[utoipa::path(
+    delete,
+    path = "/collections/{name}/documents/{id}",
+    params(
+        ("name" = String, Path, description = "Collection name"),
+        ("id" = String, Path, description = "Document ID")
+    ),
+    responses(
+        (status = 204, description = "Document deleted"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Document/Collection not found")
+    )
+)]
 async fn delete_document(
     AxumPath((name, id)): AxumPath<(String, String)>,
     State(state): State<AppState>,
@@ -569,6 +686,18 @@ async fn delete_document(
     })
 }
 
+#[utoipa::path(
+    get,
+    path = "/collections/{name}/documents/{id}",
+    params(
+        ("name" = String, Path, description = "Collection name"),
+        ("id" = String, Path, description = "Document ID")
+    ),
+    responses(
+        (status = 200, description = "Document found", body = GetDocumentResponse),
+        (status = 404, description = "Document not found")
+    )
+)]
 async fn get_document(
     AxumPath((name, id)): AxumPath<(String, String)>,
     State(state): State<AppState>,
@@ -592,6 +721,18 @@ async fn get_document(
 }
 
 
+#[utoipa::path(
+    post,
+    path = "/collections/{name}/index/rebuild",
+    params(
+        ("name" = String, Path, description = "Collection name")
+    ),
+    request_body = RebuildIndexRequest,
+    responses(
+        (status = 202, description = "Index rebuild accepted"),
+        (status = 401, description = "Unauthorized")
+    )
+)]
 async fn rebuild_collection_index(
     AxumPath(name): AxumPath<String>,
     State(state): State<AppState>,
@@ -625,6 +766,18 @@ async fn rebuild_collection_index(
     Ok(StatusCode::ACCEPTED)
 }
 
+#[utoipa::path(
+    post,
+    path = "/collections/{name}/search",
+    params(
+        ("name" = String, Path, description = "Collection name")
+    ),
+    request_body = SearchRequest,
+    responses(
+        (status = 200, description = "Search results", body = SearchResponse),
+        (status = 400, description = "Invalid request")
+    )
+)]
 async fn search_collection(
     AxumPath(name): AxumPath<String>,
     State(state): State<AppState>,
@@ -659,6 +812,18 @@ async fn search_collection(
     Ok(Json(SearchResponse { results }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/collections/{name}/batch_search",
+    params(
+        ("name" = String, Path, description = "Collection name")
+    ),
+    request_body = BatchSearchRequest,
+    responses(
+        (status = 200, description = "Batch search results", body = BatchSearchResponse),
+        (status = 400, description = "Invalid request")
+    )
+)]
 async fn batch_search_collection(
     AxumPath(name): AxumPath<String>,
     State(state): State<AppState>,
@@ -700,6 +865,18 @@ async fn batch_search_collection(
     Ok(Json(resp))
 }
 
+#[utoipa::path(
+    post,
+    path = "/collections/{name}/search/text",
+    params(
+        ("name" = String, Path, description = "Collection name")
+    ),
+    request_body = TextSearchRequest,
+    responses(
+        (status = 200, description = "Text search results", body = TextSearchResponse),
+        (status = 400, description = "Invalid request")
+    )
+)]
 async fn search_text_collection(
     AxumPath(name): AxumPath<String>,
     State(state): State<AppState>,
@@ -734,6 +911,18 @@ async fn search_text_collection(
     Ok(Json(TextSearchResponse { results }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/collections/{name}/search/hybrid",
+    params(
+        ("name" = String, Path, description = "Collection name")
+    ),
+    request_body = HybridSearchRequest,
+    responses(
+        (status = 200, description = "Hybrid search results", body = HybridSearchResponse),
+        (status = 400, description = "Invalid request")
+    )
+)]
 async fn search_hybrid_collection(
     AxumPath(name): AxumPath<String>,
     State(state): State<AppState>,
@@ -761,6 +950,18 @@ async fn search_hybrid_collection(
     Ok(Json(HybridSearchResponse { results }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/collections/{name}/search/hybrid/explain",
+    params(
+        ("name" = String, Path, description = "Collection name")
+    ),
+    request_body = ExplainRequest,
+    responses(
+        (status = 200, description = "Explanation result", body = ExplainResponse),
+        (status = 400, description = "Invalid request")
+    )
+)]
 async fn explain_hybrid_collection(
     AxumPath(name): AxumPath<String>,
     State(state): State<AppState>,
@@ -789,6 +990,17 @@ async fn explain_hybrid_collection(
     Ok(Json(ExplainResponse { result }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/tenants/{tenant}/usage",
+    params(
+        ("tenant" = String, Path, description = "Tenant ID")
+    ),
+    responses(
+        (status = 200, description = "Tenant usage report", body = crate::openapi::UtoipaTenantUsageReport),
+        (status = 401, description = "Unauthorized")
+    )
+)]
 async fn tenant_usage(
     AxumPath(tenant): AxumPath<String>,
     State(state): State<AppState>,
@@ -805,6 +1017,18 @@ async fn tenant_usage(
     Ok(Json(report))
 }
 
+#[utoipa::path(
+    put,
+    path = "/tenants/{tenant}/quota",
+    params(
+        ("tenant" = String, Path, description = "Tenant ID")
+    ),
+    request_body = TenantQuotaRequest,
+    responses(
+        (status = 202, description = "Quota updated"),
+        (status = 401, description = "Unauthorized")
+    )
+)]
 async fn set_tenant_quota(
     AxumPath(tenant): AxumPath<String>,
     State(state): State<AppState>,
@@ -827,6 +1051,18 @@ async fn set_tenant_quota(
     Ok(StatusCode::ACCEPTED)
 }
 
+#[utoipa::path(
+    post,
+    path = "/tenants/{tenant}/api-keys",
+    params(
+        ("tenant" = String, Path, description = "Tenant ID")
+    ),
+    request_body = ApiKeyRequest,
+    responses(
+        (status = 201, description = "API Key registered"),
+        (status = 401, description = "Unauthorized")
+    )
+)]
 async fn register_api_key(
     AxumPath(tenant): AxumPath<String>,
     State(state): State<AppState>,

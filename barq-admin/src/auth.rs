@@ -13,7 +13,6 @@ use rustls::server::WebPkiClientVerifier;
 use rustls::RootCertStore;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::info;
 use axum_server::tls_rustls::RustlsConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

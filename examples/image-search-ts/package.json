@@ -1,0 +1,17 @@
+{
+    "name": "barq-iamge-search-demo",
+    "version": "1.0.0",
+    "description": "Image Search demo with Barq DB",
+    "main": "index.ts",
+    "scripts": {
+        "start": "ts-node index.ts"
+    },
+    "dependencies": {
+        "barq-sdk": "file:../../barq-sdk-ts",
+        "axios": "^1.6.0"
+    },
+    "devDependencies": {
+        "ts-node": "^10.9.1",
+        "typescript": "^5.2.2"
+    }
+}

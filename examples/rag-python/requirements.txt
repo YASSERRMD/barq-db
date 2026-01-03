@@ -1,0 +1,4 @@
+barq-sdk
+sentence-transformers
+openai
+python-dotenv
