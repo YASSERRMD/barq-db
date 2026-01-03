@@ -6,7 +6,12 @@ use std::fmt;
 use std::str::FromStr;
 
 mod distance;
+pub mod types;
+pub mod filtered_search;
+
 use distance::*;
+pub use types::{Filter, GeoBoundingBox, GeoPoint, PayloadValue};
+pub use filtered_search::{FilteredVectorSearch, FilterStrategy, SelectivityEstimator, MatchScorer};
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 struct OrderedScore(f32);
