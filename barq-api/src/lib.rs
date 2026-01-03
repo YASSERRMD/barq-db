@@ -859,6 +859,7 @@ pub fn init_tracing() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use barq_admin::auth::{AuthMethod, JwtClaims, JwtVerifier};
     use barq_cluster::{NodeConfig, NodeId, ReadPreference, ShardId, ShardPlacement};
     use barq_core::TenantId;
     use barq_index::DocumentId;
