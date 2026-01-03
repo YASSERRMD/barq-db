@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+package barq;
+
+service Barq {
+  rpc Health (HealthRequest) returns (HealthResponse);
+  rpc CreateCollection (CreateCollectionRequest) returns (CreateCollectionResponse);
+  rpc InsertDocument (InsertDocumentRequest) returns (InsertDocumentResponse);
+  rpc Search (SearchRequest) returns (SearchResponse);
+}
+
+message HealthRequest {}
+message HealthResponse {
+  bool ok = 1;
+  string version = 2;
+}
+
+message CreateCollectionRequest {
+  string name = 1;
+  uint32 dimension = 2;
+  string metric = 3;
+}
+message CreateCollectionResponse {
+  bool success = 1;
+}
+
+message InsertDocumentRequest {
+  string collection = 1;
+  string id = 2; 
+  repeated float vector = 3;
+  string payload_json = 4; 
+}
+message InsertDocumentResponse {
+  bool success = 1;
+}
+
+message SearchRequest {
+  string collection = 1;
+  repeated float vector = 2;
+  uint32 top_k = 3;
+}
+
+message SearchResult {
+  string id = 1;
+  float score = 2;
+  string payload_json = 3; 
+}
+
+message SearchResponse {
+  repeated SearchResult results = 1;
+}

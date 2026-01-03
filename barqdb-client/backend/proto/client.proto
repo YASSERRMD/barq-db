@@ -1,0 +1,108 @@
+syntax = "proto3";
+
+package barqclient;
+
+// Client Service exposed to frontend via gRPC-Web
+service BarqClientService {
+  // Health
+  rpc Health (HealthRequest) returns (HealthResponse);
+  
+  // Collections
+  rpc ListCollections (ListCollectionsRequest) returns (ListCollectionsResponse);
+  rpc CreateCollection (CreateCollectionRequest) returns (CreateCollectionResponse);
+  rpc DeleteCollection (DeleteCollectionRequest) returns (DeleteCollectionResponse);
+  
+  // Documents
+  rpc InsertDocument (InsertDocumentRequest) returns (InsertDocumentResponse);
+  rpc GetDocument (GetDocumentRequest) returns (GetDocumentResponse);
+  rpc DeleteDocument (DeleteDocumentRequest) returns (DeleteDocumentResponse);
+  
+  // Search
+  rpc Search (SearchRequest) returns (SearchResponse);
+  
+  // Admin
+  rpc GetStats (GetStatsRequest) returns (GetStatsResponse);
+}
+
+// Health
+message HealthRequest {}
+message HealthResponse {
+  bool ok = 1;
+  string version = 2;
+  string barq_status = 3;
+}
+
+// Collections
+message ListCollectionsRequest {}
+message ListCollectionsResponse {
+  repeated string collections = 1;
+}
+
+message CreateCollectionRequest {
+  string name = 1;
+  uint32 dimension = 2;
+  string metric = 3;
+}
+message CreateCollectionResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message DeleteCollectionRequest {
+  string name = 1;
+}
+message DeleteCollectionResponse {
+  bool success = 1;
+}
+
+// Documents
+message InsertDocumentRequest {
+  string collection = 1;
+  string id = 2;
+  repeated float vector = 3;
+  string payload_json = 4;
+}
+message InsertDocumentResponse {
+  bool success = 1;
+}
+
+message GetDocumentRequest {
+  string collection = 1;
+  string id = 2;
+}
+message GetDocumentResponse {
+  string id = 1;
+  repeated float vector = 2;
+  string payload_json = 3;
+}
+
+message DeleteDocumentRequest {
+  string collection = 1;
+  string id = 2;
+}
+message DeleteDocumentResponse {
+  bool success = 1;
+}
+
+// Search
+message SearchRequest {
+  string collection = 1;
+  repeated float vector = 2;
+  uint32 top_k = 3;
+}
+message SearchResult {
+  string id = 1;
+  float score = 2;
+  string payload_json = 3;
+}
+message SearchResponse {
+  repeated SearchResult results = 1;
+}
+
+// Admin
+message GetStatsRequest {}
+message GetStatsResponse {
+  bool connected = 1;
+  string grpc_addr = 2;
+  uint64 uptime_secs = 3;
+}

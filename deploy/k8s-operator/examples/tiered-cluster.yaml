@@ -1,0 +1,49 @@
+apiVersion: barq.io/v1alpha1
+kind: BarqDB
+metadata:
+  name: example-tiered-cluster
+  namespace: default
+spec:
+  replicas: 3
+  image: yasserrmd/barq-db:latest
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "2000m"
+      memory: "4Gi"
+  storage:
+    size: "50Gi"
+    storageClassName: "fast-ssd"  # Your cluster's storage class
+  config:
+    logLevel: info
+    indexType: HNSW
+    mode: cluster
+  # Enable storage tiering
+  tiering:
+    enabled: true
+    # Warm tier: Use local high-capacity storage or cheaper cloud storage
+    warmStorage:
+      provider: s3
+      bucket: my-barq-warm-tier
+      # Reference to Kubernetes secret containing AWS credentials
+      secretRef: aws-s3-credentials
+    # Cold tier: Long-term archive storage
+    coldStorage:
+      provider: s3
+      bucket: my-barq-cold-archive
+      secretRef: aws-s3-credentials
+
+---
+# AWS Credentials Secret
+apiVersion: v1
+kind: Secret
+metadata:
+  name: aws-s3-credentials
+  namespace: default
+type: Opaque
+stringData:
+  AWS_ACCESS_KEY_ID: "AKIAIOSFODNN7EXAMPLE"
+  AWS_SECRET_ACCESS_KEY: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+  AWS_REGION: "us-east-1"
