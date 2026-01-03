@@ -216,6 +216,33 @@ let results = collection.search(
 ).await?;
 ```
 
+### Batch Search
+
+For high-throughput applications, you can search multiple vectors in parallel:
+
+```rust
+use barq_sdk_rust::SearchQuery;
+
+let queries = vec![
+    SearchQuery { 
+        vector: vec![0.1; 384], 
+        filter: None 
+    },
+    SearchQuery { 
+        vector: vec![0.2; 384], 
+        filter: Some(Filter::Eq("category".into(), "books".into())) 
+    },
+];
+
+// Returns Vec<Vec<serde_json::Value>>
+// Each inner Vec corresponds to a query in the batch
+let batch_results = collection.batch_search(queries, 10).await?;
+
+for (i, results) in batch_results.iter().enumerate() {
+    println!("Query {} matched {} documents", i, results.len());
+}
+```
+
 ---
 
 ## gRPC Client

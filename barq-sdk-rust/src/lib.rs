@@ -178,13 +178,66 @@ impl Collection {
             })
         }
     }
+
+    pub async fn batch_search(
+        &self,
+        queries: Vec<SearchQuery>,
+        top_k: usize,
+    ) -> Result<Vec<Vec<serde_json::Value>>> {
+        let url = format!("{}/collections/{}/batch_search", self.client.base_url, self.name);
+
+        let payload = BatchSearchRequest {
+            queries,
+            top_k,
+        };
+
+        let res = self.client.client.post(&url)
+            .header("x-api-key", &self.client.api_key)
+            .json(&payload)
+            .send()
+            .await?;
+
+        if res.status().is_success() {
+            let body: serde_json::Value = res.json().await?;
+            let mut results = Vec::new();
+            if let Some(arr) = body["results"].as_array() {
+                for batch in arr {
+                     if let Some(hits) = batch["hits"].as_array() {
+                         results.push(hits.clone());
+                     } else {
+                         results.push(Vec::new());
+                     }
+                }
+            }
+            Ok(results)
+        } else {
+            Err(BarqError::Api {
+                status: res.status(),
+                message: res.text().await?,
+            })
+        }
+    }
 }
+
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TextFieldRequest {
     pub name: String,
     pub indexed: bool,
     pub required: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SearchQuery {
+    pub vector: Vec<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter: Option<Filter>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BatchSearchRequest {
+    pub queries: Vec<SearchQuery>,
+    pub top_k: usize,
 }
 
 // gRPC Client Implementation
@@ -269,5 +322,43 @@ impl BarqGrpcClient {
         }
         
         Ok(json_results)
+    }
+
+    pub async fn batch_search(
+        &mut self,
+        collection: &str,
+        queries: Vec<SearchQuery>,
+        top_k: u32,
+    ) -> Result<Vec<Vec<serde_json::Value>>> {
+        let proto_queries = queries.into_iter().map(|q| {
+            barq_proto::barq::SearchQuery {
+                vector: q.vector,
+                filter_json: q.filter.map(|f| serde_json::to_string(&f).unwrap_or_default()).unwrap_or_default(),
+            }
+        }).collect();
+
+        let req = barq_proto::barq::BatchSearchRequest {
+            collection: collection.to_string(),
+            queries: proto_queries,
+            top_k,
+        };
+
+        let response = self.client.batch_search(req).await?;
+        let batch_results = response.into_inner().results;
+        
+        let mut final_results = Vec::new();
+        for batch in batch_results {
+            let mut hits = Vec::new();
+            for hit in batch.hits {
+                hits.push(json!({
+                    "id": hit.id,
+                    "score": hit.score,
+                    "payload": serde_json::from_str::<serde_json::Value>(&hit.payload_json).unwrap_or(json!({}))
+                }));
+            }
+            final_results.push(hits);
+        }
+        
+        Ok(final_results)
     }
 }

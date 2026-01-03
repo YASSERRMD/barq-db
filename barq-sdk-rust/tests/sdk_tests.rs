@@ -770,3 +770,39 @@ fn test_nested_object_payload() {
     assert_eq!(json["inner"]["nested_num"], 42);
     assert_eq!(json["top_level"], true);
 }
+
+#[test]
+fn test_batch_search_request_construction() {
+    use barq_sdk_rust::{BatchSearchRequest, SearchQuery};
+    
+    let queries = vec![
+        SearchQuery {
+            vector: vec![0.1, 0.2, 0.3],
+            filter: None,
+        },
+        SearchQuery {
+            vector: vec![0.4, 0.5, 0.6],
+            filter: Some(Filter::Eq {
+                field: "category".to_string(),
+                value: PayloadValue::String("books".to_string()),
+            }),
+        },
+    ];
+
+    let request = BatchSearchRequest {
+        queries,
+        top_k: 10,
+    };
+
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["queries"].as_array().unwrap().len(), 2);
+    assert_eq!(json["top_k"], 10);
+    
+    // Check first query
+    assert_eq!(json["queries"][0]["vector"].as_array().unwrap().len(), 3);
+    assert!(json["queries"][0]["filter"].is_null());
+    
+    // Check second query
+    assert_eq!(json["queries"][1]["vector"].as_array().unwrap().len(), 3);
+    assert_eq!(json["queries"][1]["filter"]["field"], "category");
+}

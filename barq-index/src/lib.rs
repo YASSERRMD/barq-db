@@ -101,6 +101,23 @@ impl FromStr for DocumentId {
         }
     }
 }
+impl From<u64> for DocumentId {
+    fn from(v: u64) -> Self {
+        DocumentId::U64(v)
+    }
+}
+
+impl From<String> for DocumentId {
+    fn from(s: String) -> Self {
+        DocumentId::Str(s)
+    }
+}
+
+impl From<&str> for DocumentId {
+    fn from(s: &str) -> Self {
+        DocumentId::Str(s.to_string())
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DistanceMetric {
