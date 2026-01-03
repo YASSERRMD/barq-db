@@ -10,7 +10,6 @@ use axum::{
     Json, Router,
 };
 use barq_bm25::Bm25Config;
-use barq_admin::auth::{JwtVerifier, JwtClaims, AuthMethod};
 pub use barq_cluster::{ClusterConfig, ClusterError, ClusterRouter};
 use barq_core::{
     CollectionSchema, Document, FieldSchema, FieldType, Filter, HybridSearchResult, HybridWeights,
@@ -680,7 +679,7 @@ async fn batch_search_collection(
         .collect();
         
     let start = Instant::now();
-    let mut storage = state.storage.lock().await;
+    let storage = state.storage.lock().await;
     
     // We access collection directly via catalog. 
     // This requires mapping CatalogError to StorageError to ApiError.

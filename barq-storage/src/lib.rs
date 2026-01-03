@@ -122,6 +122,11 @@ pub struct SegmentMetadata {
     pub entries: usize,
 }
 
+#[derive(Default)]
+pub struct StorageOptions {
+    pub tiering_manager: Option<Arc<TieringManager>>,
+}
+
 #[derive(Debug)]
 pub struct Storage {
     root: PathBuf,
@@ -134,6 +139,13 @@ pub struct Storage {
 
 impl Storage {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, StorageError> {
+        Self::open_with_options(root, StorageOptions::default())
+    }
+
+    pub fn open_with_options(
+        root: impl AsRef<Path>,
+        options: StorageOptions,
+    ) -> Result<Self, StorageError> {
         let root = root.as_ref().to_path_buf();
         let mut storage = Self {
             root,
@@ -143,6 +155,11 @@ impl Storage {
             tenant_usage: HashMap::new(),
             tiering_manager: None,
         };
+        
+        if let Some(tm) = options.tiering_manager {
+            storage.set_tiering_manager(tm);
+        }
+
         storage.ensure_tenant_root(&storage.default_tenant)?;
         storage.load_collections()?;
         storage.recalculate_usage();
@@ -152,6 +169,11 @@ impl Storage {
     }
 
     pub fn set_tiering_manager(&mut self, manager: Arc<TieringManager>) {
+        // Attempt to load existing tiering state
+        let state_path = self.root.join("tiering_state.json");
+        if let Err(e) = manager.load_state(&state_path) {
+            eprintln!("Failed to load tiering state: {}", e); // Use proper logging
+        }
         self.tiering_manager = Some(manager);
     }
 
@@ -559,6 +581,17 @@ impl Storage {
         segment_file.flush()?;
         fs::remove_file(&wal_path)?;
 
+        if let Some(tm) = &self.tiering_manager {
+            if let Some(key) = self.get_tiering_key(&segment_path) {
+                 let size = segment_file.metadata()?.len();
+                 // best effort registration
+                 if let Err(e) = tm.register_existing(&key, size) {
+                      // log error but don't fail flush
+                      eprintln!("Failed to register segment with tiering manager: {}", e);
+                 }
+            }
+        }
+
         Ok(SegmentMetadata {
             file_name,
             created_at: Utc::now(),
@@ -625,8 +658,24 @@ impl Storage {
         }
         compacted_file.flush()?;
 
+        if let Some(tm) = &self.tiering_manager {
+            if let Some(key) = self.get_tiering_key(&compacted_path) {
+                 let size = compacted_file.metadata()?.len();
+                 if let Err(e) = tm.register_existing(&key, size) {
+                      eprintln!("Failed to register compacted segment: {}", e);
+                 }
+            }
+        }
+
         for segment in segments {
-            fs::remove_file(segment)?;
+            fs::remove_file(&segment)?;
+            // TODO: Should we de-register old segments from TieringManager?
+            // Yes, we should.
+            if let Some(tm) = &self.tiering_manager {
+                if let Some(key) = self.get_tiering_key(&segment) {
+                    let _ = tm.delete(&key);
+                }
+            }
         }
 
         Ok(SegmentMetadata {
@@ -997,6 +1046,20 @@ impl Storage {
     fn replay_segments(&mut self, tenant: &TenantId, collection: &str) -> Result<(), StorageError> {
         let segments = self.segment_files(tenant, collection)?;
         for segment in segments {
+            if !segment.exists() {
+                // Try to restore from TieringManager
+                if let Some(tm) = &self.tiering_manager {
+                    if let Some(key) = self.get_tiering_key(&segment) {
+                        // This downloads to `segment` path (which is local hot path)
+                         if let Err(e) = tm.download(&key, &segment) {
+                             eprintln!("Failed to restore segment {}: {}", key, e);
+                             // If we can't restore, we probably should fail or skip?
+                             // Failing protects data consistency.
+                             return Err(StorageError::ObjectStore(e.to_string()));
+                         }
+                    }
+                }
+            }
             let file = File::open(&segment)?;
             let reader = BufReader::new(file);
             for line in reader.lines() {
@@ -1075,16 +1138,32 @@ impl Storage {
 
     fn segment_files(&self, tenant: &TenantId, name: &str) -> Result<Vec<PathBuf>, StorageError> {
         let dir = self.segments_dir(tenant, name);
-        if !dir.exists() {
-            return Ok(Vec::new());
+        let mut files = std::collections::HashSet::new();
+
+        if dir.exists() {
+             for entry in fs::read_dir(&dir)? {
+                let entry = entry?;
+                if entry.file_type()?.is_file() {
+                    files.insert(entry.path());
+                }
+             }
         }
-        let mut files: Vec<PathBuf> = fs::read_dir(&dir)?
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| entry.file_type().map(|ft| ft.is_file()).unwrap_or(false))
-            .map(|entry| entry.path())
-            .collect();
-        files.sort();
-        Ok(files)
+
+        if let Some(tm) = &self.tiering_manager {
+            if let Some(prefix) = self.get_tiering_key(&dir) {
+                // Ensure prefix ends with / to avoid partial matches on directory name if unrelated
+                let search_prefix = if prefix.ends_with('/') { prefix.clone() } else { format!("{}/", prefix) };
+                let remote_keys = tm.list_keys_with_prefix(&search_prefix);
+                for key in remote_keys {
+                     let abs_path = self.root.join(key);
+                     files.insert(abs_path);
+                }
+            }
+        }
+
+        let mut sorted_files: Vec<PathBuf> = files.into_iter().collect();
+        sorted_files.sort();
+        Ok(sorted_files)
     }
 
     fn collections_root(&self, tenant: &TenantId) -> PathBuf {
@@ -1102,6 +1181,10 @@ impl Storage {
     fn ensure_tenant_root(&self, tenant: &TenantId) -> Result<(), StorageError> {
         fs::create_dir_all(self.collections_root(tenant))?;
         Ok(())
+    }
+
+    fn get_tiering_key(&self, abs_path: &Path) -> Option<String> {
+        abs_path.strip_prefix(&self.root).ok().map(|p| p.to_string_lossy().to_string())
     }
 }
 

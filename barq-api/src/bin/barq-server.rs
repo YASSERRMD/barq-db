@@ -1,4 +1,4 @@
-use barq_api::{ApiAuth, TlsConfig, AppState, build_router_from_state, ClusterConfig, ClusterRouter};
+use barq_api::{ApiAuth, AppState, build_router_from_state, ClusterConfig, ClusterRouter};
 use barq_api::grpc::GrpcService;
 use barq_proto::barq::barq_server::BarqServer;
 use barq_storage::Storage;
@@ -51,11 +51,8 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting Barq Server");
     info!("Storage directory: {:?}", cli.storage_dir);
     
-    // Initialize storage
-    let mut storage = Storage::open(&cli.storage_dir)?;
-
-    // Configure Tiering if enabled
-    if std::env::var("BARQ_TIERING_ENABLED").unwrap_or_default() == "true" {
+    // Initialize TieringManager if enabled
+    let tiering_manager = if std::env::var("BARQ_TIERING_ENABLED").unwrap_or_default() == "true" {
         use barq_storage::{
             TieringManager, TieringPolicy, LocalObjectStore, ObjectStore,
             S3ObjectStore, GcsObjectStore, AzureBlobStore
@@ -64,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
 
         info!("Initializing storage tiering...");
         
-        let hot_path = cli.storage_dir.join("hot");
+        let hot_path = cli.storage_dir.clone();
         if !hot_path.exists() {
              std::fs::create_dir_all(&hot_path)?;
         }
@@ -105,16 +102,29 @@ async fn main() -> anyhow::Result<()> {
             None
         };
 
-        let tiering_manager = Arc::new(TieringManager::with_tiers(
+        let tm = TieringManager::with_tiers(
             hot_store,
             warm_store,
             cold_store,
             TieringPolicy::default(),
-        ));
+        );
         
-        storage.set_tiering_manager(tiering_manager);
+        // Configure persistence for tiering state in the root of data directory
+        tm.set_state_path(cli.storage_dir.join("tiering_state.json"));
+        
         info!("Storage tiering initialized");
-    }
+        Some(Arc::new(tm))
+    } else {
+        None
+    };
+
+    // Initialize storage
+    let storage = Storage::open_with_options(
+        &cli.storage_dir, 
+        barq_storage::StorageOptions {
+            tiering_manager,
+        }
+    )?;
 
     // Setup auth (default to no auth for now, can be enhanced)
     let auth = ApiAuth::new();
@@ -200,9 +210,9 @@ fn init_observability() {
 
     // Optional OpenTelemetry integration
     if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
-        use opentelemetry::{global, KeyValue};
+        use opentelemetry::KeyValue;
         use opentelemetry_sdk::{trace as sdktrace, Resource};
-        use opentelemetry_otlp::WithExportConfig;
+        
 
         let tracer = opentelemetry_otlp::new_pipeline()
             .tracing()

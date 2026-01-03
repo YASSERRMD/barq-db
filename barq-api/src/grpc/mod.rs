@@ -1,6 +1,4 @@
-use std::sync::Arc;
 use tonic::{Request, Response, Status};
-use tokio::sync::Mutex;
 use crate::AppState;
 use barq_proto::barq::barq_server::Barq;
 use barq_proto::barq::{
@@ -11,7 +9,6 @@ use barq_proto::barq::{
     BatchSearchRequest, BatchSearchResponse, QueryResults
 };
 use barq_core::{CollectionSchema, DistanceMetric, Document, DocumentId, FieldSchema, FieldType, PayloadValue, Filter};
-use barq_storage::Storage;
 
 
 

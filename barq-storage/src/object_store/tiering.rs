@@ -106,6 +106,7 @@ pub struct TieringManager {
     cold_store: Option<Arc<dyn ObjectStore>>,
     policy: TieringPolicy,
     metadata: Arc<RwLock<HashMap<String, TieredObjectInfo>>>,
+    pub(crate) state_path: Arc<RwLock<Option<PathBuf>>>,
 }
 
 impl std::fmt::Debug for TieringManager {
@@ -115,6 +116,7 @@ impl std::fmt::Debug for TieringManager {
          .field("warm_store", &self.warm_store.as_ref().map(|_| "ObjectStore"))
          .field("cold_store", &self.cold_store.as_ref().map(|_| "ObjectStore"))
          .field("policy", &self.policy)
+         .field("state_path", &self.state_path)
          .finish()
     }
 }
@@ -131,6 +133,18 @@ impl TieringManager {
             cold_store: None,
             policy: TieringPolicy::default(),
             metadata: Arc::new(RwLock::new(HashMap::new())),
+            state_path: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Set the path for persisting state
+    pub fn set_state_path(&self, path: PathBuf) {
+        *self.state_path.write().unwrap() = Some(path);
+    }
+
+    fn persist_if_configured(&self) {
+        if let Some(path) = self.state_path.read().unwrap().as_ref() {
+            let _ = self.save_state(path);
         }
     }
 
@@ -160,6 +174,7 @@ impl TieringManager {
             cold_store,
             policy,
             metadata: Arc::new(RwLock::new(HashMap::new())),
+             state_path: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -190,6 +205,24 @@ impl TieringManager {
         };
         
         self.metadata.write().unwrap().insert(key.to_string(), info);
+        self.persist_if_configured();
+        Ok(())
+    }
+
+    pub fn register_existing(&self, key: &str, size_bytes: u64) -> Result<(), ObjectStoreError> {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        
+        let info = TieredObjectInfo {
+            key: key.to_string(),
+            tier: StorageTier::Hot,
+            size_bytes,
+            created_at: now,
+            last_accessed: now,
+            access_count: 0,
+        };
+        
+        self.metadata.write().unwrap().insert(key.to_string(), info);
+        self.persist_if_configured();
         Ok(())
     }
 
@@ -259,7 +292,7 @@ impl TieringManager {
         if let Some(info) = self.metadata.write().unwrap().get_mut(key) {
             info.tier = target_tier;
         }
-        
+        self.persist_if_configured();
         Ok(())
     }
 
@@ -309,6 +342,10 @@ impl TieringManager {
             }
         }
         
+        if stats.moved_to_warm > 0 || stats.moved_to_cold > 0 || stats.deleted > 0 {
+             self.persist_if_configured();
+        }
+        
         Ok(stats)
     }
 
@@ -337,6 +374,7 @@ impl TieringManager {
     }
 
     /// Delete an object from all tiers.
+    /// Delete an object from all tiers.
     pub fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
         let tier = {
             let meta = self.metadata.read().unwrap();
@@ -350,6 +388,36 @@ impl TieringManager {
         }
         
         self.metadata.write().unwrap().remove(key);
+        self.persist_if_configured();
+        Ok(())
+    }
+
+    /// List all keys that start with the given prefix.
+    pub fn list_keys_with_prefix(&self, prefix: &str) -> Vec<String> {
+        let meta = self.metadata.read().unwrap();
+        meta.keys()
+            .filter(|k| k.starts_with(prefix))
+            .cloned()
+            .collect()
+    }
+
+    /// Save tiering metadata to a file.
+    pub fn save_state(&self, path: &Path) -> Result<(), ObjectStoreError> {
+        let meta = self.metadata.read().unwrap();
+        let file = std::fs::File::create(path).map_err(|e| ObjectStoreError::Io(e))?;
+        serde_json::to_writer(file, &*meta).map_err(|e| ObjectStoreError::Configuration(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Load tiering metadata from a file.
+    pub fn load_state(&self, path: &Path) -> Result<(), ObjectStoreError> {
+        if !path.exists() {
+            return Ok(());
+        }
+        let file = std::fs::File::open(path).map_err(|e| ObjectStoreError::Io(e))?;
+        let meta: HashMap<String, TieredObjectInfo> = serde_json::from_reader(file)
+            .map_err(|e| ObjectStoreError::Configuration(e.to_string()))?;
+        *self.metadata.write().unwrap() = meta;
         Ok(())
     }
 }
