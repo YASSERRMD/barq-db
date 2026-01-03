@@ -58,14 +58,16 @@ async fn main() -> anyhow::Result<()> {
     if std::env::var("BARQ_TIERING_ENABLED").unwrap_or_default() == "true" {
         use barq_storage::{
             TieringManager, TieringPolicy, LocalObjectStore, ObjectStore,
-            S3ObjectStore, GcsObjectStore, AzureBlobStore // Assuming cloud-all is enabled
+            S3ObjectStore, GcsObjectStore, AzureBlobStore
         };
         use std::sync::Arc;
 
         info!("Initializing storage tiering...");
         
         let hot_path = cli.storage_dir.join("hot");
-        std::fs::create_dir_all(&hot_path)?;
+        if !hot_path.exists() {
+             std::fs::create_dir_all(&hot_path)?;
+        }
         let hot_store = Arc::new(LocalObjectStore::new(hot_path)?);
 
         let create_cloud_store = |provider: String, bucket: String| -> Option<Arc<dyn ObjectStore>> {
@@ -80,8 +82,8 @@ async fn main() -> anyhow::Result<()> {
                 },
                 "azure" => {
                     info!("Configuring Azure tier: {}", bucket);
-                     let account = std::env::var("AZURE_STORAGE_ACCOUNT").ok()?;
-                     let key = std::env::var("AZURE_STORAGE_ACCESS_KEY").ok()?;
+                     let account = std::env::var("AZURE_STORAGE_ACCOUNT").unwrap_or_default();
+                     let key = std::env::var("AZURE_STORAGE_ACCESS_KEY").unwrap_or_default();
                      AzureBlobStore::new(account, key, bucket).ok().map(|s| Arc::new(s) as Arc<dyn ObjectStore>)
                 },
                 _ => {
@@ -103,7 +105,6 @@ async fn main() -> anyhow::Result<()> {
             None
         };
 
-        // Note: RetryingObjectStore is automatically applied in TieringManager::with_tiers
         let tiering_manager = Arc::new(TieringManager::with_tiers(
             hot_store,
             warm_store,
