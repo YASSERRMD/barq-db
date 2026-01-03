@@ -3,8 +3,9 @@ use crate::error::Error;
 use crate::error::Result;
 use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetSpec};
 use k8s_openapi::api::core::v1::{
-    Container, ContainerPort, EnvVar, PodSpec, PodTemplateSpec, ResourceRequirements,
+    Container, ContainerPort, EnvVar, EnvVarSource, SecretKeySelector, PodSpec, PodTemplateSpec, ResourceRequirements,
     Service, ServicePort, ServiceSpec, PersistentVolumeClaim, PersistentVolumeClaimSpec, VolumeResourceRequirements,
+    VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
@@ -103,7 +104,8 @@ fn define_statefulset(barq: &BarqDB) -> Result<StatefulSet> {
                 value: Some(warm.bucket.clone()),
                 ..Default::default()
             });
-            // Simplified secret handling: assuming specific keys in strict structure
+            // Inject credentials from secret
+            add_tier_credentials(&mut env, &warm.secret_ref, &warm.provider, "WARM");
         }
         
         if let Some(cold) = &spec.tiering.cold_storage {
@@ -117,8 +119,19 @@ fn define_statefulset(barq: &BarqDB) -> Result<StatefulSet> {
                 value: Some(cold.bucket.clone()),
                 ..Default::default()
             });
+            // Inject credentials from secret
+            add_tier_credentials(&mut env, &cold.secret_ref, &cold.provider, "COLD");
         }
     }
+
+    // Define volume mounts for data persistence
+    let volume_mounts = vec![
+        VolumeMount {
+            name: "data".to_string(),
+            mount_path: "/data".to_string(),
+            ..Default::default()
+        },
+    ];
 
     let sts = StatefulSet {
         metadata: ObjectMeta {
@@ -167,6 +180,7 @@ fn define_statefulset(barq: &BarqDB) -> Result<StatefulSet> {
                             ])),
                             ..Default::default()
                         }),
+                        volume_mounts: Some(volume_mounts),
                         ..Default::default()
                     }],
                     ..Default::default()
@@ -236,3 +250,68 @@ fn define_service(barq: &BarqDB) -> Result<Service> {
     };
     Ok(svc)
 }
+
+/// Helper to inject cloud provider credentials from a Kubernetes Secret.
+/// Expects secrets with keys like `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` for S3,
+/// or `GOOGLE_APPLICATION_CREDENTIALS_JSON` for GCS.
+fn add_tier_credentials(env: &mut Vec<EnvVar>, secret_name: &str, provider: &str, _tier_prefix: &str) {
+    match provider.to_lowercase().as_str() {
+        "s3" => {
+            env.push(env_from_secret(
+                "AWS_ACCESS_KEY_ID",
+                secret_name,
+                "AWS_ACCESS_KEY_ID",
+            ));
+            env.push(env_from_secret(
+                "AWS_SECRET_ACCESS_KEY",
+                secret_name,
+                "AWS_SECRET_ACCESS_KEY",
+            ));
+            // Optionally add region
+            env.push(env_from_secret(
+                "AWS_REGION",
+                secret_name,
+                "AWS_REGION",
+            ));
+        }
+        "gcs" => {
+            // GCS typically uses a service account JSON file; here we inject as env var
+            env.push(env_from_secret(
+                "GOOGLE_APPLICATION_CREDENTIALS_JSON",
+                secret_name,
+                "GOOGLE_APPLICATION_CREDENTIALS_JSON",
+            ));
+        }
+        "azure" => {
+            env.push(env_from_secret(
+                "AZURE_STORAGE_ACCOUNT",
+                secret_name,
+                "AZURE_STORAGE_ACCOUNT",
+            ));
+            env.push(env_from_secret(
+                "AZURE_STORAGE_ACCESS_KEY",
+                secret_name,
+                "AZURE_STORAGE_ACCESS_KEY",
+            ));
+        }
+        _ => {
+            // Unknown provider, skip credential injection
+        }
+    }
+}
+
+fn env_from_secret(env_name: &str, secret_name: &str, key: &str) -> EnvVar {
+    EnvVar {
+        name: env_name.to_string(),
+        value_from: Some(EnvVarSource {
+            secret_key_ref: Some(SecretKeySelector {
+                name: Some(secret_name.to_string()),
+                key: key.to_string(),
+                optional: Some(true), // Optional to avoid pod crash if secret key is missing
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+

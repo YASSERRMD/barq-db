@@ -84,6 +84,75 @@ spec:
             {{- if .Values.tiering.enabled }}
             - name: BARQ_TIERING_ENABLED
               value: "true"
+            {{- if .Values.tiering.warm.enabled }}
+            - name: BARQ_WARM_TIER_PROVIDER
+              value: "{{ .Values.tiering.warm.provider }}"
+            - name: BARQ_WARM_TIER_BUCKET
+              value: "{{ .Values.tiering.warm.bucket }}"
+            {{- end }}
+            {{- if .Values.tiering.cold.enabled }}
+            - name: BARQ_COLD_TIER_PROVIDER
+              value: "{{ .Values.tiering.cold.provider }}"
+            - name: BARQ_COLD_TIER_BUCKET
+              value: "{{ .Values.tiering.cold.bucket }}"
+            {{- end }}
+            {{- end }}
+            {{- if and .Values.tiering.enabled (or .Values.tiering.warm.enabled .Values.tiering.cold.enabled) }}
+            {{- if eq .Values.tiering.warm.provider "s3" }}
+            {{- if .Values.cloudCredentials.aws.existingSecret }}
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cloudCredentials.aws.existingSecret }}
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cloudCredentials.aws.existingSecret }}
+                  key: AWS_SECRET_ACCESS_KEY
+            - name: AWS_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cloudCredentials.aws.existingSecret }}
+                  key: AWS_REGION
+                  optional: true
+            {{- else if .Values.cloudCredentials.aws.accessKeyId }}
+            - name: AWS_ACCESS_KEY_ID
+              value: "{{ .Values.cloudCredentials.aws.accessKeyId }}"
+            - name: AWS_SECRET_ACCESS_KEY
+              value: "{{ .Values.cloudCredentials.aws.secretAccessKey }}"
+            - name: AWS_REGION
+              value: "{{ .Values.cloudCredentials.aws.region }}"
+            {{- end }}
+            {{- end }}
+            {{- if eq .Values.tiering.warm.provider "gcs" }}
+            {{- if .Values.cloudCredentials.gcs.existingSecret }}
+            - name: GOOGLE_APPLICATION_CREDENTIALS_JSON
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cloudCredentials.gcs.existingSecret }}
+                  key: GOOGLE_APPLICATION_CREDENTIALS_JSON
+            {{- end }}
+            {{- end }}
+            {{- if eq .Values.tiering.warm.provider "azure" }}
+            {{- if .Values.cloudCredentials.azure.existingSecret }}
+            - name: AZURE_STORAGE_ACCOUNT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cloudCredentials.azure.existingSecret }}
+                  key: AZURE_STORAGE_ACCOUNT
+            - name: AZURE_STORAGE_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cloudCredentials.azure.existingSecret }}
+                  key: AZURE_STORAGE_ACCESS_KEY
+            {{- else if .Values.cloudCredentials.azure.storageAccount }}
+            - name: AZURE_STORAGE_ACCOUNT
+              value: "{{ .Values.cloudCredentials.azure.storageAccount }}"
+            - name: AZURE_STORAGE_ACCESS_KEY
+              value: "{{ .Values.cloudCredentials.azure.storageKey }}"
+            {{- end }}
+            {{- end }}
             {{- end }}
           {{- if .Values.healthCheck.enabled }}
           livenessProbe:
