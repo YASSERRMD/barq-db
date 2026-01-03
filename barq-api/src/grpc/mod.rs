@@ -7,10 +7,13 @@ use barq_proto::barq::{
     CreateCollectionRequest, CreateCollectionResponse, 
     HealthRequest, HealthResponse, 
     InsertDocumentRequest, InsertDocumentResponse, 
-    SearchRequest, SearchResponse, SearchResult
+    SearchRequest, SearchResponse, SearchResult,
+    BatchSearchRequest, BatchSearchResponse, QueryResults
 };
-use barq_core::{CollectionSchema, DistanceMetric, Document, DocumentId, FieldSchema, FieldType, PayloadValue};
+use barq_core::{CollectionSchema, DistanceMetric, Document, DocumentId, FieldSchema, FieldType, PayloadValue, Filter};
 use barq_storage::Storage;
+
+
 
 pub struct GrpcService {
     pub(crate) state: AppState,
@@ -162,5 +165,51 @@ impl Barq for GrpcService {
         }
 
         Ok(Response::new(SearchResponse { results: proto_results }))
+    }
+
+    async fn batch_search(
+        &self,
+        request: Request<BatchSearchRequest>,
+    ) -> Result<Response<BatchSearchResponse>, Status> {
+        let req = request.into_inner();
+        let collection_name = req.collection;
+        let tenant = barq_core::TenantId::from("default");
+        
+        let storage = self.state.storage.lock().await;
+        let collection = storage.catalog().collection(&tenant, &collection_name)
+            .map_err(|e| Status::not_found(e.to_string()))?;
+            
+        let mut queries = Vec::new();
+        for q in req.queries {
+            let filter: Option<Filter> = if q.filter_json.is_empty() {
+                None
+            } else {
+                 Some(serde_json::from_str(&q.filter_json)
+                    .map_err(|e| Status::invalid_argument(format!("Invalid Filter JSON: {}", e)))?)
+            };
+            queries.push((q.vector, filter));
+        }
+        
+        let results_vec = collection.batch_search(&queries, req.top_k as usize)
+             .map_err(|e| Status::internal(e.to_string()))?;
+             
+        let mut resp_results = Vec::new();
+        for batch in results_vec {
+             let mut hits = Vec::new();
+             for res in batch {
+                let id_str = match res.id {
+                    DocumentId::U64(v) => v.to_string(),
+                    DocumentId::Str(s) => s,
+                };
+                hits.push(SearchResult {
+                    id: id_str,
+                    score: res.score,
+                    payload_json: "{}".to_string(),
+                });
+             }
+             resp_results.push(QueryResults { hits });
+        }
+        
+        Ok(Response::new(BatchSearchResponse { results: resp_results }))
     }
 }

@@ -7,6 +7,7 @@ service Barq {
   rpc CreateCollection (CreateCollectionRequest) returns (CreateCollectionResponse);
   rpc InsertDocument (InsertDocumentRequest) returns (InsertDocumentResponse);
   rpc Search (SearchRequest) returns (SearchResponse);
+  rpc BatchSearch (BatchSearchRequest) returns (BatchSearchResponse);
 }
 
 message HealthRequest {}
@@ -50,4 +51,23 @@ message SearchResult {
 
 message SearchResponse {
   repeated SearchResult results = 1;
+}
+
+message SearchQuery {
+  repeated float vector = 1;
+  string filter_json = 2;
+}
+
+message BatchSearchRequest {
+  string collection = 1;
+  repeated SearchQuery queries = 2;
+  uint32 top_k = 3;
+}
+
+message QueryResults {
+  repeated SearchResult hits = 1;
+}
+
+message BatchSearchResponse {
+  repeated QueryResults results = 1;
 }

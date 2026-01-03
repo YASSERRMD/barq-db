@@ -1,7 +1,7 @@
 use barq_bm25::{Bm25Config, Bm25Index, TextIndexError};
 pub use barq_index::{
     build_index, DistanceMetric, DocumentId, DocumentIdError, IndexConfig, IndexType, SearchResult,
-    VectorIndex, Filter, GeoBoundingBox, GeoPoint, PayloadValue,
+    VectorIndex, Filter, GeoBoundingBox, GeoPoint, PayloadValue, BatchSearch, score_with_metric,
 };
 use chrono::{DateTime, Utc};
 use rayon::prelude::*;
@@ -717,18 +717,22 @@ impl Collection {
             self.validate_filter(f)?;
         }
         let candidates = filter.and_then(|f| self.metadata_index.candidates(f));
-        let mut results = if let Some(ids) = candidates {
-            self.search_over_candidates(vector, &ids)?
+        
+        let mut results = if let Some(ids) = &candidates {
+            self.search_over_candidates(vector, ids)?
         } else {
             self.index.search(vector, top_k * 2)?
         };
 
         results = self.filter_results(results, filter);
         if results.len() < top_k {
-            let mut fallback = self.index.search(vector, top_k * 4)?;
-            fallback = self.filter_results(fallback, filter);
-            results.extend(fallback);
+           // Simple fallback strategy (could be improved with FilteredVectorSearch in future)
+           let search_k = if candidates.is_some() { top_k * 10 } else { top_k * 4 };
+           let fallback = self.index.search(vector, search_k)?;
+           let filtered_fallback = self.filter_results(fallback, filter);
+           results.extend(filtered_fallback);
         }
+        
         results.par_sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
@@ -737,6 +741,42 @@ impl Collection {
         results.dedup_by(|a, b| a.id == b.id);
         results.truncate(top_k.min(results.len()));
         Ok(results)
+    }
+
+    pub fn batch_search(
+        &self,
+        queries: &[(Vec<f32>, Option<Filter>)],
+        top_k: usize,
+    ) -> Result<Vec<Vec<SearchResult>>, CatalogError> {
+        let batch_search = BatchSearch::new(&*self.index);
+        
+        let candidates_provider = |filter: &Filter| -> Option<Vec<DocumentId>> {
+            self.metadata_index.candidates(filter).map(|set| set.into_iter().collect())
+        };
+
+        let check_provider = |id: &DocumentId, filter: &Filter| -> bool {
+             if let Some(payload) = self.payloads.get(id) {
+                 filter.matches(payload)
+             } else {
+                 false
+             }
+        };
+        
+        let match_scorer = |id: &DocumentId, query: &[f32]| -> Option<f32> {
+             if let Some(vec) = self.vectors.get(id) {
+                 Some(score_with_metric(self.metric, vec, query))
+             } else {
+                 None
+             }
+        };
+        
+        Ok(batch_search.search_filtered(
+            queries, 
+            top_k, 
+            &match_scorer, 
+            &candidates_provider, 
+            &check_provider
+        )?)
     }
 
 
@@ -1732,31 +1772,4 @@ fn compare_values(lhs: &PayloadValue, rhs: &PayloadValue, desired: Ordering) -> 
     }
 }
 
-fn score_with_metric(metric: DistanceMetric, lhs: &[f32], rhs: &[f32]) -> f32 {
-    match metric {
-        DistanceMetric::L2 => -l2_distance(lhs, rhs),
-        DistanceMetric::Cosine => cosine_similarity(lhs, rhs),
-        DistanceMetric::Dot => lhs.iter().zip(rhs).map(|(a, b)| a * b).sum(),
-    }
-}
 
-fn l2_distance(lhs: &[f32], rhs: &[f32]) -> f32 {
-    lhs.iter()
-        .zip(rhs)
-        .map(|(a, b)| {
-            let diff = a - b;
-            diff * diff
-        })
-        .sum::<f32>()
-        .sqrt()
-}
-
-fn cosine_similarity(lhs: &[f32], rhs: &[f32]) -> f32 {
-    let dot: f32 = lhs.iter().zip(rhs).map(|(a, b)| a * b).sum();
-    let norm_l = lhs.iter().map(|v| v * v).sum::<f32>().sqrt();
-    let norm_r = rhs.iter().map(|v| v * v).sum::<f32>().sqrt();
-    if norm_l == 0.0 || norm_r == 0.0 {
-        return 0.0;
-    }
-    dot / (norm_l * norm_r)
-}

@@ -187,6 +187,29 @@ pub struct SearchResponse {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct SearchQuery {
+    pub vector: Vec<f32>,
+    #[serde(default)]
+    pub filter: Option<Filter>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BatchSearchRequest {
+    pub queries: Vec<SearchQuery>,
+    pub top_k: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BatchSearchResults {
+    pub hits: Vec<barq_index::SearchResult>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BatchSearchResponse {
+    pub results: Vec<BatchSearchResults>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct TextSearchRequest {
     pub query: String,
     pub top_k: usize,
@@ -302,6 +325,7 @@ pub fn build_router_from_state(state: AppState) -> Router {
             post(rebuild_collection_index),
         )
         .route("/collections/:name/search", post(search_collection))
+        .route("/collections/:name/batch_search", post(batch_search_collection))
         .route(
             "/collections/:name/search/text",
             post(search_text_collection),
@@ -634,6 +658,47 @@ async fn search_collection(
         "tenant" => tenant.as_str().to_string()
     ).increment(1);
     Ok(Json(SearchResponse { results }))
+}
+
+async fn batch_search_collection(
+    AxumPath(name): AxumPath<String>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<BatchSearchRequest>,
+) -> Result<Json<BatchSearchResponse>, ApiError> {
+    let tenant = state
+        .auth
+        .authenticate(&headers, ApiPermission::Read, None)?
+        .tenant;
+    state.ensure_local_for_tenant(&tenant)?;
+    if payload.top_k == 0 {
+        return Err(ApiError::BadRequest("top_k must be positive".into()));
+    }
+    
+    let queries: Vec<(Vec<f32>, Option<Filter>)> = payload.queries.into_iter()
+        .map(|q| (q.vector, q.filter))
+        .collect();
+        
+    let start = Instant::now();
+    let mut storage = state.storage.lock().await;
+    
+    // We access collection directly via catalog. 
+    // This requires mapping CatalogError to StorageError to ApiError.
+    // Assuming ApiError::from(StorageError) exists.
+    let catalog = storage.catalog();
+    let collection = catalog.collection(&tenant, &name)
+        .map_err(|e| barq_storage::StorageError::Catalog(e))?;
+        
+    let results_vec = collection.batch_search(&queries, payload.top_k)
+        .map_err(|e| barq_storage::StorageError::Catalog(e))?;
+        
+    let duration = start.elapsed().as_secs_f64();
+    metrics::histogram!("batch_search_duration_seconds").record(duration);
+    
+    let resp = BatchSearchResponse {
+        results: results_vec.into_iter().map(|hits| BatchSearchResults { hits }).collect()
+    };
+    Ok(Json(resp))
 }
 
 async fn search_text_collection(
