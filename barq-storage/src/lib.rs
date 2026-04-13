@@ -216,7 +216,7 @@ impl Default for StorageOptions {
 }
 
 /// Per-collection resident vector memory gauge sample captured for tests and admin surfaces.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct CollectionMemorySample {
     tenant: String,
     collection: String,
@@ -224,14 +224,14 @@ struct CollectionMemorySample {
 }
 
 /// Per-tenant resident vector memory gauge sample captured for tests and admin surfaces.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct TenantMemorySample {
     tenant: String,
     resident_vector_memory_bytes: u64,
 }
 
 /// Per-collection WAL gauge sample captured for deterministic tests.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct CollectionWalSample {
     tenant: String,
     collection: String,
@@ -240,7 +240,7 @@ struct CollectionWalSample {
 }
 
 /// Per-collection segment file count captured for deterministic tests.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct CollectionSegmentFileSample {
     tenant: String,
     collection: String,
@@ -249,7 +249,7 @@ struct CollectionSegmentFileSample {
 }
 
 /// Per-collection current segment lifecycle state captured for deterministic tests.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct CollectionSegmentStateSample {
     tenant: String,
     collection: String,
@@ -258,7 +258,7 @@ struct CollectionSegmentStateSample {
 }
 
 /// Snapshot of storage-level metrics used by deterministic tests.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 struct StorageMetricsSnapshot {
     refresh_count: u64,
     total_resident_vector_memory_bytes: u64,
@@ -536,7 +536,6 @@ impl StorageMetrics {
         snapshot.collection_segment_states = segment_state_samples;
     }
 
-    #[cfg(test)]
     fn snapshot(&self) -> StorageMetricsSnapshot {
         self.snapshot
             .read()
@@ -2120,6 +2119,12 @@ impl Storage {
         name: &str,
     ) -> Result<&CollectionSchema, StorageError> {
         Ok(self.catalog.collection(tenant, name)?.schema())
+    }
+
+    /// Returns the current storage metrics snapshot as JSON for admin endpoints.
+    pub fn metrics_report_json(&self) -> serde_json::Value {
+        serde_json::to_value(self.metrics.snapshot())
+            .expect("storage metrics snapshot serialization should succeed")
     }
 
     pub fn collection_names(&self) -> Result<Vec<String>, StorageError> {
@@ -4105,6 +4110,45 @@ mod tests {
             ),
             Some(1)
         );
+    }
+
+    #[test]
+    fn metrics_report_json_includes_expected_storage_fields() {
+        let root = tempfile::tempdir().unwrap();
+        let mut storage = Storage::open(root.path()).unwrap();
+        storage
+            .create_collection(sample_schema("report_metrics"))
+            .unwrap();
+        storage
+            .insert("report_metrics", sample_document(1), false)
+            .unwrap();
+
+        let report = storage.metrics_report_json();
+        assert_eq!(report["wal_appends_total"], serde_json::json!(1));
+        assert!(
+            report["total_resident_vector_memory_bytes"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert!(report["collection_memory_bytes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|sample| {
+                sample["tenant"] == serde_json::json!("default")
+                    && sample["collection"] == serde_json::json!("report_metrics")
+                    && sample["resident_vector_memory_bytes"].as_u64().unwrap() > 0
+            }));
+        assert!(report["collection_wal"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|sample| {
+                sample["tenant"] == serde_json::json!("default")
+                    && sample["collection"] == serde_json::json!("report_metrics")
+                    && sample["entries"].as_u64().unwrap() >= 1
+            }));
     }
 
     proptest! {

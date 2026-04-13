@@ -136,6 +136,12 @@ fn search_metric_definitions() -> Vec<MetricDefinition> {
     ]
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AdminMetricsResponse {
+    definitions: Vec<MetricDefinition>,
+    storage: serde_json::Value,
+}
+
 fn execution_path_label(path: QueryExecutionPath) -> &'static str {
     match path {
         QueryExecutionPath::VectorIndex => "vector_index",
@@ -544,6 +550,7 @@ pub fn build_router_from_state(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/info", get(info))
         .route("/metrics", get(render_metrics))
+        .route("/admin/metrics", get(admin_metrics))
         .route("/collections", post(create_collection))
         .route("/collections/:name", delete(drop_collection))
         .route("/collections/:name/documents", post(insert_document))
@@ -650,6 +657,20 @@ async fn render_metrics(
         .authenticate(&headers, ApiPermission::Ops, None)?;
     let body = state.metrics.render();
     Ok((StatusCode::OK, body).into_response())
+}
+
+async fn admin_metrics(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AdminMetricsResponse>, ApiError> {
+    state
+        .auth
+        .authenticate(&headers, ApiPermission::Admin, None)?;
+    let storage = state.storage.lock().await;
+    Ok(Json(AdminMetricsResponse {
+        definitions: state.metric_registry.definitions(),
+        storage: storage.metrics_report_json(),
+    }))
 }
 
 async fn info(
@@ -1447,6 +1468,29 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let app = super::build_router_with_state(storage, ApiAuth::new(), cluster);
+        let (tx, rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = rx.await;
+                })
+                .await
+        });
+        (addr, tx, handle)
+    }
+
+    async fn start_test_server_with_storage_auth_and_cluster(
+        storage: Storage,
+        auth: ApiAuth,
+        cluster: ClusterRouter,
+    ) -> (
+        SocketAddr,
+        oneshot::Sender<()>,
+        JoinHandle<Result<(), std::io::Error>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = super::build_router_with_state(storage, auth, cluster);
         let (tx, rx) = oneshot::channel();
         let handle = tokio::spawn(async move {
             axum::serve(listener, app)
@@ -2286,6 +2330,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_metrics_endpoint_exposes_catalog_and_storage_snapshot() {
+        init_tracing();
+        let dir = tempfile::tempdir().unwrap();
+        let tenant = TenantId::default();
+        let storage = seeded_search_storage(dir.path(), "admin_metrics_docs");
+        let auth = ApiAuth::new().require_keys();
+        auth.insert("admin-metrics-key", tenant.clone(), ApiRole::Admin);
+        let (addr, shutdown, handle) = start_test_server_with_storage_auth_and_cluster(
+            storage,
+            auth,
+            ClusterRouter::from_config(ClusterConfig::single_node()).unwrap(),
+        )
+        .await;
+        let client = Client::new();
+
+        let response = client
+            .get(format!("http://{}/admin/metrics", addr))
+            .header("x-api-key", "admin-metrics-key")
+            .header("x-tenant-id", tenant.as_str())
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+
+        let definitions = response["definitions"].as_array().unwrap();
+        assert!(definitions.iter().any(|definition| {
+            definition["name"] == serde_json::json!("ingestion_queue_size")
+                && definition["kind"] == serde_json::json!("gauge")
+        }));
+        assert!(definitions.iter().any(|definition| {
+            definition["name"] == serde_json::json!("search_requests_total")
+                && definition["labels"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|label| label == "planner_path")
+        }));
+
+        let storage = &response["storage"];
+        assert!(
+            storage["total_resident_vector_memory_bytes"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert!(storage["wal_appends_total"].as_u64().unwrap() >= 2);
+        assert!(storage["collection_wal"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|sample| {
+                sample["tenant"] == serde_json::json!(tenant.as_str())
+                    && sample["collection"] == serde_json::json!("admin_metrics_docs")
+                    && sample["entries"].as_u64().unwrap() >= 2
+            }));
+
+        shutdown.send(()).unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn admin_metrics_endpoint_requires_admin_role() {
+        init_tracing();
+        let dir = tempfile::tempdir().unwrap();
+        let tenant = TenantId::default();
+        let storage = seeded_search_storage(dir.path(), "admin_metrics_denied");
+        let auth = ApiAuth::new().require_keys();
+        auth.insert("writer-metrics-key", tenant.clone(), ApiRole::Writer);
+        let (addr, shutdown, handle) = start_test_server_with_storage_auth_and_cluster(
+            storage,
+            auth,
+            ClusterRouter::from_config(ClusterConfig::single_node()).unwrap(),
+        )
+        .await;
+        let client = Client::new();
+
+        let response = client
+            .get(format!("http://{}/admin/metrics", addr))
+            .header("x-api-key", "writer-metrics-key")
+            .header("x-tenant-id", tenant.as_str())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        shutdown.send(()).unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn quota_limits_enforced_per_tenant() {
         init_tracing();
         let dir = tempfile::tempdir().unwrap();
@@ -2917,6 +3055,71 @@ mod tests {
                 || line.starts_with("batch_search_duration_seconds_count{"))
                 && metric_value(line) >= 1.0
         }));
+
+        shutdown.send(()).unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_handles_concurrent_search_updates() {
+        init_tracing();
+        let dir = tempfile::tempdir().unwrap();
+        let collection = "concurrent_metrics_docs";
+        let storage = seeded_search_storage(dir.path(), collection);
+        let (addr, shutdown, handle) = start_test_server_with_storage_and_cluster(
+            storage,
+            ClusterRouter::from_config(ClusterConfig::single_node()).unwrap(),
+        )
+        .await;
+
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let client = Client::new();
+            let search_url = format!("http://{}/collections/{collection}/search", addr);
+            let metrics_url = format!("http://{}/metrics", addr);
+            tasks.push(tokio::spawn(async move {
+                client
+                    .post(&search_url)
+                    .json(&serde_json::json!({"vector": [0.0, 1.0, 0.0], "top_k": 1}))
+                    .send()
+                    .await
+                    .unwrap()
+                    .error_for_status()
+                    .unwrap();
+                client
+                    .get(&metrics_url)
+                    .send()
+                    .await
+                    .unwrap()
+                    .error_for_status()
+                    .unwrap();
+            }));
+        }
+
+        for task in tasks {
+            task.await.unwrap();
+        }
+
+        let metrics_text = Client::new()
+            .get(format!("http://{}/metrics", addr))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        let concurrent_counter = metrics_text
+            .lines()
+            .find(|line| {
+                line.starts_with("search_requests_total{")
+                    && line.contains("type=\"vector\"")
+                    && line.contains("planner_path=\"vector_full_scan\"")
+                    && line.contains(&format!("collection=\"{collection}\""))
+            })
+            .expect("concurrent vector search counter line");
+        assert!(metric_value(concurrent_counter) >= 8.0);
 
         shutdown.send(()).unwrap();
         handle.await.unwrap().unwrap();
