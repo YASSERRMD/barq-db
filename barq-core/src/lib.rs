@@ -1049,7 +1049,7 @@ impl Collection {
             self.validate_filter(f)?;
         }
         let candidates = self.filter_candidates(filter);
-        let mut results = match plan.vector_path() {
+        let results = match plan.vector_path() {
             Some(QueryExecutionPath::VectorFilterScan) => {
                 self.search_over_candidates(vector, candidates.as_ref().expect("candidate set"))?
             }
@@ -1061,8 +1061,10 @@ impl Collection {
             path => panic!("unexpected vector execution path: {path:?}"),
         };
 
-        results = self.filter_results(results, filter);
-        if results.len() < top_k && matches!(plan.vector_path(), Some(QueryExecutionPath::VectorIndex)) {
+        let mut sources = vec![self.filter_results(results, filter)];
+        if sources[0].len() < top_k
+            && matches!(plan.vector_path(), Some(QueryExecutionPath::VectorIndex))
+        {
             // Simple fallback strategy (could be improved with FilteredVectorSearch in future)
             let search_k = if candidates.is_some() {
                 top_k * 10
@@ -1071,17 +1073,9 @@ impl Collection {
             };
             let fallback = self.index.search(vector, search_k)?;
             let filtered_fallback = self.filter_results(fallback, filter);
-            results.extend(filtered_fallback);
+            sources.push(filtered_fallback);
         }
-
-        results.par_sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        results.dedup_by(|a, b| a.id == b.id);
-        results.truncate(top_k.min(results.len()));
-        Ok(results)
+        Ok(merge_search_result_sources(sources, top_k))
     }
 
     pub fn batch_search(
@@ -1212,15 +1206,15 @@ impl Collection {
             .as_ref()
             .ok_or_else(|| CatalogError::InvalidSchema("collection has no text index".into()))?;
         let candidates = self.filter_candidates(filter);
-        let mut results = match plan.text_path() {
+        let results = match plan.text_path() {
             Some(QueryExecutionPath::TextFilterScan) => {
                 index.search_with_candidates(query, top_k * 2, candidates.as_ref())?
             }
             Some(QueryExecutionPath::TextIndex) => index.search(query, top_k * 2)?,
             path => panic!("unexpected text execution path: {path:?}"),
         };
-        results = self.filter_results(results, filter);
-        if results.len() < top_k {
+        let mut sources = vec![self.filter_results(results, filter)];
+        if sources[0].len() < top_k {
             let mut fallback = match plan.text_path() {
                 Some(QueryExecutionPath::TextFilterScan) => {
                     index.search_with_candidates(query, top_k * 4, candidates.as_ref())?
@@ -1229,16 +1223,9 @@ impl Collection {
                 path => panic!("unexpected text execution path: {path:?}"),
             };
             fallback = self.filter_results(fallback, filter);
-            results.extend(fallback);
+            sources.push(fallback);
         }
-        results.par_sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        results.dedup_by(|a, b| a.id == b.id);
-        results.truncate(top_k.min(results.len()));
-        Ok(results)
+        Ok(merge_search_result_sources(sources, top_k))
     }
 
     pub fn search_hybrid(
@@ -1629,6 +1616,36 @@ impl QueryPlanner {
     }
 }
 
+fn merge_search_result_sources(
+    sources: Vec<Vec<SearchResult>>,
+    top_k: usize,
+) -> Vec<SearchResult> {
+    let mut merged: HashMap<DocumentId, SearchResult> = HashMap::new();
+
+    for result in sources.into_iter().flatten() {
+        let score = sanitize_score(result.score);
+        merged
+            .entry(result.id.clone())
+            .and_modify(|existing| {
+                if score > sanitize_score(existing.score) {
+                    *existing = SearchResult {
+                        id: result.id.clone(),
+                        score,
+                    };
+                }
+            })
+            .or_insert(SearchResult {
+                id: result.id,
+                score,
+            });
+    }
+
+    let mut results: Vec<_> = merged.into_values().collect();
+    sort_search_results(&mut results);
+    results.truncate(top_k.min(results.len()));
+    results
+}
+
 fn normalize_scores(results: &[SearchResult]) -> HashMap<DocumentId, f32> {
     if results.is_empty() {
         return HashMap::new();
@@ -1748,6 +1765,15 @@ fn sanitize_score(score: f32) -> f32 {
     }
 }
 
+fn sort_search_results(results: &mut [SearchResult]) {
+    results.sort_by(|left, right| {
+        sanitize_score(right.score)
+            .partial_cmp(&sanitize_score(left.score))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+}
+
 fn sort_hybrid_results(results: &mut [HybridSearchResult]) {
     results.sort_by(|left, right| {
         right
@@ -1762,6 +1788,7 @@ fn sort_hybrid_results(results: &mut [HybridSearchResult]) {
 mod tests {
     use super::*;
     use barq_index::HnswParams;
+    use proptest::prelude::*;
     use std::sync::{Mutex, OnceLock};
 
     fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -2210,6 +2237,65 @@ mod tests {
     }
 
     #[test]
+    fn merge_search_results_is_deterministic_and_breaks_ties_by_id() {
+        let sources = vec![
+            vec![
+                SearchResult {
+                    id: DocumentId::U64(10),
+                    score: 1.0,
+                },
+                SearchResult {
+                    id: DocumentId::U64(2),
+                    score: 1.0,
+                },
+            ],
+            vec![SearchResult {
+                id: DocumentId::U64(2),
+                score: 1.0,
+            }],
+        ];
+
+        let first = merge_search_result_sources(sources.clone(), 2);
+        let second = merge_search_result_sources(sources, 2);
+
+        assert_eq!(first, second);
+        assert_eq!(first[0].id, DocumentId::U64(10));
+        assert_eq!(first[1].id, DocumentId::U64(2));
+    }
+
+    #[test]
+    fn merge_search_results_keeps_best_score_per_document() {
+        let sources = vec![
+            vec![
+                SearchResult {
+                    id: DocumentId::U64(1),
+                    score: 0.2,
+                },
+                SearchResult {
+                    id: DocumentId::U64(2),
+                    score: 0.7,
+                },
+            ],
+            vec![
+                SearchResult {
+                    id: DocumentId::U64(1),
+                    score: 0.9,
+                },
+                SearchResult {
+                    id: DocumentId::U64(3),
+                    score: 0.8,
+                },
+            ],
+        ];
+
+        let merged = merge_search_result_sources(sources, 2);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].id, DocumentId::U64(1));
+        assert_eq!(merged[0].score, 0.9);
+        assert_eq!(merged[1].id, DocumentId::U64(3));
+    }
+
+    #[test]
     fn hybrid_includes_both_scores() {
         let mut catalog = Catalog::new();
         let tenant = default_tenant();
@@ -2434,6 +2520,49 @@ mod tests {
         let normalized = normalize_scores(&mixed_scores);
         assert_eq!(normalized.get(&DocumentId::U64(3)), Some(&0.0));
         assert_eq!(normalized.get(&DocumentId::U64(4)), Some(&1.0));
+    }
+
+    proptest! {
+        #[test]
+        fn merged_results_match_bruteforce_baseline(
+            sources in proptest::collection::vec(
+                proptest::collection::vec((1u8..16u8, -1000i16..1000i16), 0..8),
+                1..4
+            ),
+            top_k in 1usize..8,
+        ) {
+            let ranked_sources: Vec<Vec<SearchResult>> = sources
+                .iter()
+                .map(|source| {
+                    source
+                        .iter()
+                        .map(|(id, score)| SearchResult {
+                            id: DocumentId::U64(*id as u64),
+                            score: *score as f32 / 100.0,
+                        })
+                        .collect()
+                })
+                .collect();
+
+            let mut expected: HashMap<DocumentId, SearchResult> = HashMap::new();
+            for result in ranked_sources.iter().flatten() {
+                expected
+                    .entry(result.id.clone())
+                    .and_modify(|existing| {
+                        if sanitize_score(result.score) > sanitize_score(existing.score) {
+                            *existing = result.clone();
+                        }
+                    })
+                    .or_insert_with(|| result.clone());
+            }
+
+            let mut expected: Vec<_> = expected.into_values().collect();
+            sort_search_results(&mut expected);
+            expected.truncate(top_k.min(expected.len()));
+
+            let merged = merge_search_result_sources(ranked_sources, top_k);
+            prop_assert_eq!(merged, expected);
+        }
     }
 
     #[test]
