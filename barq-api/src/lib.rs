@@ -1164,7 +1164,9 @@ pub fn init_tracing() {
 mod tests {
     use super::*;
     use barq_admin::auth::{AuthMethod, JwtClaims, JwtVerifier};
-    use barq_cluster::{NodeConfig, NodeId, ReadPreference, ShardId, ShardPlacement};
+    use barq_cluster::{
+        ClusterMode, ClusterStatus, NodeConfig, NodeId, ReadPreference, ShardId, ShardPlacement,
+    };
     use barq_core::TenantId;
     use barq_index::DocumentId;
     use axum::http::{header, HeaderMap, HeaderValue};
@@ -1220,6 +1222,28 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let storage = sample_storage(dir);
+        let app = super::build_router_with_state(storage, ApiAuth::new(), cluster);
+        let (tx, rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = rx.await;
+                })
+                .await
+        });
+        (addr, tx, handle)
+    }
+
+    async fn start_test_server_with_storage_and_cluster(
+        storage: Storage,
+        cluster: ClusterRouter,
+    ) -> (
+        SocketAddr,
+        oneshot::Sender<()>,
+        JoinHandle<Result<(), std::io::Error>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
         let app = super::build_router_with_state(storage, ApiAuth::new(), cluster);
         let (tx, rx) = oneshot::channel();
         let handle = tokio::spawn(async move {
@@ -1651,6 +1675,219 @@ mod tests {
             .get(reqwest::header::LOCATION)
             .expect("location header");
         assert_eq!(location.to_str().unwrap(), "http://node-1");
+
+        shutdown.send(()).unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn admin_status_reports_single_node_mode() {
+        init_tracing();
+        let dir = tempfile::tempdir().unwrap();
+        let cluster = ClusterRouter::from_config(ClusterConfig::single_node()).unwrap();
+
+        let (addr, shutdown, handle) = start_test_server_with_cluster(dir.path(), cluster).await;
+        let client = Client::new();
+
+        let response = client
+            .get(format!("http://{}/admin/status", addr))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        let status: ClusterStatus = response.json().await.unwrap();
+        assert_eq!(status.mode, ClusterMode::SingleNode);
+        assert_eq!(status.write_durability, barq_cluster::WriteDurability::NodeLocal);
+        assert_eq!(status.node_count, 1);
+        assert_eq!(status.shard_count, 1);
+
+        shutdown.send(()).unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn admin_status_reports_routed_replication_mode() {
+        init_tracing();
+        let dir = tempfile::tempdir().unwrap();
+
+        let cluster_config = ClusterConfig {
+            node_id: NodeId::new("node-0"),
+            nodes: vec![
+                NodeConfig {
+                    id: NodeId::new("node-0"),
+                    address: "http://node-0".into(),
+                },
+                NodeConfig {
+                    id: NodeId::new("node-1"),
+                    address: "http://node-1".into(),
+                },
+            ],
+            shard_count: 2,
+            replication_factor: 2,
+            read_preference: ReadPreference::Primary,
+            placements: HashMap::new(),
+        };
+        let cluster = ClusterRouter::from_config(cluster_config).unwrap();
+
+        let (addr, shutdown, handle) = start_test_server_with_cluster(dir.path(), cluster).await;
+        let client = Client::new();
+
+        let response = client
+            .get(format!("http://{}/admin/status", addr))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        let status: ClusterStatus = response.json().await.unwrap();
+        assert_eq!(status.mode, ClusterMode::RoutedReplication);
+        assert_eq!(
+            status.write_durability,
+            barq_cluster::WriteDurability::PrimaryOnly
+        );
+        assert_eq!(status.node_count, 2);
+        assert_eq!(status.shard_count, 2);
+
+        shutdown.send(()).unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_primary_write_is_visible_immediately_after_ack() {
+        init_tracing();
+        let dir = tempfile::tempdir().unwrap();
+        let (addr, shutdown, handle) =
+            start_test_server_with_cluster(
+                dir.path(),
+                ClusterRouter::from_config(ClusterConfig::single_node()).unwrap(),
+            )
+            .await;
+        let client = Client::new();
+
+        let create = serde_json::json!({
+            "name": "products",
+            "dimension": 3,
+            "metric": "Cosine"
+        });
+        client
+            .post(format!("http://{}/collections", addr))
+            .json(&create)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+
+        let insert = serde_json::json!({
+            "id": 1,
+            "vector": [0.0, 1.0, 0.0],
+            "payload": {"name": "widget"}
+        });
+        let insert_response = client
+            .post(format!("http://{}/collections/products/documents", addr))
+            .json(&insert)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(insert_response.status(), StatusCode::CREATED);
+
+        let document: GetDocumentResponse = client
+            .get(format!("http://{}/collections/products/documents/1", addr))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(document.document.is_some(), "document should exist after ack");
+
+        shutdown.send(()).unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn writes_redirect_when_local_node_is_not_primary() {
+        init_tracing();
+        let dir = tempfile::tempdir().unwrap();
+        let tenant = TenantId::default();
+        let mut storage = sample_storage(dir.path());
+        storage
+            .create_collection_for_tenant(
+                tenant.clone(),
+                CollectionSchema {
+                    name: "products".to_string(),
+                    fields: vec![FieldSchema {
+                        name: "vector".to_string(),
+                        field_type: FieldType::Vector {
+                            dimension: 3,
+                            metric: DistanceMetric::Cosine,
+                            index: Some(IndexType::Flat),
+                        },
+                        required: true,
+                    }],
+                    bm25_config: None,
+                    tenant_id: tenant.clone(),
+                },
+            )
+            .unwrap();
+
+        let cluster = ClusterRouter::from_config(ClusterConfig {
+            node_id: NodeId::new("node-1"),
+            nodes: vec![
+                NodeConfig {
+                    id: NodeId::new("node-0"),
+                    address: "http://node-0".into(),
+                },
+                NodeConfig {
+                    id: NodeId::new("node-1"),
+                    address: "http://node-1".into(),
+                },
+            ],
+            shard_count: 1,
+            replication_factor: 2,
+            read_preference: ReadPreference::Primary,
+            placements: HashMap::from([(
+                ShardId(0),
+                ShardPlacement {
+                    shard: ShardId(0),
+                    primary: NodeId::new("node-0"),
+                    replicas: vec![NodeId::new("node-1")],
+                },
+            )]),
+        })
+        .unwrap();
+
+        let (addr, shutdown, handle) =
+            start_test_server_with_storage_and_cluster(storage, cluster).await;
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+
+        let insert = serde_json::json!({
+            "id": 1,
+            "vector": [0.0, 1.0, 0.0],
+            "payload": {"name": "widget"}
+        });
+        let response = client
+            .post(format!("http://{}/collections/products/documents", addr))
+            .json(&insert)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(
+            response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .expect("location header")
+                .to_str()
+                .unwrap(),
+            "http://node-0"
+        );
 
         shutdown.send(()).unwrap();
         handle.await.unwrap().unwrap();
