@@ -333,6 +333,9 @@ pub enum BarqError {
 |--------|-----------|-------------|
 | `insert` | `(&self, id, vector, payload) -> Result<()>` | Insert document |
 | `search` | `(&self, vector, query, top_k, filter, weights) -> Result<Vec<Value>>` | Search |
+| `get_metrics` | `(&self) -> Result<GetMetricsResponse>` | Metrics catalog and storage snapshot |
+| `get_cluster_status` | `(&self) -> Result<GetClusterStatusResponse>` | Honest cluster capability report |
+| `get_segment_info` | `(&self, collection) -> Result<GetSegmentInfoResponse>` | Per-collection segment lifecycle state |
 
 ### `BarqGrpcClient`
 
@@ -345,6 +348,9 @@ pub enum BarqError {
 | `insert` | `(&mut self, collection, id, vector, payload) -> Result<()>` | Canonical insert RPC |
 | `insert_document` | `(&mut self, collection, id, vector, payload) -> Result<()>` | Insert |
 | `search` | `(&mut self, collection, vector, top_k) -> Result<Vec<Value>>` | Search |
+| `get_metrics` | `(&mut self) -> Result<GetMetricsResponse>` | Metrics catalog and storage snapshot |
+| `get_cluster_status` | `(&mut self) -> Result<GetClusterStatusResponse>` | Honest cluster capability report |
+| `get_segment_info` | `(&mut self, collection) -> Result<GetSegmentInfoResponse>` | Per-collection segment lifecycle state |
 
 ---
 

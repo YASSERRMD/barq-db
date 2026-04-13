@@ -9,6 +9,9 @@ service Barq {
   rpc InsertAsync (InsertRequest) returns (InsertAsyncResponse);
   rpc GetInsertStatus (GetInsertStatusRequest) returns (GetInsertStatusResponse);
   rpc Search (SearchRequest) returns (SearchResponse);
+  rpc GetMetrics (GetMetricsRequest) returns (GetMetricsResponse);
+  rpc GetClusterStatus (GetClusterStatusRequest) returns (GetClusterStatusResponse);
+  rpc GetSegmentInfo (GetSegmentInfoRequest) returns (GetSegmentInfoResponse);
 
   // Legacy RPCs kept temporarily while SDKs migrate to the canonical contract.
   rpc Health (HealthRequest) returns (HealthResponse);
@@ -117,6 +120,132 @@ message SearchResult {
 
 message SearchResponse {
   repeated SearchResult results = 1;
+}
+
+message GetMetricsRequest {}
+
+enum MetricKind {
+  METRIC_KIND_UNSPECIFIED = 0;
+  METRIC_KIND_COUNTER = 1;
+  METRIC_KIND_GAUGE = 2;
+  METRIC_KIND_HISTOGRAM = 3;
+}
+
+message MetricDefinition {
+  string name = 1;
+  MetricKind kind = 2;
+  string description = 3;
+  string unit = 4;
+  repeated string labels = 5;
+}
+
+enum SegmentState {
+  SEGMENT_STATE_UNSPECIFIED = 0;
+  SEGMENT_STATE_GROWING = 1;
+  SEGMENT_STATE_SEALED = 2;
+  SEGMENT_STATE_COMPACTED = 3;
+}
+
+message TenantMemorySample {
+  string tenant = 1;
+  uint64 resident_vector_memory_bytes = 2;
+}
+
+message CollectionMemorySample {
+  string tenant = 1;
+  string collection = 2;
+  uint64 resident_vector_memory_bytes = 3;
+}
+
+message CollectionWalSample {
+  string tenant = 1;
+  string collection = 2;
+  uint64 entries = 3;
+  uint64 bytes = 4;
+}
+
+message CollectionSegmentFileSample {
+  string tenant = 1;
+  string collection = 2;
+  SegmentState state = 3;
+  uint64 count = 4;
+}
+
+message CollectionSegmentStateSample {
+  string tenant = 1;
+  string collection = 2;
+  SegmentState state = 3;
+  bool active = 4;
+}
+
+message StorageMetrics {
+  uint64 refresh_count = 1;
+  uint64 total_resident_vector_memory_bytes = 2;
+  uint64 wal_appends_total = 3;
+  uint64 wal_bytes_written_total = 4;
+  uint64 compactions_total = 5;
+  repeated TenantMemorySample tenant_memory_bytes = 6;
+  repeated CollectionMemorySample collection_memory_bytes = 7;
+  repeated CollectionWalSample collection_wal = 8;
+  repeated CollectionSegmentFileSample collection_segment_files = 9;
+  repeated CollectionSegmentStateSample collection_segment_states = 10;
+}
+
+message GetMetricsResponse {
+  repeated MetricDefinition definitions = 1;
+  StorageMetrics storage = 2;
+}
+
+message GetClusterStatusRequest {}
+
+enum ClusterMode {
+  CLUSTER_MODE_UNSPECIFIED = 0;
+  CLUSTER_MODE_SINGLE_NODE = 1;
+  CLUSTER_MODE_ROUTED_REPLICATION = 2;
+  CLUSTER_MODE_CONSENSUS_BACKED = 3;
+}
+
+enum WriteDurability {
+  WRITE_DURABILITY_UNSPECIFIED = 0;
+  WRITE_DURABILITY_NODE_LOCAL = 1;
+  WRITE_DURABILITY_PRIMARY_ONLY = 2;
+  WRITE_DURABILITY_CONSENSUS_QUORUM = 3;
+}
+
+message GetClusterStatusResponse {
+  string node_id = 1;
+  ClusterMode mode = 2;
+  WriteDurability write_durability = 3;
+  uint32 shard_count = 4;
+  uint64 node_count = 5;
+}
+
+enum IndexState {
+  INDEX_STATE_UNSPECIFIED = 0;
+  INDEX_STATE_BUILDING = 1;
+  INDEX_STATE_READY = 2;
+  INDEX_STATE_STALE = 3;
+}
+
+message GetSegmentInfoRequest {
+  string collection = 1;
+}
+
+message SegmentCount {
+  SegmentState state = 1;
+  uint64 count = 2;
+}
+
+message CollectionSegmentInfo {
+  string tenant = 1;
+  string collection = 2;
+  SegmentState current_state = 3;
+  IndexState index_state = 4;
+  repeated SegmentCount segment_counts = 5;
+}
+
+message GetSegmentInfoResponse {
+  repeated CollectionSegmentInfo collections = 1;
 }
 
 message SearchQuery {

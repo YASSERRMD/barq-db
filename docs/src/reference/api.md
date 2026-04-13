@@ -9,7 +9,12 @@
 | `Status` | Server status / health |
 | `CreateCollection` | Create a collection |
 | `Insert` | Insert a document |
+| `InsertAsync` | Queue an asynchronous insert and return a request handle |
+| `GetInsertStatus` | Poll a tracked asynchronous insert |
 | `Search` | Search a collection |
+| `GetMetrics` | Return metrics catalog and storage metrics snapshot |
+| `GetClusterStatus` | Return the honest cluster capability and durability mode |
+| `GetSegmentInfo` | Return per-collection segment and index lifecycle state |
 
 ## Compatibility RPCs
 

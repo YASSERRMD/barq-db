@@ -232,6 +232,9 @@ for r in results:
 | `create_collection()` | `name`, `dimension`, `metric`, `index`, `text_fields` | `dict` | Create collection |
 | `insert_document()` | `collection`, `id`, `vector`, `payload` | `dict` | Insert document |
 | `search()` | `collection`, `vector`, `query`, `top_k`, `filter` | `list[dict]` | Search documents |
+| `get_metrics()` | - | `Metrics` | Structured metrics catalog and storage snapshot |
+| `get_cluster_status()` | - | `ClusterStatus` | Honest cluster capability report |
+| `get_segment_info()` | `collection?` | `SegmentInfo` | Per-collection segment lifecycle state |
 | `close()` | - | - | Close connection |
 
 ### `GrpcClient`
@@ -244,6 +247,9 @@ for r in results:
 | `insert()` | `collection`, `id`, `vector`, `payload` | - | Canonical insert RPC |
 | `insert_document()` | `collection`, `id`, `vector`, `payload` | - | Insert document |
 | `search()` | `collection`, `vector`, `top_k` | `list[dict]` | Search documents |
+| `get_metrics()` | - | `Metrics` | Structured metrics snapshot |
+| `get_cluster_status()` | - | `ClusterStatus` | Structured cluster status |
+| `get_segment_info()` | `collection?` | `SegmentInfo` | Structured segment lifecycle state |
 
 ---
 

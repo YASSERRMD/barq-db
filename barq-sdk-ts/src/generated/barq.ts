@@ -12,13 +12,26 @@ export interface ProtoGrpcType {
     Barq: SubtypeConstructor<typeof grpc.Client, _barq_BarqClient> & { service: _barq_BarqDefinition }
     BatchSearchRequest: MessageTypeDefinition
     BatchSearchResponse: MessageTypeDefinition
+    ClusterMode: EnumTypeDefinition
+    CollectionMemorySample: MessageTypeDefinition
+    CollectionSegmentFileSample: MessageTypeDefinition
+    CollectionSegmentInfo: MessageTypeDefinition
+    CollectionSegmentStateSample: MessageTypeDefinition
+    CollectionWalSample: MessageTypeDefinition
     Consistency: EnumTypeDefinition
     CreateCollectionRequest: MessageTypeDefinition
     CreateCollectionResponse: MessageTypeDefinition
+    GetClusterStatusRequest: MessageTypeDefinition
+    GetClusterStatusResponse: MessageTypeDefinition
     GetInsertStatusRequest: MessageTypeDefinition
     GetInsertStatusResponse: MessageTypeDefinition
+    GetMetricsRequest: MessageTypeDefinition
+    GetMetricsResponse: MessageTypeDefinition
+    GetSegmentInfoRequest: MessageTypeDefinition
+    GetSegmentInfoResponse: MessageTypeDefinition
     HealthRequest: MessageTypeDefinition
     HealthResponse: MessageTypeDefinition
+    IndexState: EnumTypeDefinition
     InsertAsyncResponse: MessageTypeDefinition
     InsertDocumentRequest: MessageTypeDefinition
     InsertDocumentResponse: MessageTypeDefinition
@@ -26,14 +39,21 @@ export interface ProtoGrpcType {
     InsertRequest: MessageTypeDefinition
     InsertResponse: MessageTypeDefinition
     InsertStatusState: EnumTypeDefinition
+    MetricDefinition: MessageTypeDefinition
+    MetricKind: EnumTypeDefinition
     QueryResults: MessageTypeDefinition
     SearchOptions: MessageTypeDefinition
     SearchQuery: MessageTypeDefinition
     SearchRequest: MessageTypeDefinition
     SearchResponse: MessageTypeDefinition
     SearchResult: MessageTypeDefinition
+    SegmentCount: MessageTypeDefinition
+    SegmentState: EnumTypeDefinition
     StatusRequest: MessageTypeDefinition
     StatusResponse: MessageTypeDefinition
+    StorageMetrics: MessageTypeDefinition
+    TenantMemorySample: MessageTypeDefinition
+    WriteDurability: EnumTypeDefinition
   }
 }
 

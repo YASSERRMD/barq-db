@@ -310,6 +310,9 @@ type SearchResult struct {
 | `CreateCollection` | `(ctx, CreateCollectionRequest) error` | Create collection |
 | `Insert` | `(ctx, collection string, InsertRequest) error` | Insert document |
 | `Search` | `(ctx, collection string, SearchRequest) ([]SearchResult, error)` | Search |
+| `GetMetrics` | `(ctx) (*proto.GetMetricsResponse, error)` | Metrics catalog and storage snapshot |
+| `GetClusterStatus` | `(ctx) (*proto.GetClusterStatusResponse, error)` | Honest cluster capability report |
+| `GetSegmentInfo` | `(ctx, collection string) (*proto.GetSegmentInfoResponse, error)` | Per-collection segment lifecycle state |
 
 ### `GrpcClient`
 
@@ -321,6 +324,9 @@ type SearchResult struct {
 | `Insert` | `(ctx, collection, id, vector, payload) error` | Canonical insert RPC |
 | `InsertDocument` | `(ctx, collection, id, vector, payload) error` | Insert |
 | `Search` | `(ctx, collection, vector, topK) ([]SearchResult, error)` | Search |
+| `GetMetrics` | `(ctx) (*proto.GetMetricsResponse, error)` | Metrics catalog and storage snapshot |
+| `GetClusterStatus` | `(ctx) (*proto.GetClusterStatusResponse, error)` | Honest cluster capability report |
+| `GetSegmentInfo` | `(ctx, collection) (*proto.GetSegmentInfoResponse, error)` | Per-collection segment lifecycle state |
 | `Close` | `() error` | Close connection |
 
 ---
