@@ -21,6 +21,7 @@ fn canonical_proto_is_documented_across_docs_and_sdks() {
             "README.md",
             &[
                 "Barq v2",
+                "database engine release line",
                 "Phase 1",
                 "Phase 8",
                 "proto/barq.proto",
@@ -55,7 +56,7 @@ fn canonical_proto_is_documented_across_docs_and_sdks() {
         (
             "docs/src/reference/sdks.md",
             &[
-                "Barq v2",
+                "Barq v2 database engine",
                 "proto/barq.proto",
                 "GrpcClient",
                 "get_metrics",
@@ -66,7 +67,7 @@ fn canonical_proto_is_documented_across_docs_and_sdks() {
         (
             "barq-sdk-python/README.md",
             &[
-                "Barq v2",
+                "Barq v2 database engine",
                 "proto/barq.proto",
                 "GrpcClient",
                 "get_metrics()",
@@ -77,7 +78,7 @@ fn canonical_proto_is_documented_across_docs_and_sdks() {
         (
             "barq-sdk-go/README.md",
             &[
-                "Barq v2",
+                "Barq v2 database engine",
                 "proto/barq.proto",
                 "GrpcClient",
                 "GetMetrics",
@@ -88,7 +89,7 @@ fn canonical_proto_is_documented_across_docs_and_sdks() {
         (
             "barq-sdk-rust/README.md",
             &[
-                "Barq v2",
+                "Barq v2 database engine",
                 "proto/barq.proto",
                 "BarqGrpcClient",
                 "get_metrics",
@@ -99,7 +100,7 @@ fn canonical_proto_is_documented_across_docs_and_sdks() {
         (
             "barq-sdk-ts/README.md",
             &[
-                "Barq v2",
+                "Barq v2 database engine",
                 "proto/barq.proto",
                 "GrpcClient",
                 "getMetrics()",

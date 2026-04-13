@@ -1,4 +1,4 @@
-# Barq v2 SDK for Python
+# Barq SDK for Python
 
 <p align="center">
   <a href="https://pypi.org/project/barq-sdk-python/"><img src="https://img.shields.io/pypi/v/barq-sdk-python.svg" alt="PyPI"></a>
@@ -6,7 +6,7 @@
   <a href="https://github.com/YASSERRMD/barq-db/blob/main/LICENSE"><img src="https://img.shields.io/github/license/YASSERRMD/barq-db" alt="License"></a>
 </p>
 
-The official Python SDK for [Barq DB](https://github.com/YASSERRMD/barq-db) - the Barq v2 release line for the gRPC-first vector database built in Rust.
+The official Python SDK for [Barq DB](https://github.com/YASSERRMD/barq-db), compatible with the Barq v2 database engine release line.
 
 ---
 
@@ -22,7 +22,7 @@ pip install barq-sdk-python
 
 - `GrpcClient` follows that gRPC surface directly.
 - `BarqClient` remains available for compatibility with the current HTTP endpoints.
-- Performance benchmark docs for Barq v2 live in [Performance Benchmarks](../docs/src/reference/performance.md).
+- Performance benchmark docs for the Barq v2 database engine live in [Performance Benchmarks](../docs/src/reference/performance.md).
 
 ---
 

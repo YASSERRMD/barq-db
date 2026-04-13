@@ -1,6 +1,6 @@
 # SDKs
 
-Barq v2 SDKs are gRPC-first. The canonical contract is defined in `proto/barq.proto`.
+SDKs for the Barq v2 database engine are gRPC-first. The canonical contract is defined in `proto/barq.proto`.
 
 ## Current gRPC Client Types
 
@@ -13,7 +13,7 @@ Barq v2 SDKs are gRPC-first. The canonical contract is defined in `proto/barq.pr
 
 The HTTP clients remain available for compatibility with the current HTTP surface, but new contract work should start from the gRPC definitions in `proto/barq.proto`.
 
-Performance benchmark docs for Barq v2 live in [Performance Benchmarks](performance.md).
+Performance benchmark docs for the Barq v2 database engine live in [Performance Benchmarks](performance.md).
 
 ## Observability Methods
 

@@ -20,7 +20,7 @@ Barq is a **high-performance vector database** built in Rust, designed for seman
 
 ## Barq v2
 
-Barq v2 is the current release line documented in this repository.
+Barq v2 is the current database engine release line documented in this repository.
 
 - gRPC is the primary external contract via `proto/barq.proto`.
 - SDKs are aligned to that gRPC contract first, with HTTP kept as a compatibility surface.
