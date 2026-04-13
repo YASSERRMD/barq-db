@@ -4,15 +4,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"os"
 	"strings"
 	"time"
 
 	pb "github.com/YASSERRMD/barq-db/barq-sdk-go/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 )
 
 type Config struct {
@@ -87,6 +91,15 @@ type TextField struct {
 }
 
 func (c *Client) CreateCollection(ctx context.Context, req CreateCollectionRequest) error {
+	if req.Index == nil && len(req.TextFields) == 0 {
+		grpcClient, err := NewGrpcClientWithAPIKey(c.grpcTarget(), c.config.APIKey)
+		if err != nil {
+			return err
+		}
+		defer grpcClient.Close()
+		return grpcClient.CreateCollection(ctx, req.Name, req.Dimension, req.Metric)
+	}
+
 	_, err := c.request(ctx, "POST", "/collections", req)
 	return err
 }
@@ -98,9 +111,12 @@ type InsertRequest struct {
 }
 
 func (c *Client) Insert(ctx context.Context, collection string, req InsertRequest) error {
-	path := fmt.Sprintf("/collections/%s/documents", collection)
-	_, err := c.request(ctx, "POST", path, req)
-	return err
+	grpcClient, err := NewGrpcClientWithAPIKey(c.grpcTarget(), c.config.APIKey)
+	if err != nil {
+		return err
+	}
+	defer grpcClient.Close()
+	return grpcClient.Insert(ctx, collection, req.ID, req.Vector, rawPayloadToAny(req.Payload))
 }
 
 type SearchRequest struct {
@@ -120,6 +136,20 @@ type SearchResult struct {
 }
 
 func (c *Client) Search(ctx context.Context, collection string, req SearchRequest) ([]SearchResult, error) {
+	if req.Query == "" && req.Filter == nil {
+		grpcClient, err := NewGrpcClientWithAPIKey(c.grpcTarget(), c.config.APIKey)
+		if err != nil {
+			return nil, err
+		}
+		defer grpcClient.Close()
+
+		results, err := grpcClient.Search(ctx, collection, req.Vector, req.TopK)
+		if err != nil {
+			return nil, err
+		}
+		return results, nil
+	}
+
 	path := fmt.Sprintf("/collections/%s/search", collection)
 	if req.Vector != nil && req.Query != "" {
 		path += "/hybrid"
@@ -144,23 +174,35 @@ func (c *Client) Search(ctx context.Context, collection string, req SearchReques
 type GrpcClient struct {
 	conn   *grpc.ClientConn
 	client pb.BarqClient
+	apiKey string
 }
 
 func NewGrpcClient(target string) (*GrpcClient, error) {
+	return NewGrpcClientWithAPIKey(target, "")
+}
+
+func NewGrpcClientWithAPIKey(target string, apiKey string) (*GrpcClient, error) {
 	conn, err := grpc.Dial(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, err
 	}
 	client := pb.NewBarqClient(conn)
-	return &GrpcClient{conn: conn, client: client}, nil
+	return &GrpcClient{conn: conn, client: client, apiKey: apiKey}, nil
 }
 
 func (c *GrpcClient) Close() error {
 	return c.conn.Close()
 }
 
+func (c *GrpcClient) authContext(ctx context.Context) context.Context {
+	if c.apiKey == "" {
+		return ctx
+	}
+	return metadata.AppendToOutgoingContext(ctx, "x-api-key", c.apiKey)
+}
+
 func (c *GrpcClient) Status(ctx context.Context) (bool, error) {
-	resp, err := c.client.Status(ctx, &pb.StatusRequest{})
+	resp, err := c.client.Status(c.authContext(ctx), &pb.StatusRequest{})
 	if err != nil {
 		return false, err
 	}
@@ -172,7 +214,7 @@ func (c *GrpcClient) Health(ctx context.Context) (bool, error) {
 }
 
 func (c *GrpcClient) CreateCollection(ctx context.Context, name string, dimension int, metric string) error {
-	_, err := c.client.CreateCollection(ctx, &pb.CreateCollectionRequest{
+	_, err := c.client.CreateCollection(c.authContext(ctx), &pb.CreateCollectionRequest{
 		Name:      name,
 		Dimension: uint32(dimension),
 		Metric:    metric,
@@ -188,7 +230,7 @@ func (c *GrpcClient) Insert(ctx context.Context, collection string, id interface
 		return err
 	}
 
-	_, err = c.client.Insert(ctx, &pb.InsertRequest{
+	_, err = c.client.Insert(c.authContext(ctx), &pb.InsertRequest{
 		Collection:  collection,
 		Id:          idStr,
 		Vector:      vector,
@@ -202,7 +244,7 @@ func (c *GrpcClient) InsertDocument(ctx context.Context, collection string, id i
 }
 
 func (c *GrpcClient) Search(ctx context.Context, collection string, vector []float32, topK int) ([]SearchResult, error) {
-	resp, err := c.client.Search(ctx, &pb.SearchRequest{
+	resp, err := c.client.Search(c.authContext(ctx), &pb.SearchRequest{
 		Collection: collection,
 		Vector:     vector,
 		TopK:       uint32(topK),
@@ -213,10 +255,62 @@ func (c *GrpcClient) Search(ctx context.Context, collection string, vector []flo
 
 	var results []SearchResult
 	for _, r := range resp.Results {
+		id := interface{}(map[string]interface{}{"Str": r.Id})
+		if numericID, err := parseCompatID(r.Id); err == nil {
+			id = map[string]interface{}{"U64": numericID}
+		}
 		results = append(results, SearchResult{
-			ID:    r.Id,
+			ID:    id,
 			Score: r.Score, // Proto definition must enable Score
 		})
 	}
 	return results, nil
+}
+
+func (c *Client) grpcTarget() string {
+	if override := os.Getenv("BARQ_GRPC_ADDR"); override != "" {
+		if strings.Contains(override, "://") {
+			if parsed, err := url.Parse(override); err == nil && parsed.Host != "" {
+				return parsed.Host
+			}
+		}
+		return override
+	}
+
+	parsed, err := url.Parse(c.config.BaseURL)
+	if err != nil || parsed.Host == "" {
+		return c.config.BaseURL
+	}
+	parsed.Path = ""
+	parsed.RawPath = ""
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	host := parsed.Hostname()
+	if host == "" {
+		return c.config.BaseURL
+	}
+	return fmt.Sprintf("%s:%d", host, 50051)
+}
+
+func rawPayloadToAny(payload json.RawMessage) interface{} {
+	if len(payload) == 0 {
+		return map[string]interface{}{}
+	}
+
+	var decoded interface{}
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		return string(payload)
+	}
+	return decoded
+}
+
+func parseCompatID(id string) (uint64, error) {
+	var value uint64
+	if _, err := fmt.Sscanf(id, "%d", &value); err != nil {
+		return 0, err
+	}
+	if fmt.Sprintf("%d", value) != id {
+		return 0, errors.New("not a numeric id")
+	}
+	return value, nil
 }

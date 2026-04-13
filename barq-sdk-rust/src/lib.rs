@@ -1,11 +1,14 @@
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::env;
 use std::time::Duration;
 pub use barq_core::{CollectionSchema, DistanceMetric, DocumentId, Filter, HybridWeights, PayloadValue};
 use tonic::transport::Channel;
 use barq_proto::barq::barq_client::BarqClient as TonicBarqClient;
 use barq_proto::barq::{CreateCollectionRequest, InsertRequest, SearchRequest, StatusRequest};
+use tonic::metadata::MetadataValue;
+use tonic::Request;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BarqError {
@@ -22,6 +25,36 @@ pub enum BarqError {
 }
 
 pub type Result<T> = std::result::Result<T, BarqError>;
+
+fn grpc_endpoint(base_url: &str) -> Result<String> {
+    if let Ok(value) = env::var("BARQ_GRPC_ADDR") {
+        if value.contains("://") {
+            return Ok(value);
+        }
+        return Ok(format!("http://{}", value));
+    }
+
+    let mut url = reqwest::Url::parse(base_url).map_err(|error| BarqError::Api {
+        status: StatusCode::BAD_REQUEST,
+        message: format!("invalid base url: {error}"),
+    })?;
+    url.set_path("");
+    url.set_query(None);
+    url.set_fragment(None);
+    url.set_port(Some(50051)).map_err(|_| BarqError::Api {
+        status: StatusCode::BAD_REQUEST,
+        message: "invalid grpc port".to_string(),
+    })?;
+    Ok(url.to_string())
+}
+
+fn compat_document_id_json(id: &str) -> serde_json::Value {
+    if let Ok(value) = id.parse::<u64>() {
+        json!({ "U64": value })
+    } else {
+        json!({ "Str": id })
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct BarqClient {
@@ -50,14 +83,17 @@ impl BarqClient {
     }
 
     pub async fn health(&self) -> Result<()> {
-        let url = format!("{}/health", self.base_url);
-        let res = self.client.get(&url).send().await?;
-        if res.status().is_success() {
+        let mut client = BarqGrpcClient::connect_with_api_key(
+            grpc_endpoint(&self.base_url)?,
+            self.api_key.clone(),
+        )
+        .await?;
+        if client.status().await? {
             Ok(())
         } else {
             Err(BarqError::Api {
-                status: res.status(),
-                message: res.text().await?,
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                message: "grpc status returned not ok".to_string(),
             })
         }
     }
@@ -70,6 +106,17 @@ impl BarqClient {
         index: Option<serde_json::Value>, 
         text_fields: Option<Vec<TextFieldRequest>>,
     ) -> Result<()> {
+        if index.is_none() && text_fields.as_ref().map_or(true, Vec::is_empty) {
+            let mut client = BarqGrpcClient::connect_with_api_key(
+                grpc_endpoint(&self.base_url)?,
+                self.api_key.clone(),
+            )
+            .await?;
+            return client
+                .create_collection(name, dimension as u32, metric)
+                .await;
+        }
+
         let url = format!("{}/collections", self.base_url);
         let payload = json!({
             "name": name,
@@ -104,34 +151,15 @@ pub struct Collection {
 
 impl Collection {
     pub async fn insert(&self, id: impl Into<DocumentId>, vector: Vec<f32>, payload: Option<serde_json::Value>) -> Result<()> {
-        let url = format!("{}/collections/{}/documents", self.client.base_url, self.name);
-        
         let id_obj = id.into();
-        let id_val = match id_obj {
-            DocumentId::U64(v) => json!(v),
-            DocumentId::Str(s) => json!(s),
-        };
-
-        let json_payload = json!({
-            "id": id_val,
-            "vector": vector,
-            "payload": payload
-        });
-
-        let res = self.client.client.post(&url)
-            .header("x-api-key", &self.client.api_key)
-            .json(&json_payload)
-            .send()
-            .await?;
-
-        if res.status().is_success() {
-            Ok(())
-        } else {
-            Err(BarqError::Api {
-                status: res.status(),
-                message: res.text().await?,
-            })
-        }
+        let mut client = BarqGrpcClient::connect_with_api_key(
+            grpc_endpoint(&self.client.base_url)?,
+            self.client.api_key.clone(),
+        )
+        .await?;
+        client
+            .insert(&self.name, id_obj, vector, payload.unwrap_or_else(|| json!({})))
+            .await
     }
 
     pub async fn search(
@@ -142,6 +170,26 @@ impl Collection {
         filter: Option<Filter>,
         weights: Option<HybridWeights>
     ) -> Result<Vec<serde_json::Value>> {
+        if vector.is_some() && query.is_none() && filter.is_none() && weights.is_none() {
+            let mut client = BarqGrpcClient::connect_with_api_key(
+                grpc_endpoint(&self.client.base_url)?,
+                self.client.api_key.clone(),
+            )
+            .await?;
+            let results = client
+                .search(&self.name, vector.unwrap_or_default(), top_k as u32)
+                .await?;
+            return Ok(results
+                .into_iter()
+                .map(|result| {
+                    json!({
+                        "id": compat_document_id_json(result["id"].as_str().unwrap_or_default()),
+                        "score": result["score"],
+                    })
+                })
+                .collect());
+        }
+
         let mut url = format!("{}/collections/{}/search", self.client.base_url, self.name);
         
         if vector.is_some() && query.is_some() {
@@ -244,16 +292,57 @@ pub struct BatchSearchRequest {
 #[derive(Clone, Debug)]
 pub struct BarqGrpcClient {
     client: TonicBarqClient<Channel>,
+    api_key: Option<String>,
+    tenant: Option<String>,
 }
 
 impl BarqGrpcClient {
     pub async fn connect(dst: String) -> Result<Self> {
+        Self::connect_with_metadata(dst, None, None).await
+    }
+
+    pub async fn connect_with_api_key(dst: String, api_key: impl Into<String>) -> Result<Self> {
+        Self::connect_with_metadata(dst, Some(api_key.into()), None).await
+    }
+
+    pub async fn connect_with_metadata(
+        dst: String,
+        api_key: Option<String>,
+        tenant: Option<String>,
+    ) -> Result<Self> {
         let client = TonicBarqClient::connect(dst).await?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            api_key,
+            tenant,
+        })
+    }
+
+    fn request<T>(&self, message: T) -> Result<Request<T>> {
+        let mut request = Request::new(message);
+        if let Some(api_key) = &self.api_key {
+            let value = MetadataValue::try_from(api_key.as_str()).map_err(|error| {
+                BarqError::Api {
+                    status: StatusCode::BAD_REQUEST,
+                    message: format!("invalid api key metadata: {error}"),
+                }
+            })?;
+            request.metadata_mut().insert("x-api-key", value);
+        }
+        if let Some(tenant) = &self.tenant {
+            let value = MetadataValue::try_from(tenant.as_str()).map_err(|error| {
+                BarqError::Api {
+                    status: StatusCode::BAD_REQUEST,
+                    message: format!("invalid tenant metadata: {error}"),
+                }
+            })?;
+            request.metadata_mut().insert("x-tenant-id", value);
+        }
+        Ok(request)
     }
 
     pub async fn status(&mut self) -> Result<bool> {
-        let response = self.client.status(StatusRequest {}).await?;
+        let response = self.client.status(self.request(StatusRequest {})?).await?;
         Ok(response.into_inner().ok)
     }
 
@@ -273,11 +362,13 @@ impl BarqGrpcClient {
             DistanceMetric::L2 => "L2",
         };
         
-        self.client.create_collection(CreateCollectionRequest {
-            name: name.to_string(),
-            dimension: dimension,
-            metric: metric_str.to_string(),
-        }).await?;
+        self.client
+            .create_collection(self.request(CreateCollectionRequest {
+                name: name.to_string(),
+                dimension: dimension,
+                metric: metric_str.to_string(),
+            })?)
+            .await?;
         Ok(())
     }
 
@@ -293,12 +384,14 @@ impl BarqGrpcClient {
             DocumentId::Str(s) => s,
         };
         
-        self.client.insert(InsertRequest {
-            collection: collection.to_string(),
-            id: id_str,
-            vector,
-            payload_json: payload.to_string(),
-        }).await?;
+        self.client
+            .insert(self.request(InsertRequest {
+                collection: collection.to_string(),
+                id: id_str,
+                vector,
+                payload_json: payload.to_string(),
+            })?)
+            .await?;
         Ok(())
     }
 
@@ -318,11 +411,14 @@ impl BarqGrpcClient {
         vector: Vec<f32>,
         top_k: u32,
     ) -> Result<Vec<serde_json::Value>> { // Simplification: return basic result
-        let res = self.client.search(SearchRequest {
-            collection: collection.to_string(),
-            vector,
-            top_k,
-        }).await?;
+        let res = self
+            .client
+            .search(self.request(SearchRequest {
+                collection: collection.to_string(),
+                vector,
+                top_k,
+            })?)
+            .await?;
         
         let results = res.into_inner().results;
         let mut json_results = Vec::new();
@@ -357,7 +453,7 @@ impl BarqGrpcClient {
             top_k,
         };
 
-        let response = self.client.batch_search(req).await?;
+        let response = self.client.batch_search(self.request(req)?).await?;
         let batch_results = response.into_inner().results;
         
         let mut final_results = Vec::new();

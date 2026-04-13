@@ -6,12 +6,17 @@ from . import barq_pb2_grpc
 from typing import Optional, List, Any, Dict
 
 class GrpcClient:
-    def __init__(self, target: str):
+    def __init__(self, target: str, api_key: Optional[str] = None, tenant_id: Optional[str] = None):
         self.channel = grpc.insecure_channel(target)
         self.stub = barq_pb2_grpc.BarqStub(self.channel)
+        self.metadata = []
+        if api_key:
+            self.metadata.append(("x-api-key", api_key))
+        if tenant_id:
+            self.metadata.append(("x-tenant-id", tenant_id))
 
     def status(self) -> bool:
-        response = self.stub.Status(barq_pb2.StatusRequest())
+        response = self.stub.Status(barq_pb2.StatusRequest(), metadata=self.metadata)
         return response.ok
 
     def health(self) -> bool:
@@ -28,7 +33,7 @@ class GrpcClient:
             dimension=dimension,
             metric=metric
         )
-        self.stub.CreateCollection(req)
+        self.stub.CreateCollection(req, metadata=self.metadata)
         
     def insert(
         self,
@@ -44,7 +49,7 @@ class GrpcClient:
             vector=vector,
             payload_json=payload_json
         )
-        self.stub.Insert(req)
+        self.stub.Insert(req, metadata=self.metadata)
 
     def insert_document(
         self,
@@ -66,7 +71,7 @@ class GrpcClient:
             vector=vector,
             top_k=top_k
         )
-        response = self.stub.Search(req)
+        response = self.stub.Search(req, metadata=self.metadata)
         
         results = []
         for res in response.results:
@@ -81,3 +86,6 @@ class GrpcClient:
                 "payload": payload
             })
         return results
+
+    def close(self) -> None:
+        self.channel.close()
