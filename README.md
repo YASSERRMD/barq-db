@@ -108,10 +108,10 @@ Ingestion, indexing, and querying are treated as coordinated stages of a single 
 
 ## Consistency Model (Current)
 
-- Routed replication provides distribution and redundancy  
-- Consistency is not quorum-based in v2  
-- This release does not implement full consensus  
-- Future versions may introduce stronger consistency guarantees  
+- Current runtime deployments use routed replication for distribution and redundancy  
+- `barq-cluster` now includes deterministic Raft leader election, quorum commit, stale-leader rejection, and follower catch-up simulation  
+- API/runtime writes are not yet routed through that consensus engine by default  
+- Current default consistency is still not quorum-based in v2  
 
 ---
 
