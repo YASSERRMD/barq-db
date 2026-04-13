@@ -530,6 +530,211 @@ pub struct HybridSearchResult {
     pub score: f32,
 }
 
+/// High-level shape for a planned query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryVariant {
+    /// Vector similarity search without a metadata filter.
+    VectorOnly,
+    /// Text search without a metadata filter.
+    TextOnly,
+    /// Hybrid search that blends text and vector scoring.
+    Hybrid,
+    /// Vector similarity search restricted by a metadata filter.
+    FilteredVector,
+    /// Text search restricted by a metadata filter.
+    FilteredText,
+    /// Hybrid search that blends text and vector scoring with a metadata filter.
+    FilteredHybrid,
+}
+
+impl QueryVariant {
+    /// Returns whether the planned query reads vector scores.
+    pub fn uses_vector(self) -> bool {
+        matches!(
+            self,
+            Self::VectorOnly | Self::Hybrid | Self::FilteredVector | Self::FilteredHybrid
+        )
+    }
+
+    /// Returns whether the planned query reads text scores.
+    pub fn uses_text(self) -> bool {
+        matches!(
+            self,
+            Self::TextOnly | Self::Hybrid | Self::FilteredText | Self::FilteredHybrid
+        )
+    }
+
+    /// Returns whether the planned query carries a metadata filter.
+    pub fn has_filter(self) -> bool {
+        matches!(
+            self,
+            Self::FilteredVector | Self::FilteredText | Self::FilteredHybrid
+        )
+    }
+}
+
+/// Planned query shape and validation output for collection search execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueryPlan {
+    variant: QueryVariant,
+    top_k: usize,
+    vector_path: Option<QueryExecutionPath>,
+    text_path: Option<QueryExecutionPath>,
+}
+
+impl QueryPlan {
+    /// Creates a query plan from the provided vector/text inputs and optional filter.
+    pub fn new(
+        vector: Option<&[f32]>,
+        text: Option<&str>,
+        filter: Option<&Filter>,
+        top_k: usize,
+    ) -> Result<Self, CatalogError> {
+        if top_k == 0 {
+            return Err(CatalogError::InvalidSchema(
+                "top_k must be positive".to_string(),
+            ));
+        }
+
+        let has_text = text.map(|value| !value.trim().is_empty()).unwrap_or(false);
+        let has_vector = match vector {
+            Some(values) if values.is_empty() && !has_text => {
+                return Err(CatalogError::InvalidSchema(
+                    "vector query cannot be empty".to_string(),
+                ))
+            }
+            Some(values) => !values.is_empty(),
+            None => false,
+        };
+
+        let variant = match (has_vector, has_text, filter.is_some()) {
+            (true, false, false) => QueryVariant::VectorOnly,
+            (false, true, false) => QueryVariant::TextOnly,
+            (true, true, false) => QueryVariant::Hybrid,
+            (true, false, true) => QueryVariant::FilteredVector,
+            (false, true, true) => QueryVariant::FilteredText,
+            (true, true, true) => QueryVariant::FilteredHybrid,
+            (false, false, _) => {
+                return Err(CatalogError::InvalidSchema(
+                    "query plan requires vector and/or text input".to_string(),
+                ))
+            }
+        };
+
+        Ok(Self {
+            variant,
+            top_k,
+            vector_path: None,
+            text_path: None,
+        })
+    }
+
+    /// Returns the planned high-level query variant.
+    pub fn variant(self) -> QueryVariant {
+        self.variant
+    }
+
+    /// Returns the requested top-k for the plan.
+    pub fn top_k(self) -> usize {
+        self.top_k
+    }
+
+    /// Returns whether the plan reads vector scores.
+    pub fn uses_vector(self) -> bool {
+        self.variant.uses_vector()
+    }
+
+    /// Returns whether the plan reads text scores.
+    pub fn uses_text(self) -> bool {
+        self.variant.uses_text()
+    }
+
+    /// Returns whether the plan applies a metadata filter.
+    pub fn has_filter(self) -> bool {
+        self.variant.has_filter()
+    }
+
+    /// Returns the chosen vector execution path, when vector search is part of the plan.
+    pub fn vector_path(self) -> Option<QueryExecutionPath> {
+        self.vector_path
+    }
+
+    /// Returns the chosen text execution path, when text search is part of the plan.
+    pub fn text_path(self) -> Option<QueryExecutionPath> {
+        self.text_path
+    }
+
+    fn with_paths(
+        mut self,
+        vector_path: Option<QueryExecutionPath>,
+        text_path: Option<QueryExecutionPath>,
+    ) -> Self {
+        self.vector_path = vector_path;
+        self.text_path = text_path;
+        self
+    }
+}
+
+/// Concrete execution path chosen for a planned query branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryExecutionPath {
+    /// Use the vector index directly and post-filter if needed.
+    VectorIndex,
+    /// Score only the filter-selected candidate vectors.
+    VectorFilterScan,
+    /// Score every vector because the vector index is not ready.
+    VectorFullScan,
+    /// Use the BM25 index directly and post-filter if needed.
+    TextIndex,
+    /// Score only the filter-selected candidate text documents.
+    TextFilterScan,
+}
+
+/// Heuristic knobs for the rule-based query planner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueryPlannerOptions {
+    filter_candidate_threshold: usize,
+}
+
+impl Default for QueryPlannerOptions {
+    fn default() -> Self {
+        Self {
+            filter_candidate_threshold: 64,
+        }
+    }
+}
+
+impl QueryPlannerOptions {
+    /// Returns the configured filter candidate threshold.
+    pub fn filter_candidate_threshold(self) -> usize {
+        self.filter_candidate_threshold
+    }
+
+    /// Overrides the candidate threshold used for filter pushdown planning.
+    pub fn with_filter_candidate_threshold(mut self, threshold: usize) -> Self {
+        self.filter_candidate_threshold = threshold.max(1);
+        self
+    }
+}
+
+/// Rule-based planner that chooses stable execution paths for query branches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct QueryPlanner {
+    options: QueryPlannerOptions,
+}
+
+impl QueryPlanner {
+    /// Creates a planner with the provided options.
+    pub fn new(options: QueryPlannerOptions) -> Self {
+        Self { options }
+    }
+
+    /// Returns the planner options.
+    pub fn options(self) -> QueryPlannerOptions {
+        self.options
+    }
+}
+
 impl CollectionSchema {
     pub fn validate(&self) -> Result<(), CatalogError> {
         if self.name.trim().is_empty() {
@@ -838,23 +1043,28 @@ impl Collection {
         top_k: usize,
         filter: Option<&Filter>,
     ) -> Result<Vec<SearchResult>, CatalogError> {
+        let plan = QueryPlanner::default().plan_collection(self, Some(vector), None, filter, top_k)?;
+        let top_k = plan.top_k();
         if let Some(f) = filter {
             self.validate_filter(f)?;
         }
-        let candidates = filter.and_then(|f| self.metadata_index.candidates(f));
-        let use_vector_fallback = self.index_state != IndexState::Ready;
-
-        let mut results = if let Some(ids) = &candidates {
-            self.search_over_candidates(vector, ids)?
-        } else if use_vector_fallback {
-            // During index builds or stale windows we preserve correctness by scoring every vector.
-            self.search_all_vectors(vector)
-        } else {
-            self.index.search(vector, top_k * 2)?
+        let candidates = self.filter_candidates(filter);
+        let results = match plan.vector_path() {
+            Some(QueryExecutionPath::VectorFilterScan) => {
+                self.search_over_candidates(vector, candidates.as_ref().expect("candidate set"))?
+            }
+            Some(QueryExecutionPath::VectorFullScan) => {
+                // During index builds or stale windows we preserve correctness by scoring every vector.
+                self.search_all_vectors(vector)
+            }
+            Some(QueryExecutionPath::VectorIndex) => self.index.search(vector, top_k * 2)?,
+            path => panic!("unexpected vector execution path: {path:?}"),
         };
 
-        results = self.filter_results(results, filter);
-        if results.len() < top_k && !use_vector_fallback {
+        let mut sources = vec![self.filter_results(results, filter)];
+        if sources[0].len() < top_k
+            && matches!(plan.vector_path(), Some(QueryExecutionPath::VectorIndex))
+        {
             // Simple fallback strategy (could be improved with FilteredVectorSearch in future)
             let search_k = if candidates.is_some() {
                 top_k * 10
@@ -863,17 +1073,9 @@ impl Collection {
             };
             let fallback = self.index.search(vector, search_k)?;
             let filtered_fallback = self.filter_results(fallback, filter);
-            results.extend(filtered_fallback);
+            sources.push(filtered_fallback);
         }
-
-        results.par_sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        results.dedup_by(|a, b| a.id == b.id);
-        results.truncate(top_k.min(results.len()));
-        Ok(results)
+        Ok(merge_search_result_sources(sources, top_k))
     }
 
     pub fn batch_search(
@@ -971,6 +1173,10 @@ impl Collection {
         results
     }
 
+    fn filter_candidates(&self, filter: Option<&Filter>) -> Option<HashSet<DocumentId>> {
+        filter.and_then(|candidate_filter| self.metadata_index.candidates(candidate_filter))
+    }
+
     fn matches_filter(&self, id: &DocumentId, filter: &Filter) -> bool {
         let payload = self.payloads.get(id);
         evaluate_filter(filter, payload)
@@ -990,6 +1196,8 @@ impl Collection {
         top_k: usize,
         filter: Option<&Filter>,
     ) -> Result<Vec<SearchResult>, CatalogError> {
+        let plan = QueryPlanner::default().plan_collection(self, None, Some(query), filter, top_k)?;
+        let top_k = plan.top_k();
         if let Some(f) = filter {
             self.validate_filter(f)?;
         }
@@ -997,21 +1205,27 @@ impl Collection {
             .text_index
             .as_ref()
             .ok_or_else(|| CatalogError::InvalidSchema("collection has no text index".into()))?;
-        let mut results = index.search(query, top_k * 2)?;
-        results = self.filter_results(results, filter);
-        if results.len() < top_k {
-            let mut fallback = index.search(query, top_k * 4)?;
+        let candidates = self.filter_candidates(filter);
+        let results = match plan.text_path() {
+            Some(QueryExecutionPath::TextFilterScan) => {
+                index.search_with_candidates(query, top_k * 2, candidates.as_ref())?
+            }
+            Some(QueryExecutionPath::TextIndex) => index.search(query, top_k * 2)?,
+            path => panic!("unexpected text execution path: {path:?}"),
+        };
+        let mut sources = vec![self.filter_results(results, filter)];
+        if sources[0].len() < top_k {
+            let mut fallback = match plan.text_path() {
+                Some(QueryExecutionPath::TextFilterScan) => {
+                    index.search_with_candidates(query, top_k * 4, candidates.as_ref())?
+                }
+                Some(QueryExecutionPath::TextIndex) => index.search(query, top_k * 4)?,
+                path => panic!("unexpected text execution path: {path:?}"),
+            };
             fallback = self.filter_results(fallback, filter);
-            results.extend(fallback);
+            sources.push(fallback);
         }
-        results.par_sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        results.dedup_by(|a, b| a.id == b.id);
-        results.truncate(top_k.min(results.len()));
-        Ok(results)
+        Ok(merge_search_result_sources(sources, top_k))
     }
 
     pub fn search_hybrid(
@@ -1022,73 +1236,43 @@ impl Collection {
         weights: Option<HybridWeights>,
         filter: Option<&Filter>,
     ) -> Result<Vec<HybridSearchResult>, CatalogError> {
+        let plan =
+            QueryPlanner::default().plan_collection(self, Some(vector), Some(query), filter, top_k)?;
+        let top_k = plan.top_k();
         if let Some(f) = filter {
             self.validate_filter(f)?;
         }
         let weights = weights.unwrap_or_default();
-        self.text_index
-            .as_ref()
-            .ok_or_else(|| CatalogError::InvalidSchema("collection has no text index".into()))?;
+        match plan.variant() {
+            QueryVariant::VectorOnly | QueryVariant::FilteredVector => {
+                let results = self.search_with_filter(vector, top_k, filter)?;
+                Ok(project_hybrid_branch(results, HybridBranch::Vector, weights.vector))
+            }
+            QueryVariant::TextOnly | QueryVariant::FilteredText => {
+                self.text_index.as_ref().ok_or_else(|| {
+                    CatalogError::InvalidSchema("collection has no text index".into())
+                })?;
+                let results = self.search_text_with_filter(query, top_k, filter)?;
+                Ok(project_hybrid_branch(results, HybridBranch::Text, weights.bm25))
+            }
+            QueryVariant::Hybrid | QueryVariant::FilteredHybrid => {
+                self.text_index.as_ref().ok_or_else(|| {
+                    CatalogError::InvalidSchema("collection has no text index".into())
+                })?;
 
-        if top_k == 0 {
-            return Err(CatalogError::InvalidSchema(
-                "top_k must be positive".to_string(),
-            ));
+                let (bm25_results, vector_results) = rayon::join(
+                    || self.search_text_with_filter(query, top_k * 2, filter),
+                    || self.search_with_filter(vector, top_k * 2, filter),
+                );
+
+                Ok(fuse_hybrid_results(
+                    bm25_results?,
+                    vector_results?,
+                    weights,
+                    top_k,
+                ))
+            }
         }
-
-        let (bm25_results, vector_results) = rayon::join(
-            || self.search_text_with_filter(query, top_k * 2, filter),
-            || self.search_with_filter(vector, top_k * 2, filter),
-        );
-
-        let bm25_results = bm25_results?;
-        let vector_results = vector_results?;
-
-        let normalized_bm25 = normalize_scores(&bm25_results);
-        let normalized_vectors = normalize_scores(&vector_results);
-
-        let mut combined: HashMap<DocumentId, HybridSearchResult> = HashMap::new();
-
-        for result in bm25_results {
-            let normalized = *normalized_bm25.get(&result.id).unwrap_or(&0.0);
-            combined
-                .entry(result.id.clone())
-                .and_modify(|entry| {
-                    entry.bm25_score = Some(result.score);
-                    entry.score += weights.bm25 * normalized;
-                })
-                .or_insert(HybridSearchResult {
-                    id: result.id,
-                    bm25_score: Some(result.score),
-                    vector_score: None,
-                    score: weights.bm25 * normalized,
-                });
-        }
-
-        for result in vector_results {
-            let normalized = *normalized_vectors.get(&result.id).unwrap_or(&0.0);
-            combined
-                .entry(result.id.clone())
-                .and_modify(|entry| {
-                    entry.vector_score = Some(result.score);
-                    entry.score += weights.vector * normalized;
-                })
-                .or_insert(HybridSearchResult {
-                    id: result.id,
-                    bm25_score: None,
-                    vector_score: Some(result.score),
-                    score: weights.vector * normalized,
-                });
-        }
-
-        let mut results: Vec<HybridSearchResult> = combined.into_values().collect();
-        results.par_sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        results.truncate(top_k.min(results.len()));
-        Ok(results)
     }
 
     pub fn explain_hybrid(
@@ -1376,6 +1560,92 @@ impl Catalog {
     }
 }
 
+impl QueryPlanner {
+    /// Builds a query plan for the provided collection and query inputs.
+    pub fn plan_collection(
+        &self,
+        collection: &Collection,
+        vector: Option<&[f32]>,
+        text: Option<&str>,
+        filter: Option<&Filter>,
+        top_k: usize,
+    ) -> Result<QueryPlan, CatalogError> {
+        let plan = QueryPlan::new(vector, text, filter, top_k)?;
+        if plan.uses_text() && collection.text_index.is_none() {
+            return Err(CatalogError::InvalidSchema(
+                "collection has no text index".into(),
+            ));
+        }
+
+        let candidates = collection.filter_candidates(filter);
+        let vector_path = if plan.uses_vector() {
+            Some(self.plan_vector_path(collection, candidates.as_ref()))
+        } else {
+            None
+        };
+        let text_path = if plan.uses_text() {
+            Some(self.plan_text_path(candidates.as_ref()))
+        } else {
+            None
+        };
+
+        Ok(plan.with_paths(vector_path, text_path))
+    }
+
+    fn plan_vector_path(
+        &self,
+        collection: &Collection,
+        candidates: Option<&HashSet<DocumentId>>,
+    ) -> QueryExecutionPath {
+        if collection.index_state != IndexState::Ready {
+            QueryExecutionPath::VectorFullScan
+        } else if matches!(candidates, Some(set) if set.len() <= self.options.filter_candidate_threshold())
+        {
+            QueryExecutionPath::VectorFilterScan
+        } else {
+            QueryExecutionPath::VectorIndex
+        }
+    }
+
+    fn plan_text_path(&self, candidates: Option<&HashSet<DocumentId>>) -> QueryExecutionPath {
+        if matches!(candidates, Some(set) if set.len() <= self.options.filter_candidate_threshold()) {
+            QueryExecutionPath::TextFilterScan
+        } else {
+            QueryExecutionPath::TextIndex
+        }
+    }
+}
+
+fn merge_search_result_sources(
+    sources: Vec<Vec<SearchResult>>,
+    top_k: usize,
+) -> Vec<SearchResult> {
+    let mut merged: HashMap<DocumentId, SearchResult> = HashMap::new();
+
+    for result in sources.into_iter().flatten() {
+        let score = sanitize_score(result.score);
+        merged
+            .entry(result.id.clone())
+            .and_modify(|existing| {
+                if score > sanitize_score(existing.score) {
+                    *existing = SearchResult {
+                        id: result.id.clone(),
+                        score,
+                    };
+                }
+            })
+            .or_insert(SearchResult {
+                id: result.id,
+                score,
+            });
+    }
+
+    let mut results: Vec<_> = merged.into_values().collect();
+    sort_search_results(&mut results);
+    results.truncate(top_k.min(results.len()));
+    results
+}
+
 fn normalize_scores(results: &[SearchResult]) -> HashMap<DocumentId, f32> {
     if results.is_empty() {
         return HashMap::new();
@@ -1383,27 +1653,142 @@ fn normalize_scores(results: &[SearchResult]) -> HashMap<DocumentId, f32> {
     let mut min_score = f32::MAX;
     let mut max_score = f32::MIN;
     for result in results {
-        min_score = min_score.min(result.score);
-        max_score = max_score.max(result.score);
+        let score = sanitize_score(result.score);
+        min_score = min_score.min(score);
+        max_score = max_score.max(score);
     }
 
     results
         .iter()
         .map(|result| {
+            let score = sanitize_score(result.score);
             let normalized = if (max_score - min_score).abs() < f32::EPSILON {
                 1.0
             } else {
-                (result.score - min_score) / (max_score - min_score)
+                (score - min_score) / (max_score - min_score)
             };
             (result.id.clone(), normalized)
         })
         .collect()
 }
 
+#[derive(Clone, Copy)]
+enum HybridBranch {
+    Text,
+    Vector,
+}
+
+fn project_hybrid_branch(
+    results: Vec<SearchResult>,
+    branch: HybridBranch,
+    weight: f32,
+) -> Vec<HybridSearchResult> {
+    let normalized = normalize_scores(&results);
+    let mut projected: Vec<_> = results
+        .into_iter()
+        .map(|result| {
+            let score = weight * normalized.get(&result.id).copied().unwrap_or(0.0);
+            match branch {
+                HybridBranch::Text => HybridSearchResult {
+                    id: result.id,
+                    bm25_score: Some(result.score),
+                    vector_score: None,
+                    score,
+                },
+                HybridBranch::Vector => HybridSearchResult {
+                    id: result.id,
+                    bm25_score: None,
+                    vector_score: Some(result.score),
+                    score,
+                },
+            }
+        })
+        .collect();
+    sort_hybrid_results(&mut projected);
+    projected
+}
+
+fn fuse_hybrid_results(
+    bm25_results: Vec<SearchResult>,
+    vector_results: Vec<SearchResult>,
+    weights: HybridWeights,
+    top_k: usize,
+) -> Vec<HybridSearchResult> {
+    let normalized_bm25 = normalize_scores(&bm25_results);
+    let normalized_vectors = normalize_scores(&vector_results);
+
+    let mut combined: HashMap<DocumentId, HybridSearchResult> = HashMap::new();
+
+    for result in bm25_results {
+        let normalized = *normalized_bm25.get(&result.id).unwrap_or(&0.0);
+        combined
+            .entry(result.id.clone())
+            .and_modify(|entry| {
+                entry.bm25_score = Some(result.score);
+                entry.score += weights.bm25 * normalized;
+            })
+            .or_insert(HybridSearchResult {
+                id: result.id,
+                bm25_score: Some(result.score),
+                vector_score: None,
+                score: weights.bm25 * normalized,
+            });
+    }
+
+    for result in vector_results {
+        let normalized = *normalized_vectors.get(&result.id).unwrap_or(&0.0);
+        combined
+            .entry(result.id.clone())
+            .and_modify(|entry| {
+                entry.vector_score = Some(result.score);
+                entry.score += weights.vector * normalized;
+            })
+            .or_insert(HybridSearchResult {
+                id: result.id,
+                bm25_score: None,
+                vector_score: Some(result.score),
+                score: weights.vector * normalized,
+            });
+    }
+
+    let mut results: Vec<_> = combined.into_values().collect();
+    sort_hybrid_results(&mut results);
+    results.truncate(top_k.min(results.len()));
+    results
+}
+
+fn sanitize_score(score: f32) -> f32 {
+    if score.is_finite() {
+        score
+    } else {
+        0.0
+    }
+}
+
+fn sort_search_results(results: &mut [SearchResult]) {
+    results.sort_by(|left, right| {
+        sanitize_score(right.score)
+            .partial_cmp(&sanitize_score(left.score))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+}
+
+fn sort_hybrid_results(results: &mut [HybridSearchResult]) {
+    results.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use barq_index::HnswParams;
+    use proptest::prelude::*;
     use std::sync::{Mutex, OnceLock};
 
     fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -1669,6 +2054,248 @@ mod tests {
     }
 
     #[test]
+    fn query_plan_creates_common_query_variants() {
+        let vector = [0.1, 0.2, 0.3];
+        let filter = Filter::Exists {
+            field: "body".to_string(),
+        };
+        let cases = [
+            (
+                QueryPlan::new(Some(&vector), None, None, 3).unwrap(),
+                QueryVariant::VectorOnly,
+            ),
+            (
+                QueryPlan::new(None, Some("rust"), None, 3).unwrap(),
+                QueryVariant::TextOnly,
+            ),
+            (
+                QueryPlan::new(Some(&vector), Some("rust"), None, 3).unwrap(),
+                QueryVariant::Hybrid,
+            ),
+            (
+                QueryPlan::new(Some(&vector), None, Some(&filter), 3).unwrap(),
+                QueryVariant::FilteredVector,
+            ),
+            (
+                QueryPlan::new(None, Some("rust"), Some(&filter), 3).unwrap(),
+                QueryVariant::FilteredText,
+            ),
+            (
+                QueryPlan::new(Some(&vector), Some("rust"), Some(&filter), 3).unwrap(),
+                QueryVariant::FilteredHybrid,
+            ),
+        ];
+
+        for (plan, expected) in cases {
+            assert_eq!(plan.variant(), expected);
+            assert_eq!(plan.has_filter(), expected.has_filter());
+            assert_eq!(plan.uses_vector(), expected.uses_vector());
+            assert_eq!(plan.uses_text(), expected.uses_text());
+            assert_eq!(plan.top_k(), 3);
+        }
+    }
+
+    #[test]
+    fn query_plan_rejects_or_normalizes_invalid_combinations() {
+        let vector = [0.1, 0.2, 0.3];
+        let empty_vector: [f32; 0] = [];
+        let filter = Filter::Exists {
+            field: "body".to_string(),
+        };
+
+        let normalized = QueryPlan::new(Some(&vector), Some("   "), None, 5).unwrap();
+        assert_eq!(normalized.variant(), QueryVariant::VectorOnly);
+
+        let missing_query = QueryPlan::new(None, Some("   "), Some(&filter), 5).unwrap_err();
+        assert!(matches!(missing_query, CatalogError::InvalidSchema(_)));
+
+        let zero_top_k = QueryPlan::new(Some(&vector), None, None, 0).unwrap_err();
+        assert!(matches!(zero_top_k, CatalogError::InvalidSchema(_)));
+
+        let empty_vector_err = QueryPlan::new(Some(&empty_vector), None, None, 5).unwrap_err();
+        assert!(matches!(empty_vector_err, CatalogError::InvalidSchema(_)));
+    }
+
+    #[test]
+    fn planner_picks_expected_paths_for_known_scenarios() {
+        let mut schema = text_schema();
+        schema.name = "planner_articles".to_string();
+        schema.fields.push(FieldSchema {
+            name: "meta".to_string(),
+            field_type: FieldType::Json,
+            required: false,
+        });
+
+        let mut catalog = Catalog::new();
+        let tenant = default_tenant();
+        catalog.create_collection(tenant.clone(), schema).unwrap();
+        let collection = catalog.collection_mut(&tenant, "planner_articles").unwrap();
+
+        for (id, body, category) in [
+            (1, "rust systems", "tech"),
+            (2, "rust cookbook", "tech"),
+            (3, "garden tools", "home"),
+        ] {
+            let mut payload = HashMap::new();
+            payload.insert("body".to_string(), PayloadValue::String(body.into()));
+            payload.insert(
+                "meta".to_string(),
+                PayloadValue::Object({
+                    let mut meta = HashMap::new();
+                    meta.insert("category".to_string(), PayloadValue::String(category.into()));
+                    meta
+                }),
+            );
+            collection
+                .insert(Document {
+                    id: DocumentId::U64(id),
+                    vector: vec![id as f32, 0.0, 0.0],
+                    payload: Some(PayloadValue::Object(payload)),
+                })
+                .unwrap();
+        }
+
+        let planner =
+            QueryPlanner::new(QueryPlannerOptions::default().with_filter_candidate_threshold(2));
+        let small_filter = Filter::Eq {
+            field: "meta.category".to_string(),
+            value: PayloadValue::String("home".into()),
+        };
+        let small_plan = planner
+            .plan_collection(
+                collection,
+                Some(&[1.0, 0.0, 0.0]),
+                Some("rust"),
+                Some(&small_filter),
+                2,
+            )
+            .unwrap();
+        assert_eq!(small_plan.vector_path(), Some(QueryExecutionPath::VectorFilterScan));
+        assert_eq!(small_plan.text_path(), Some(QueryExecutionPath::TextFilterScan));
+
+        let broad_filter = Filter::Exists {
+            field: "body".to_string(),
+        };
+        let broad_plan = QueryPlanner::new(
+            QueryPlannerOptions::default().with_filter_candidate_threshold(1),
+        )
+        .plan_collection(
+            collection,
+            Some(&[1.0, 0.0, 0.0]),
+            Some("rust"),
+            Some(&broad_filter),
+            2,
+        )
+        .unwrap();
+        assert_eq!(broad_plan.vector_path(), Some(QueryExecutionPath::VectorIndex));
+        assert_eq!(broad_plan.text_path(), Some(QueryExecutionPath::TextIndex));
+
+        collection.set_index_state(IndexState::Building).unwrap();
+        let fallback_plan = planner
+            .plan_collection(collection, Some(&[1.0, 0.0, 0.0]), None, Some(&small_filter), 2)
+            .unwrap();
+        assert_eq!(fallback_plan.vector_path(), Some(QueryExecutionPath::VectorFullScan));
+        assert_eq!(fallback_plan.text_path(), None);
+    }
+
+    #[test]
+    fn planner_remains_deterministic() {
+        let mut catalog = Catalog::new();
+        let tenant = default_tenant();
+        catalog
+            .create_collection(tenant.clone(), text_schema())
+            .unwrap();
+        let collection = catalog.collection_mut(&tenant, "articles").unwrap();
+
+        let mut payload = HashMap::new();
+        payload.insert(
+            "body".to_string(),
+            PayloadValue::String("rust systems programming".into()),
+        );
+        collection
+            .insert(Document {
+                id: DocumentId::U64(1),
+                vector: vec![1.0, 0.0, 0.0],
+                payload: Some(PayloadValue::Object(payload)),
+            })
+            .unwrap();
+
+        let filter = Filter::Exists {
+            field: "body".to_string(),
+        };
+        let planner =
+            QueryPlanner::new(QueryPlannerOptions::default().with_filter_candidate_threshold(4));
+
+        let first = planner
+            .plan_collection(collection, Some(&[1.0, 0.0, 0.0]), Some("rust"), Some(&filter), 2)
+            .unwrap();
+        let second = planner
+            .plan_collection(collection, Some(&[1.0, 0.0, 0.0]), Some("rust"), Some(&filter), 2)
+            .unwrap();
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn merge_search_results_is_deterministic_and_breaks_ties_by_id() {
+        let sources = vec![
+            vec![
+                SearchResult {
+                    id: DocumentId::U64(10),
+                    score: 1.0,
+                },
+                SearchResult {
+                    id: DocumentId::U64(2),
+                    score: 1.0,
+                },
+            ],
+            vec![SearchResult {
+                id: DocumentId::U64(2),
+                score: 1.0,
+            }],
+        ];
+
+        let first = merge_search_result_sources(sources.clone(), 2);
+        let second = merge_search_result_sources(sources, 2);
+
+        assert_eq!(first, second);
+        assert_eq!(first[0].id, DocumentId::U64(10));
+        assert_eq!(first[1].id, DocumentId::U64(2));
+    }
+
+    #[test]
+    fn merge_search_results_keeps_best_score_per_document() {
+        let sources = vec![
+            vec![
+                SearchResult {
+                    id: DocumentId::U64(1),
+                    score: 0.2,
+                },
+                SearchResult {
+                    id: DocumentId::U64(2),
+                    score: 0.7,
+                },
+            ],
+            vec![
+                SearchResult {
+                    id: DocumentId::U64(1),
+                    score: 0.9,
+                },
+                SearchResult {
+                    id: DocumentId::U64(3),
+                    score: 0.8,
+                },
+            ],
+        ];
+
+        let merged = merge_search_result_sources(sources, 2);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].id, DocumentId::U64(1));
+        assert_eq!(merged[0].score, 0.9);
+        assert_eq!(merged[1].id, DocumentId::U64(3));
+    }
+
+    #[test]
     fn hybrid_includes_both_scores() {
         let mut catalog = Catalog::new();
         let tenant = default_tenant();
@@ -1710,6 +2337,111 @@ mod tests {
         let first = &results[0];
         assert!(first.bm25_score.is_some());
         assert!(first.vector_score.is_some());
+    }
+
+    #[test]
+    fn hybrid_weighted_fusion_breaks_ties_deterministically() {
+        let weights = HybridWeights {
+            bm25: 0.5,
+            vector: 0.5,
+        };
+        let bm25_results = vec![
+            SearchResult {
+                id: DocumentId::U64(1),
+                score: 10.0,
+            },
+            SearchResult {
+                id: DocumentId::U64(2),
+                score: 0.0,
+            },
+        ];
+        let vector_results = vec![
+            SearchResult {
+                id: DocumentId::U64(1),
+                score: 0.0,
+            },
+            SearchResult {
+                id: DocumentId::U64(2),
+                score: 10.0,
+            },
+        ];
+
+        let first = fuse_hybrid_results(bm25_results.clone(), vector_results.clone(), weights, 2);
+        let second = fuse_hybrid_results(bm25_results, vector_results, weights, 2);
+
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].id, DocumentId::U64(1));
+        assert_eq!(first[1].id, DocumentId::U64(2));
+        assert_eq!(first[0].score, first[1].score);
+    }
+
+    #[test]
+    fn hybrid_falls_back_to_vector_results_when_text_query_is_blank() {
+        let mut catalog = Catalog::new();
+        let tenant = default_tenant();
+        catalog
+            .create_collection(tenant.clone(), sample_schema())
+            .unwrap();
+        let collection = catalog.collection_mut(&tenant, "products").unwrap();
+
+        collection
+            .insert(Document {
+                id: DocumentId::U64(1),
+                vector: vec![1.0, 0.0, 0.0],
+                payload: None,
+            })
+            .unwrap();
+        collection
+            .insert(Document {
+                id: DocumentId::U64(2),
+                vector: vec![0.0, 1.0, 0.0],
+                payload: None,
+            })
+            .unwrap();
+
+        let results = collection
+            .search_hybrid(&[1.0, 0.0, 0.0], "   ", 2, None, None)
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].id, DocumentId::U64(1));
+        assert!(results.iter().all(|result| result.bm25_score.is_none()));
+        assert!(results.iter().all(|result| result.vector_score.is_some()));
+    }
+
+    #[test]
+    fn hybrid_falls_back_to_text_results_when_vector_query_is_empty() {
+        let mut catalog = Catalog::new();
+        let tenant = default_tenant();
+        catalog
+            .create_collection(tenant.clone(), text_schema())
+            .unwrap();
+        let collection = catalog.collection_mut(&tenant, "articles").unwrap();
+
+        for (id, body) in [
+            (1, "Rust systems programming guide"),
+            (2, "Database internals"),
+        ] {
+            let mut payload = HashMap::new();
+            payload.insert("body".to_string(), PayloadValue::String(body.into()));
+            collection
+                .insert(Document {
+                    id: DocumentId::U64(id),
+                    vector: vec![id as f32, 0.0, 0.0],
+                    payload: Some(PayloadValue::Object(payload)),
+                })
+                .unwrap();
+        }
+
+        let results = collection
+            .search_hybrid(&[], "rust guide", 2, None, None)
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, DocumentId::U64(1));
+        assert!(results.iter().all(|result| result.bm25_score.is_some()));
+        assert!(results.iter().all(|result| result.vector_score.is_none()));
     }
 
     #[test]
@@ -1757,6 +2489,80 @@ mod tests {
             .unwrap();
 
         assert_eq!(fallback, ready);
+    }
+
+    #[test]
+    fn normalize_scores_handles_equal_and_non_finite_values() {
+        let equal_scores = vec![
+            SearchResult {
+                id: DocumentId::U64(1),
+                score: 0.0,
+            },
+            SearchResult {
+                id: DocumentId::U64(2),
+                score: 0.0,
+            },
+        ];
+        let equal = normalize_scores(&equal_scores);
+        assert_eq!(equal.get(&DocumentId::U64(1)), Some(&1.0));
+        assert_eq!(equal.get(&DocumentId::U64(2)), Some(&1.0));
+
+        let mixed_scores = vec![
+            SearchResult {
+                id: DocumentId::U64(3),
+                score: f32::NAN,
+            },
+            SearchResult {
+                id: DocumentId::U64(4),
+                score: 2.0,
+            },
+        ];
+        let normalized = normalize_scores(&mixed_scores);
+        assert_eq!(normalized.get(&DocumentId::U64(3)), Some(&0.0));
+        assert_eq!(normalized.get(&DocumentId::U64(4)), Some(&1.0));
+    }
+
+    proptest! {
+        #[test]
+        fn merged_results_match_bruteforce_baseline(
+            sources in proptest::collection::vec(
+                proptest::collection::vec((1u8..16u8, -1000i16..1000i16), 0..8),
+                1..4
+            ),
+            top_k in 1usize..8,
+        ) {
+            let ranked_sources: Vec<Vec<SearchResult>> = sources
+                .iter()
+                .map(|source| {
+                    source
+                        .iter()
+                        .map(|(id, score)| SearchResult {
+                            id: DocumentId::U64(*id as u64),
+                            score: *score as f32 / 100.0,
+                        })
+                        .collect()
+                })
+                .collect();
+
+            let mut expected: HashMap<DocumentId, SearchResult> = HashMap::new();
+            for result in ranked_sources.iter().flatten() {
+                expected
+                    .entry(result.id.clone())
+                    .and_modify(|existing| {
+                        if sanitize_score(result.score) > sanitize_score(existing.score) {
+                            *existing = result.clone();
+                        }
+                    })
+                    .or_insert_with(|| result.clone());
+            }
+
+            let mut expected: Vec<_> = expected.into_values().collect();
+            sort_search_results(&mut expected);
+            expected.truncate(top_k.min(expected.len()));
+
+            let merged = merge_search_result_sources(ranked_sources, top_k);
+            prop_assert_eq!(merged, expected);
+        }
     }
 
     #[test]
@@ -1992,6 +2798,203 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, DocumentId::U64(1));
+    }
+
+    #[test]
+    fn text_search_filter_pushdown_matches_post_filter_baseline() {
+        let mut schema = text_schema();
+        schema.name = "articles_text_filter".to_string();
+        schema.fields.push(FieldSchema {
+            name: "meta".to_string(),
+            field_type: FieldType::Json,
+            required: false,
+        });
+
+        let mut catalog = Catalog::new();
+        let tenant = default_tenant();
+        catalog.create_collection(tenant.clone(), schema).unwrap();
+        let collection = catalog
+            .collection_mut(&tenant, "articles_text_filter")
+            .unwrap();
+
+        let docs = [
+            (
+                1,
+                vec![0.9, 0.1, 0.0],
+                "Rust systems programming guide",
+                "tech",
+            ),
+            (2, vec![0.8, 0.2, 0.0], "Rust cookbook", "tech"),
+            (3, vec![0.1, 0.9, 0.0], "Garden cookbook", "home"),
+        ];
+
+        for (id, vector, body, category) in docs {
+            let mut payload = HashMap::new();
+            payload.insert("body".to_string(), PayloadValue::String(body.into()));
+            payload.insert(
+                "meta".to_string(),
+                PayloadValue::Object({
+                    let mut meta = HashMap::new();
+                    meta.insert("category".to_string(), PayloadValue::String(category.into()));
+                    meta
+                }),
+            );
+            collection
+                .insert(Document {
+                    id: DocumentId::U64(id),
+                    vector,
+                    payload: Some(PayloadValue::Object(payload)),
+                })
+                .unwrap();
+        }
+
+        let filter = Filter::Eq {
+            field: "meta.category".to_string(),
+            value: PayloadValue::String("tech".into()),
+        };
+
+        let actual = collection
+            .search_text_with_filter("rust guide", 2, Some(&filter))
+            .unwrap();
+
+        let mut expected = collection
+            .text_index
+            .as_ref()
+            .unwrap()
+            .search("rust guide", collection.document_count())
+            .unwrap();
+        expected = collection.filter_results(expected, Some(&filter));
+        expected.truncate(2);
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn hybrid_filter_pushdown_matches_post_filter_baseline() {
+        let mut schema = text_schema();
+        schema.name = "articles_hybrid_filter".to_string();
+        schema.fields.push(FieldSchema {
+            name: "meta".to_string(),
+            field_type: FieldType::Json,
+            required: false,
+        });
+
+        let mut catalog = Catalog::new();
+        let tenant = default_tenant();
+        catalog.create_collection(tenant.clone(), schema).unwrap();
+        let collection = catalog
+            .collection_mut(&tenant, "articles_hybrid_filter")
+            .unwrap();
+
+        let docs = [
+            (
+                1,
+                vec![1.0, 0.0, 0.0],
+                "Rust systems programming guide",
+                "tech",
+            ),
+            (2, vec![0.8, 0.2, 0.0], "Rust cookbook", "tech"),
+            (3, vec![0.0, 1.0, 0.0], "Garden cookbook", "home"),
+        ];
+
+        for (id, vector, body, category) in docs {
+            let mut payload = HashMap::new();
+            payload.insert("body".to_string(), PayloadValue::String(body.into()));
+            payload.insert(
+                "meta".to_string(),
+                PayloadValue::Object({
+                    let mut meta = HashMap::new();
+                    meta.insert("category".to_string(), PayloadValue::String(category.into()));
+                    meta
+                }),
+            );
+            collection
+                .insert(Document {
+                    id: DocumentId::U64(id),
+                    vector,
+                    payload: Some(PayloadValue::Object(payload)),
+                })
+                .unwrap();
+        }
+
+        let filter = Filter::Eq {
+            field: "meta.category".to_string(),
+            value: PayloadValue::String("tech".into()),
+        };
+        let weights = HybridWeights {
+            bm25: 0.6,
+            vector: 0.4,
+        };
+
+        let actual = collection
+            .search_hybrid(
+                &[1.0, 0.0, 0.0],
+                "rust guide",
+                2,
+                Some(weights),
+                Some(&filter),
+            )
+            .unwrap();
+
+        let mut bm25_results = collection
+            .text_index
+            .as_ref()
+            .unwrap()
+            .search("rust guide", collection.document_count())
+            .unwrap();
+        bm25_results = collection.filter_results(bm25_results, Some(&filter));
+        bm25_results.truncate(4);
+
+        let mut vector_results = collection.search_all_vectors(&[1.0, 0.0, 0.0]);
+        vector_results = collection.filter_results(vector_results, Some(&filter));
+        vector_results.truncate(4);
+
+        let normalized_bm25 = normalize_scores(&bm25_results);
+        let normalized_vectors = normalize_scores(&vector_results);
+        let mut combined: HashMap<DocumentId, HybridSearchResult> = HashMap::new();
+
+        for result in bm25_results {
+            let normalized = *normalized_bm25.get(&result.id).unwrap_or(&0.0);
+            combined
+                .entry(result.id.clone())
+                .and_modify(|entry| {
+                    entry.bm25_score = Some(result.score);
+                    entry.score += weights.bm25 * normalized;
+                })
+                .or_insert(HybridSearchResult {
+                    id: result.id,
+                    bm25_score: Some(result.score),
+                    vector_score: None,
+                    score: weights.bm25 * normalized,
+                });
+        }
+
+        for result in vector_results {
+            let normalized = *normalized_vectors.get(&result.id).unwrap_or(&0.0);
+            combined
+                .entry(result.id.clone())
+                .and_modify(|entry| {
+                    entry.vector_score = Some(result.score);
+                    entry.score += weights.vector * normalized;
+                })
+                .or_insert(HybridSearchResult {
+                    id: result.id,
+                    bm25_score: None,
+                    vector_score: Some(result.score),
+                    score: weights.vector * normalized,
+                });
+        }
+
+        let mut expected: Vec<_> = combined.into_values().collect();
+        expected.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        expected.truncate(2);
+
+        assert_eq!(actual, expected);
     }
 
     #[test]
