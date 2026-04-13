@@ -6,8 +6,9 @@ use barq_core::{
 use barq_proto::barq::barq_server::Barq;
 use barq_proto::barq::{
     BatchSearchRequest, BatchSearchResponse, CreateCollectionRequest, CreateCollectionResponse,
-    HealthRequest, HealthResponse, InsertDocumentRequest, InsertDocumentResponse, QueryResults,
-    SearchRequest, SearchResponse, SearchResult,
+    HealthRequest, HealthResponse, InsertDocumentRequest, InsertDocumentResponse, InsertRequest,
+    InsertResponse, QueryResults, SearchRequest, SearchResponse, SearchResult, StatusRequest,
+    StatusResponse,
 };
 use tonic::{Request, Response, Status};
 
@@ -51,6 +52,16 @@ fn json_to_payload(v: serde_json::Value) -> PayloadValue {
 
 #[tonic::async_trait]
 impl Barq for GrpcService {
+    async fn status(
+        &self,
+        _request: Request<StatusRequest>,
+    ) -> Result<Response<StatusResponse>, Status> {
+        Ok(Response::new(StatusResponse {
+            ok: true,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        }))
+    }
+
     async fn health(
         &self,
         _request: Request<HealthRequest>,
@@ -59,6 +70,15 @@ impl Barq for GrpcService {
             ok: true,
             version: env!("CARGO_PKG_VERSION").to_string(),
         }))
+    }
+
+    async fn insert(
+        &self,
+        _request: Request<InsertRequest>,
+    ) -> Result<Response<InsertResponse>, Status> {
+        Err(Status::unimplemented(
+            "canonical Insert RPC will be wired in the next commit",
+        ))
     }
 
     async fn create_collection(
