@@ -126,6 +126,21 @@ type InsertOptions struct {
 	WaitForCommit *bool
 }
 
+type InsertState string
+
+const (
+	InsertStateQueued     InsertState = "queued"
+	InsertStateProcessing InsertState = "processing"
+	InsertStateSucceeded  InsertState = "succeeded"
+	InsertStateFailed     InsertState = "failed"
+)
+
+type InsertStatus struct {
+	RequestID    string
+	State        InsertState
+	ErrorMessage string
+}
+
 func (c *Client) Insert(ctx context.Context, collection string, req InsertRequest) error {
 	if err := requireSupportedAPIVersion(); err != nil {
 		return err
@@ -162,6 +177,18 @@ func (c *Client) InsertAsync(ctx context.Context, collection string, req InsertR
 		rawPayloadToAny(req.Payload),
 		req.Options,
 	)
+}
+
+func (c *Client) GetInsertStatus(ctx context.Context, requestID string) (InsertStatus, error) {
+	if err := requireSupportedAPIVersion(); err != nil {
+		return InsertStatus{}, err
+	}
+	grpcClient, err := NewGrpcClientWithAPIKey(c.grpcTarget(), c.config.APIKey)
+	if err != nil {
+		return InsertStatus{}, err
+	}
+	defer grpcClient.Close()
+	return grpcClient.GetInsertStatus(ctx, requestID)
 }
 
 type SearchRequest struct {
@@ -313,6 +340,20 @@ func (c *GrpcClient) InsertAsync(ctx context.Context, collection string, id inte
 	return resp.RequestId, nil
 }
 
+func (c *GrpcClient) GetInsertStatus(ctx context.Context, requestID string) (InsertStatus, error) {
+	resp, err := c.client.GetInsertStatus(c.authContext(ctx), &pb.GetInsertStatusRequest{
+		RequestId: requestID,
+	})
+	if err != nil {
+		return InsertStatus{}, err
+	}
+	return InsertStatus{
+		RequestID:    resp.RequestId,
+		State:        insertStateFromProto(resp.State),
+		ErrorMessage: resp.ErrorMessage,
+	}, nil
+}
+
 func (c *GrpcClient) InsertWithOptions(ctx context.Context, collection string, id interface{}, vector []float32, payload interface{}, options *InsertOptions) error {
 	idStr := fmt.Sprintf("%v", id)
 
@@ -425,6 +466,21 @@ func protoSearchOptions(options *SearchOptions) *pb.SearchOptions {
 	return &pb.SearchOptions{
 		Consistency:   consistency,
 		AllowFallback: allowFallback,
+	}
+}
+
+func insertStateFromProto(state pb.InsertStatusState) InsertState {
+	switch state {
+	case pb.InsertStatusState_INSERT_STATUS_STATE_QUEUED:
+		return InsertStateQueued
+	case pb.InsertStatusState_INSERT_STATUS_STATE_PROCESSING:
+		return InsertStateProcessing
+	case pb.InsertStatusState_INSERT_STATUS_STATE_SUCCEEDED:
+		return InsertStateSucceeded
+	case pb.InsertStatusState_INSERT_STATUS_STATE_FAILED:
+		return InsertStateFailed
+	default:
+		return InsertStateQueued
 	}
 }
 

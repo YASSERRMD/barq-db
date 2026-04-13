@@ -9,10 +9,10 @@ use barq_core::{
 use barq_proto::barq::barq_server::Barq;
 use barq_proto::barq::{
     BatchSearchRequest, BatchSearchResponse, Consistency, CreateCollectionRequest,
-    CreateCollectionResponse, HealthRequest, HealthResponse, InsertAsyncResponse,
-    InsertDocumentRequest, InsertDocumentResponse, InsertOptions, InsertRequest, InsertResponse,
-    QueryResults, SearchOptions, SearchRequest, SearchResponse, SearchResult, StatusRequest,
-    StatusResponse,
+    CreateCollectionResponse, GetInsertStatusRequest, GetInsertStatusResponse, HealthRequest,
+    HealthResponse, InsertAsyncResponse, InsertDocumentRequest, InsertDocumentResponse,
+    InsertOptions, InsertRequest, InsertResponse, InsertStatusState, QueryResults, SearchOptions,
+    SearchRequest, SearchResponse, SearchResult, StatusRequest, StatusResponse,
 };
 use barq_storage::StorageError;
 use tonic::metadata::MetadataMap;
@@ -262,6 +262,15 @@ enum SearchConsistency {
     Any,
 }
 
+fn proto_insert_status(state: crate::ingest::TrackedInsertState) -> InsertStatusState {
+    match state {
+        crate::ingest::TrackedInsertState::Queued => InsertStatusState::Queued,
+        crate::ingest::TrackedInsertState::Processing => InsertStatusState::Processing,
+        crate::ingest::TrackedInsertState::Succeeded => InsertStatusState::Succeeded,
+        crate::ingest::TrackedInsertState::Failed => InsertStatusState::Failed,
+    }
+}
+
 fn metadata_to_headers(metadata: &MetadataMap) -> Result<HeaderMap, Status> {
     let mut headers = HeaderMap::new();
     copy_ascii_metadata(metadata, "x-api-key", &mut headers)?;
@@ -397,6 +406,29 @@ impl Barq for GrpcService {
             )
             .await?;
         Ok(Response::new(response))
+    }
+
+    async fn get_insert_status(
+        &self,
+        request: Request<GetInsertStatusRequest>,
+    ) -> Result<Response<GetInsertStatusResponse>, Status> {
+        let _tenant = self.authenticate(request.metadata(), ApiPermission::Write)?;
+        let request_id = request.into_inner().request_id;
+        Self::require_non_empty(&request_id, "request_id")?;
+
+        let tracked = self
+            .state
+            .ingestion
+            .tracked_insert_status(&request_id)
+            .ok_or_else(|| {
+                Status::not_found(format!("async insert request {request_id} not found"))
+            })?;
+
+        Ok(Response::new(GetInsertStatusResponse {
+            request_id: tracked.request_id,
+            state: proto_insert_status(tracked.state) as i32,
+            error_message: tracked.error_message.unwrap_or_default(),
+        }))
     }
 
     async fn create_collection(
@@ -1100,6 +1132,103 @@ mod tests {
 
         shutdown.send(()).unwrap();
         handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_insert_status_reports_state_transitions() {
+        let (_dir, state, service) = grpc_service();
+        create_collection(&service, "docs").await;
+        let queue_hook = state.ingestion.install_pause_before_dequeue();
+
+        let response = service
+            .insert_async(Request::new(InsertRequest {
+                collection: "docs".to_string(),
+                id: "doc-status".to_string(),
+                vector: vec![1.0, 0.0],
+                payload_json: "{}".to_string(),
+                options: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        queue_hook.wait_until_reached().await;
+        let queued = service
+            .get_insert_status(Request::new(GetInsertStatusRequest {
+                request_id: response.request_id.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(queued.state, InsertStatusState::Queued as i32);
+
+        let apply_hook = state.ingestion.install_pause_before_apply();
+        queue_hook.release();
+        apply_hook.wait_until_reached().await;
+
+        let processing = service
+            .get_insert_status(Request::new(GetInsertStatusRequest {
+                request_id: response.request_id.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(processing.state, InsertStatusState::Processing as i32);
+
+        apply_hook.release();
+        state.ingestion.drain().await;
+
+        let succeeded = service
+            .get_insert_status(Request::new(GetInsertStatusRequest {
+                request_id: response.request_id,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(succeeded.state, InsertStatusState::Succeeded as i32);
+        assert!(succeeded.error_message.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_insert_status_reports_failed_state_after_worker_error() {
+        let (_dir, state, service) = grpc_service();
+        create_collection(&service, "docs").await;
+        let queue_hook = state.ingestion.install_pause_before_dequeue();
+        let apply_hook = state.ingestion.install_pause_before_apply();
+
+        let response = service
+            .insert_async(Request::new(InsertRequest {
+                collection: "docs".to_string(),
+                id: "doc-status-fail".to_string(),
+                vector: vec![1.0, 0.0],
+                payload_json: "{}".to_string(),
+                options: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        queue_hook.wait_until_reached().await;
+        state
+            .storage
+            .lock()
+            .await
+            .seal_segment_for_tenant(&TenantId::default(), "docs")
+            .unwrap();
+        queue_hook.release();
+        apply_hook.wait_until_reached().await;
+        apply_hook.release();
+        state.ingestion.drain().await;
+
+        let failed = service
+            .get_insert_status(Request::new(GetInsertStatusRequest {
+                request_id: response.request_id,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(failed.state, InsertStatusState::Failed as i32);
+        assert!(failed.error_message.contains("not writable"));
     }
 
     #[tokio::test]

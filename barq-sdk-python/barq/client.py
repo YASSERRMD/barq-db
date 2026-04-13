@@ -115,6 +115,10 @@ class BarqClient:
             options,
         )
 
+    def get_insert_status(self, request_id: str) -> Dict[str, Any]:
+        _require_supported_api_version()
+        return self._grpc().get_insert_status(request_id)
+
     def search(
         self,
         collection: str,

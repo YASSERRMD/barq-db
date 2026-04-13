@@ -295,6 +295,8 @@ pub(crate) struct IngestionService {
     #[cfg(test)]
     pause_before_dequeue: Mutex<Option<Arc<PauseBeforeDequeue>>>,
     #[cfg(test)]
+    pause_before_apply: Mutex<Option<Arc<PauseBeforeApply>>>,
+    #[cfg(test)]
     observed_batch_sizes: Mutex<Vec<usize>>,
     #[cfg(test)]
     observed_document_ids: Mutex<Vec<barq_index::DocumentId>>,
@@ -328,6 +330,8 @@ impl IngestionService {
             worker_handle: AsyncMutex::new(None),
             #[cfg(test)]
             pause_before_dequeue: Mutex::new(None),
+            #[cfg(test)]
+            pause_before_apply: Mutex::new(None),
             #[cfg(test)]
             observed_batch_sizes: Mutex::new(Vec::new()),
             #[cfg(test)]
@@ -555,6 +559,17 @@ impl IngestionService {
             if let Some(request_id) = request_id.as_ref() {
                 self.update_tracked_status(request_id, TrackedInsertState::Processing, None);
             }
+            #[cfg(test)]
+            let apply_hook = {
+                self.pause_before_apply
+                    .lock()
+                    .expect("pause apply hook lock poisoned")
+                    .take()
+            };
+            #[cfg(test)]
+            if let Some(apply_hook) = apply_hook {
+                apply_hook.pause().await;
+            }
             let _permit = permit;
             let result = storage.insert_for_tenant(
                 &request.tenant,
@@ -636,6 +651,16 @@ impl IngestionService {
     }
 
     #[cfg(test)]
+    pub(crate) fn install_pause_before_apply(&self) -> Arc<PauseBeforeApply> {
+        let hook = Arc::new(PauseBeforeApply::default());
+        *self
+            .pause_before_apply
+            .lock()
+            .expect("pause apply hook lock poisoned") = Some(Arc::clone(&hook));
+        hook
+    }
+
+    #[cfg(test)]
     fn observed_batch_sizes(&self) -> Vec<usize> {
         self.observed_batch_sizes
             .lock()
@@ -710,6 +735,29 @@ pub(crate) struct PauseBeforeDequeue {
 
 #[cfg(test)]
 impl PauseBeforeDequeue {
+    pub(crate) async fn pause(&self) {
+        self.reached.notify_one();
+        self.release.notified().await;
+    }
+
+    pub(crate) async fn wait_until_reached(&self) {
+        self.reached.notified().await;
+    }
+
+    pub(crate) fn release(&self) {
+        self.release.notify_one();
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct PauseBeforeApply {
+    reached: Notify,
+    release: Notify,
+}
+
+#[cfg(test)]
+impl PauseBeforeApply {
     pub(crate) async fn pause(&self) {
         self.reached.notify_one();
         self.release.notified().await;

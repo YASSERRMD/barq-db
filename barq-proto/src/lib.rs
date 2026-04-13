@@ -5,8 +5,9 @@ pub mod barq {
 #[cfg(test)]
 mod tests {
     use super::barq::{
-        Consistency, InsertAsyncResponse, InsertOptions, InsertRequest, InsertResponse,
-        SearchOptions, SearchRequest, StatusRequest, StatusResponse,
+        Consistency, GetInsertStatusRequest, GetInsertStatusResponse, InsertAsyncResponse,
+        InsertOptions, InsertRequest, InsertResponse, InsertStatusState, SearchOptions,
+        SearchRequest, StatusRequest, StatusResponse,
     };
 
     #[test]
@@ -93,5 +94,21 @@ mod tests {
 
         assert!(response.accepted);
         assert_eq!(response.request_id, "ingest-42");
+    }
+
+    #[test]
+    fn insert_status_messages_compile() {
+        let request = GetInsertStatusRequest {
+            request_id: "ingest-7".to_string(),
+        };
+        assert_eq!(request.request_id, "ingest-7");
+
+        let response = GetInsertStatusResponse {
+            request_id: "ingest-7".to_string(),
+            state: InsertStatusState::Succeeded as i32,
+            error_message: String::new(),
+        };
+        assert_eq!(response.state, InsertStatusState::Succeeded as i32);
+        assert!(response.error_message.is_empty());
     }
 }

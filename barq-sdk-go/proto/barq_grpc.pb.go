@@ -23,6 +23,7 @@ const (
 	Barq_CreateCollection_FullMethodName = "/barq.Barq/CreateCollection"
 	Barq_Insert_FullMethodName           = "/barq.Barq/Insert"
 	Barq_InsertAsync_FullMethodName      = "/barq.Barq/InsertAsync"
+	Barq_GetInsertStatus_FullMethodName  = "/barq.Barq/GetInsertStatus"
 	Barq_Search_FullMethodName           = "/barq.Barq/Search"
 	Barq_Health_FullMethodName           = "/barq.Barq/Health"
 	Barq_InsertDocument_FullMethodName   = "/barq.Barq/InsertDocument"
@@ -37,6 +38,7 @@ type BarqClient interface {
 	CreateCollection(ctx context.Context, in *CreateCollectionRequest, opts ...grpc.CallOption) (*CreateCollectionResponse, error)
 	Insert(ctx context.Context, in *InsertRequest, opts ...grpc.CallOption) (*InsertResponse, error)
 	InsertAsync(ctx context.Context, in *InsertRequest, opts ...grpc.CallOption) (*InsertAsyncResponse, error)
+	GetInsertStatus(ctx context.Context, in *GetInsertStatusRequest, opts ...grpc.CallOption) (*GetInsertStatusResponse, error)
 	Search(ctx context.Context, in *SearchRequest, opts ...grpc.CallOption) (*SearchResponse, error)
 	// Legacy RPCs kept temporarily while SDKs migrate to the canonical contract.
 	Health(ctx context.Context, in *HealthRequest, opts ...grpc.CallOption) (*HealthResponse, error)
@@ -92,6 +94,16 @@ func (c *barqClient) InsertAsync(ctx context.Context, in *InsertRequest, opts ..
 	return out, nil
 }
 
+func (c *barqClient) GetInsertStatus(ctx context.Context, in *GetInsertStatusRequest, opts ...grpc.CallOption) (*GetInsertStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetInsertStatusResponse)
+	err := c.cc.Invoke(ctx, Barq_GetInsertStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *barqClient) Search(ctx context.Context, in *SearchRequest, opts ...grpc.CallOption) (*SearchResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SearchResponse)
@@ -140,6 +152,7 @@ type BarqServer interface {
 	CreateCollection(context.Context, *CreateCollectionRequest) (*CreateCollectionResponse, error)
 	Insert(context.Context, *InsertRequest) (*InsertResponse, error)
 	InsertAsync(context.Context, *InsertRequest) (*InsertAsyncResponse, error)
+	GetInsertStatus(context.Context, *GetInsertStatusRequest) (*GetInsertStatusResponse, error)
 	Search(context.Context, *SearchRequest) (*SearchResponse, error)
 	// Legacy RPCs kept temporarily while SDKs migrate to the canonical contract.
 	Health(context.Context, *HealthRequest) (*HealthResponse, error)
@@ -166,6 +179,9 @@ func (UnimplementedBarqServer) Insert(context.Context, *InsertRequest) (*InsertR
 }
 func (UnimplementedBarqServer) InsertAsync(context.Context, *InsertRequest) (*InsertAsyncResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method InsertAsync not implemented")
+}
+func (UnimplementedBarqServer) GetInsertStatus(context.Context, *GetInsertStatusRequest) (*GetInsertStatusResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetInsertStatus not implemented")
 }
 func (UnimplementedBarqServer) Search(context.Context, *SearchRequest) (*SearchResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Search not implemented")
@@ -272,6 +288,24 @@ func _Barq_InsertAsync_Handler(srv interface{}, ctx context.Context, dec func(in
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Barq_GetInsertStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetInsertStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BarqServer).GetInsertStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Barq_GetInsertStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BarqServer).GetInsertStatus(ctx, req.(*GetInsertStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Barq_Search_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SearchRequest)
 	if err := dec(in); err != nil {
@@ -366,6 +400,10 @@ var Barq_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "InsertAsync",
 			Handler:    _Barq_InsertAsync_Handler,
+		},
+		{
+			MethodName: "GetInsertStatus",
+			Handler:    _Barq_GetInsertStatus_Handler,
 		},
 		{
 			MethodName: "Search",

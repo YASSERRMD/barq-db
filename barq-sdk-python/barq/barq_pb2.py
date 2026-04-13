@@ -24,15 +24,17 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\nbarq.proto\x12\x04\x62\x61rq\"\x0f\n\rStatusRequest\"-\n\x0eStatusResponse\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x0f\n\x07version\x18\x02 \x01(\t\"\x0f\n\rHealthRequest\"-\n\x0eHealthResponse\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x0f\n\x07version\x18\x02 \x01(\t\"J\n\x17\x43reateCollectionRequest\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x11\n\tdimension\x18\x02 \x01(\r\x12\x0e\n\x06metric\x18\x03 \x01(\t\"+\n\x18\x43reateCollectionResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\"(\n\rInsertOptions\x12\x17\n\x0fwait_for_commit\x18\x01 \x01(\x08\"{\n\rInsertRequest\x12\x12\n\ncollection\x18\x01 \x01(\t\x12\n\n\x02id\x18\x02 \x01(\t\x12\x0e\n\x06vector\x18\x03 \x03(\x02\x12\x14\n\x0cpayload_json\x18\x04 \x01(\t\x12$\n\x07options\x18\x05 \x01(\x0b\x32\x13.barq.InsertOptions\"!\n\x0eInsertResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\";\n\x13InsertAsyncResponse\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x12\n\nrequest_id\x18\x02 \x01(\t\"]\n\x15InsertDocumentRequest\x12\x12\n\ncollection\x18\x01 \x01(\t\x12\n\n\x02id\x18\x02 \x01(\t\x12\x0e\n\x06vector\x18\x03 \x03(\x02\x12\x14\n\x0cpayload_json\x18\x04 \x01(\t\")\n\x16InsertDocumentResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\"O\n\rSearchOptions\x12&\n\x0b\x63onsistency\x18\x01 \x01(\x0e\x32\x11.barq.Consistency\x12\x16\n\x0e\x61llow_fallback\x18\x02 \x01(\x08\"h\n\rSearchRequest\x12\x12\n\ncollection\x18\x01 \x01(\t\x12\x0e\n\x06vector\x18\x02 \x03(\x02\x12\r\n\x05top_k\x18\x03 \x01(\r\x12$\n\x07options\x18\x04 \x01(\x0b\x32\x13.barq.SearchOptions\"?\n\x0cSearchResult\x12\n\n\x02id\x18\x01 \x01(\t\x12\r\n\x05score\x18\x02 \x01(\x02\x12\x14\n\x0cpayload_json\x18\x03 \x01(\t\"5\n\x0eSearchResponse\x12#\n\x07results\x18\x01 \x03(\x0b\x32\x12.barq.SearchResult\"2\n\x0bSearchQuery\x12\x0e\n\x06vector\x18\x01 \x03(\x02\x12\x13\n\x0b\x66ilter_json\x18\x02 \x01(\t\"[\n\x12\x42\x61tchSearchRequest\x12\x12\n\ncollection\x18\x01 \x01(\t\x12\"\n\x07queries\x18\x02 \x03(\x0b\x32\x11.barq.SearchQuery\x12\r\n\x05top_k\x18\x03 \x01(\r\"0\n\x0cQueryResults\x12 \n\x04hits\x18\x01 \x03(\x0b\x32\x12.barq.SearchResult\":\n\x13\x42\x61tchSearchResponse\x12#\n\x07results\x18\x01 \x03(\x0b\x32\x12.barq.QueryResults*s\n\x0b\x43onsistency\x12\x1b\n\x17\x43ONSISTENCY_UNSPECIFIED\x10\x00\x12\x17\n\x13\x43ONSISTENCY_PRIMARY\x10\x01\x12\x19\n\x15\x43ONSISTENCY_FOLLOWERS\x10\x02\x12\x13\n\x0f\x43ONSISTENCY_ANY\x10\x03\x32\xfd\x03\n\x04\x42\x61rq\x12\x33\n\x06Status\x12\x13.barq.StatusRequest\x1a\x14.barq.StatusResponse\x12Q\n\x10\x43reateCollection\x12\x1d.barq.CreateCollectionRequest\x1a\x1e.barq.CreateCollectionResponse\x12\x33\n\x06Insert\x12\x13.barq.InsertRequest\x1a\x14.barq.InsertResponse\x12=\n\x0bInsertAsync\x12\x13.barq.InsertRequest\x1a\x19.barq.InsertAsyncResponse\x12\x33\n\x06Search\x12\x13.barq.SearchRequest\x1a\x14.barq.SearchResponse\x12\x33\n\x06Health\x12\x13.barq.HealthRequest\x1a\x14.barq.HealthResponse\x12K\n\x0eInsertDocument\x12\x1b.barq.InsertDocumentRequest\x1a\x1c.barq.InsertDocumentResponse\x12\x42\n\x0b\x42\x61tchSearch\x12\x18.barq.BatchSearchRequest\x1a\x19.barq.BatchSearchResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\nbarq.proto\x12\x04\x62\x61rq\"\x0f\n\rStatusRequest\"-\n\x0eStatusResponse\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x0f\n\x07version\x18\x02 \x01(\t\"\x0f\n\rHealthRequest\"-\n\x0eHealthResponse\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x0f\n\x07version\x18\x02 \x01(\t\"J\n\x17\x43reateCollectionRequest\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x11\n\tdimension\x18\x02 \x01(\r\x12\x0e\n\x06metric\x18\x03 \x01(\t\"+\n\x18\x43reateCollectionResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\"(\n\rInsertOptions\x12\x17\n\x0fwait_for_commit\x18\x01 \x01(\x08\"{\n\rInsertRequest\x12\x12\n\ncollection\x18\x01 \x01(\t\x12\n\n\x02id\x18\x02 \x01(\t\x12\x0e\n\x06vector\x18\x03 \x03(\x02\x12\x14\n\x0cpayload_json\x18\x04 \x01(\t\x12$\n\x07options\x18\x05 \x01(\x0b\x32\x13.barq.InsertOptions\"!\n\x0eInsertResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\";\n\x13InsertAsyncResponse\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x12\n\nrequest_id\x18\x02 \x01(\t\",\n\x16GetInsertStatusRequest\x12\x12\n\nrequest_id\x18\x01 \x01(\t\"l\n\x17GetInsertStatusResponse\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12&\n\x05state\x18\x02 \x01(\x0e\x32\x17.barq.InsertStatusState\x12\x15\n\rerror_message\x18\x03 \x01(\t\"]\n\x15InsertDocumentRequest\x12\x12\n\ncollection\x18\x01 \x01(\t\x12\n\n\x02id\x18\x02 \x01(\t\x12\x0e\n\x06vector\x18\x03 \x03(\x02\x12\x14\n\x0cpayload_json\x18\x04 \x01(\t\")\n\x16InsertDocumentResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\"O\n\rSearchOptions\x12&\n\x0b\x63onsistency\x18\x01 \x01(\x0e\x32\x11.barq.Consistency\x12\x16\n\x0e\x61llow_fallback\x18\x02 \x01(\x08\"h\n\rSearchRequest\x12\x12\n\ncollection\x18\x01 \x01(\t\x12\x0e\n\x06vector\x18\x02 \x03(\x02\x12\r\n\x05top_k\x18\x03 \x01(\r\x12$\n\x07options\x18\x04 \x01(\x0b\x32\x13.barq.SearchOptions\"?\n\x0cSearchResult\x12\n\n\x02id\x18\x01 \x01(\t\x12\r\n\x05score\x18\x02 \x01(\x02\x12\x14\n\x0cpayload_json\x18\x03 \x01(\t\"5\n\x0eSearchResponse\x12#\n\x07results\x18\x01 \x03(\x0b\x32\x12.barq.SearchResult\"2\n\x0bSearchQuery\x12\x0e\n\x06vector\x18\x01 \x03(\x02\x12\x13\n\x0b\x66ilter_json\x18\x02 \x01(\t\"[\n\x12\x42\x61tchSearchRequest\x12\x12\n\ncollection\x18\x01 \x01(\t\x12\"\n\x07queries\x18\x02 \x03(\x0b\x32\x11.barq.SearchQuery\x12\r\n\x05top_k\x18\x03 \x01(\r\"0\n\x0cQueryResults\x12 \n\x04hits\x18\x01 \x03(\x0b\x32\x12.barq.SearchResult\":\n\x13\x42\x61tchSearchResponse\x12#\n\x07results\x18\x01 \x03(\x0b\x32\x12.barq.QueryResults*\xbf\x01\n\x11InsertStatusState\x12#\n\x1fINSERT_STATUS_STATE_UNSPECIFIED\x10\x00\x12\x1e\n\x1aINSERT_STATUS_STATE_QUEUED\x10\x01\x12\"\n\x1eINSERT_STATUS_STATE_PROCESSING\x10\x02\x12!\n\x1dINSERT_STATUS_STATE_SUCCEEDED\x10\x03\x12\x1e\n\x1aINSERT_STATUS_STATE_FAILED\x10\x04*s\n\x0b\x43onsistency\x12\x1b\n\x17\x43ONSISTENCY_UNSPECIFIED\x10\x00\x12\x17\n\x13\x43ONSISTENCY_PRIMARY\x10\x01\x12\x19\n\x15\x43ONSISTENCY_FOLLOWERS\x10\x02\x12\x13\n\x0f\x43ONSISTENCY_ANY\x10\x03\x32\xcd\x04\n\x04\x42\x61rq\x12\x33\n\x06Status\x12\x13.barq.StatusRequest\x1a\x14.barq.StatusResponse\x12Q\n\x10\x43reateCollection\x12\x1d.barq.CreateCollectionRequest\x1a\x1e.barq.CreateCollectionResponse\x12\x33\n\x06Insert\x12\x13.barq.InsertRequest\x1a\x14.barq.InsertResponse\x12=\n\x0bInsertAsync\x12\x13.barq.InsertRequest\x1a\x19.barq.InsertAsyncResponse\x12N\n\x0fGetInsertStatus\x12\x1c.barq.GetInsertStatusRequest\x1a\x1d.barq.GetInsertStatusResponse\x12\x33\n\x06Search\x12\x13.barq.SearchRequest\x1a\x14.barq.SearchResponse\x12\x33\n\x06Health\x12\x13.barq.HealthRequest\x1a\x14.barq.HealthResponse\x12K\n\x0eInsertDocument\x12\x1b.barq.InsertDocumentRequest\x1a\x1c.barq.InsertDocumentResponse\x12\x42\n\x0b\x42\x61tchSearch\x12\x18.barq.BatchSearchRequest\x1a\x19.barq.BatchSearchResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'barq_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_CONSISTENCY']._serialized_start=1232
-  _globals['_CONSISTENCY']._serialized_end=1347
+  _globals['_INSERTSTATUSSTATE']._serialized_start=1389
+  _globals['_INSERTSTATUSSTATE']._serialized_end=1580
+  _globals['_CONSISTENCY']._serialized_start=1582
+  _globals['_CONSISTENCY']._serialized_end=1697
   _globals['_STATUSREQUEST']._serialized_start=20
   _globals['_STATUSREQUEST']._serialized_end=35
   _globals['_STATUSRESPONSE']._serialized_start=37
@@ -53,26 +55,30 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_INSERTRESPONSE']._serialized_end=469
   _globals['_INSERTASYNCRESPONSE']._serialized_start=471
   _globals['_INSERTASYNCRESPONSE']._serialized_end=530
-  _globals['_INSERTDOCUMENTREQUEST']._serialized_start=532
-  _globals['_INSERTDOCUMENTREQUEST']._serialized_end=625
-  _globals['_INSERTDOCUMENTRESPONSE']._serialized_start=627
-  _globals['_INSERTDOCUMENTRESPONSE']._serialized_end=668
-  _globals['_SEARCHOPTIONS']._serialized_start=670
-  _globals['_SEARCHOPTIONS']._serialized_end=749
-  _globals['_SEARCHREQUEST']._serialized_start=751
-  _globals['_SEARCHREQUEST']._serialized_end=855
-  _globals['_SEARCHRESULT']._serialized_start=857
-  _globals['_SEARCHRESULT']._serialized_end=920
-  _globals['_SEARCHRESPONSE']._serialized_start=922
-  _globals['_SEARCHRESPONSE']._serialized_end=975
-  _globals['_SEARCHQUERY']._serialized_start=977
-  _globals['_SEARCHQUERY']._serialized_end=1027
-  _globals['_BATCHSEARCHREQUEST']._serialized_start=1029
-  _globals['_BATCHSEARCHREQUEST']._serialized_end=1120
-  _globals['_QUERYRESULTS']._serialized_start=1122
-  _globals['_QUERYRESULTS']._serialized_end=1170
-  _globals['_BATCHSEARCHRESPONSE']._serialized_start=1172
-  _globals['_BATCHSEARCHRESPONSE']._serialized_end=1230
-  _globals['_BARQ']._serialized_start=1350
-  _globals['_BARQ']._serialized_end=1859
+  _globals['_GETINSERTSTATUSREQUEST']._serialized_start=532
+  _globals['_GETINSERTSTATUSREQUEST']._serialized_end=576
+  _globals['_GETINSERTSTATUSRESPONSE']._serialized_start=578
+  _globals['_GETINSERTSTATUSRESPONSE']._serialized_end=686
+  _globals['_INSERTDOCUMENTREQUEST']._serialized_start=688
+  _globals['_INSERTDOCUMENTREQUEST']._serialized_end=781
+  _globals['_INSERTDOCUMENTRESPONSE']._serialized_start=783
+  _globals['_INSERTDOCUMENTRESPONSE']._serialized_end=824
+  _globals['_SEARCHOPTIONS']._serialized_start=826
+  _globals['_SEARCHOPTIONS']._serialized_end=905
+  _globals['_SEARCHREQUEST']._serialized_start=907
+  _globals['_SEARCHREQUEST']._serialized_end=1011
+  _globals['_SEARCHRESULT']._serialized_start=1013
+  _globals['_SEARCHRESULT']._serialized_end=1076
+  _globals['_SEARCHRESPONSE']._serialized_start=1078
+  _globals['_SEARCHRESPONSE']._serialized_end=1131
+  _globals['_SEARCHQUERY']._serialized_start=1133
+  _globals['_SEARCHQUERY']._serialized_end=1183
+  _globals['_BATCHSEARCHREQUEST']._serialized_start=1185
+  _globals['_BATCHSEARCHREQUEST']._serialized_end=1276
+  _globals['_QUERYRESULTS']._serialized_start=1278
+  _globals['_QUERYRESULTS']._serialized_end=1326
+  _globals['_BATCHSEARCHRESPONSE']._serialized_start=1328
+  _globals['_BATCHSEARCHRESPONSE']._serialized_end=1386
+  _globals['_BARQ']._serialized_start=1700
+  _globals['_BARQ']._serialized_end=2289
 # @@protoc_insertion_point(module_scope)

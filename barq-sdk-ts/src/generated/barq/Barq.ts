@@ -6,6 +6,8 @@ import type { BatchSearchRequest as _barq_BatchSearchRequest, BatchSearchRequest
 import type { BatchSearchResponse as _barq_BatchSearchResponse, BatchSearchResponse__Output as _barq_BatchSearchResponse__Output } from '../barq/BatchSearchResponse';
 import type { CreateCollectionRequest as _barq_CreateCollectionRequest, CreateCollectionRequest__Output as _barq_CreateCollectionRequest__Output } from '../barq/CreateCollectionRequest';
 import type { CreateCollectionResponse as _barq_CreateCollectionResponse, CreateCollectionResponse__Output as _barq_CreateCollectionResponse__Output } from '../barq/CreateCollectionResponse';
+import type { GetInsertStatusRequest as _barq_GetInsertStatusRequest, GetInsertStatusRequest__Output as _barq_GetInsertStatusRequest__Output } from '../barq/GetInsertStatusRequest';
+import type { GetInsertStatusResponse as _barq_GetInsertStatusResponse, GetInsertStatusResponse__Output as _barq_GetInsertStatusResponse__Output } from '../barq/GetInsertStatusResponse';
 import type { HealthRequest as _barq_HealthRequest, HealthRequest__Output as _barq_HealthRequest__Output } from '../barq/HealthRequest';
 import type { HealthResponse as _barq_HealthResponse, HealthResponse__Output as _barq_HealthResponse__Output } from '../barq/HealthResponse';
 import type { InsertAsyncResponse as _barq_InsertAsyncResponse, InsertAsyncResponse__Output as _barq_InsertAsyncResponse__Output } from '../barq/InsertAsyncResponse';
@@ -36,6 +38,15 @@ export interface BarqClient extends grpc.Client {
   createCollection(argument: _barq_CreateCollectionRequest, metadata: grpc.Metadata, callback: grpc.requestCallback<_barq_CreateCollectionResponse__Output>): grpc.ClientUnaryCall;
   createCollection(argument: _barq_CreateCollectionRequest, options: grpc.CallOptions, callback: grpc.requestCallback<_barq_CreateCollectionResponse__Output>): grpc.ClientUnaryCall;
   createCollection(argument: _barq_CreateCollectionRequest, callback: grpc.requestCallback<_barq_CreateCollectionResponse__Output>): grpc.ClientUnaryCall;
+  
+  GetInsertStatus(argument: _barq_GetInsertStatusRequest, metadata: grpc.Metadata, options: grpc.CallOptions, callback: grpc.requestCallback<_barq_GetInsertStatusResponse__Output>): grpc.ClientUnaryCall;
+  GetInsertStatus(argument: _barq_GetInsertStatusRequest, metadata: grpc.Metadata, callback: grpc.requestCallback<_barq_GetInsertStatusResponse__Output>): grpc.ClientUnaryCall;
+  GetInsertStatus(argument: _barq_GetInsertStatusRequest, options: grpc.CallOptions, callback: grpc.requestCallback<_barq_GetInsertStatusResponse__Output>): grpc.ClientUnaryCall;
+  GetInsertStatus(argument: _barq_GetInsertStatusRequest, callback: grpc.requestCallback<_barq_GetInsertStatusResponse__Output>): grpc.ClientUnaryCall;
+  getInsertStatus(argument: _barq_GetInsertStatusRequest, metadata: grpc.Metadata, options: grpc.CallOptions, callback: grpc.requestCallback<_barq_GetInsertStatusResponse__Output>): grpc.ClientUnaryCall;
+  getInsertStatus(argument: _barq_GetInsertStatusRequest, metadata: grpc.Metadata, callback: grpc.requestCallback<_barq_GetInsertStatusResponse__Output>): grpc.ClientUnaryCall;
+  getInsertStatus(argument: _barq_GetInsertStatusRequest, options: grpc.CallOptions, callback: grpc.requestCallback<_barq_GetInsertStatusResponse__Output>): grpc.ClientUnaryCall;
+  getInsertStatus(argument: _barq_GetInsertStatusRequest, callback: grpc.requestCallback<_barq_GetInsertStatusResponse__Output>): grpc.ClientUnaryCall;
   
   Health(argument: _barq_HealthRequest, metadata: grpc.Metadata, options: grpc.CallOptions, callback: grpc.requestCallback<_barq_HealthResponse__Output>): grpc.ClientUnaryCall;
   Health(argument: _barq_HealthRequest, metadata: grpc.Metadata, callback: grpc.requestCallback<_barq_HealthResponse__Output>): grpc.ClientUnaryCall;
@@ -98,6 +109,8 @@ export interface BarqHandlers extends grpc.UntypedServiceImplementation {
   
   CreateCollection: grpc.handleUnaryCall<_barq_CreateCollectionRequest__Output, _barq_CreateCollectionResponse>;
   
+  GetInsertStatus: grpc.handleUnaryCall<_barq_GetInsertStatusRequest__Output, _barq_GetInsertStatusResponse>;
+  
   Health: grpc.handleUnaryCall<_barq_HealthRequest__Output, _barq_HealthResponse>;
   
   Insert: grpc.handleUnaryCall<_barq_InsertRequest__Output, _barq_InsertResponse>;
@@ -115,6 +128,7 @@ export interface BarqHandlers extends grpc.UntypedServiceImplementation {
 export interface BarqDefinition extends grpc.ServiceDefinition {
   BatchSearch: MethodDefinition<_barq_BatchSearchRequest, _barq_BatchSearchResponse, _barq_BatchSearchRequest__Output, _barq_BatchSearchResponse__Output>
   CreateCollection: MethodDefinition<_barq_CreateCollectionRequest, _barq_CreateCollectionResponse, _barq_CreateCollectionRequest__Output, _barq_CreateCollectionResponse__Output>
+  GetInsertStatus: MethodDefinition<_barq_GetInsertStatusRequest, _barq_GetInsertStatusResponse, _barq_GetInsertStatusRequest__Output, _barq_GetInsertStatusResponse__Output>
   Health: MethodDefinition<_barq_HealthRequest, _barq_HealthResponse, _barq_HealthRequest__Output, _barq_HealthResponse__Output>
   Insert: MethodDefinition<_barq_InsertRequest, _barq_InsertResponse, _barq_InsertRequest__Output, _barq_InsertResponse__Output>
   InsertAsync: MethodDefinition<_barq_InsertRequest, _barq_InsertAsyncResponse, _barq_InsertRequest__Output, _barq_InsertAsyncResponse__Output>

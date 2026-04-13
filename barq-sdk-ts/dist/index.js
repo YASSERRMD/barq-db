@@ -76,6 +76,25 @@ function grpcSearchOptions(options) {
         allowFallback: options.allowFallback ?? true,
     };
 }
+function insertStateFromProto(state) {
+    switch (state) {
+        case 2:
+        case "INSERT_STATUS_STATE_PROCESSING":
+            return "processing";
+        case 3:
+        case "INSERT_STATUS_STATE_SUCCEEDED":
+            return "succeeded";
+        case 4:
+        case "INSERT_STATUS_STATE_FAILED":
+            return "failed";
+        case 1:
+        case "INSERT_STATUS_STATE_QUEUED":
+        case 0:
+        case "INSERT_STATUS_STATE_UNSPECIFIED":
+        default:
+            return "queued";
+    }
+}
 function grpcTargetFromBaseUrl(baseUrl) {
     const override = process.env.BARQ_GRPC_ADDR;
     if (override) {
@@ -155,6 +174,10 @@ class Collection {
     async insertAsync(id, vector, payload, options) {
         ensureSupportedApiVersion();
         return this.client.grpc().insertAsync(this.name, id, vector, payload ?? {}, options);
+    }
+    async getInsertStatus(requestId) {
+        ensureSupportedApiVersion();
+        return this.client.grpc().getInsertStatus(requestId);
     }
     async search(vector, query, topK = 10, filter, options) {
         ensureSupportedApiVersion();
@@ -259,6 +282,19 @@ class GrpcClient {
                 if (err)
                     return reject(err);
                 resolve(response?.requestId ?? "");
+            });
+        });
+    }
+    getInsertStatus(requestId) {
+        return new Promise((resolve, reject) => {
+            this.client.getInsertStatus({ requestId }, this.metadata, (err, response) => {
+                if (err)
+                    return reject(err);
+                resolve({
+                    requestId: response?.requestId ?? requestId,
+                    state: insertStateFromProto(response?.state),
+                    errorMessage: response?.errorMessage || undefined,
+                });
             });
         });
     }
