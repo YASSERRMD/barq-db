@@ -1,10 +1,11 @@
+use crate::storage::vector_store::{BudgetedVectorStore, VectorStore, VectorStoreConfig};
 use barq_bm25::{Bm25Config, Bm25Index, TextIndexError};
 pub use barq_index::{
-    build_index, DistanceMetric, DocumentId, DocumentIdError, IndexConfig, IndexType, SearchResult,
-    VectorIndex, Filter, GeoBoundingBox, GeoPoint, PayloadValue, BatchSearch, score_with_metric,
+    build_index, score_with_metric, BatchSearch, DistanceMetric, DocumentId, DocumentIdError,
+    Filter, GeoBoundingBox, GeoPoint, IndexConfig, IndexType, PayloadValue, SearchResult,
+    VectorIndex,
 };
 use chrono::{DateTime, Utc};
-use crate::storage::vector_store::{BudgetedVectorStore, VectorStore, VectorStoreConfig};
 pub mod storage;
 
 use rayon::prelude::*;
@@ -107,8 +108,42 @@ pub struct CollectionSchema {
     pub tenant_id: TenantId,
 }
 
+/// Lifecycle state for a collection's vector index.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum IndexState {
+    /// Rebuild is in progress and search must use fallback execution.
+    Building,
+    /// Index is current and can serve optimized search.
+    #[default]
+    Ready,
+    /// Data changed since the last completed build and the index is no longer current.
+    Stale,
+}
 
+impl IndexState {
+    /// Returns true when transitioning from `self` to `next` is permitted.
+    pub fn can_transition_to(self, next: IndexState) -> bool {
+        match (self, next) {
+            (IndexState::Ready, IndexState::Building)
+            | (IndexState::Ready, IndexState::Stale)
+            | (IndexState::Building, IndexState::Ready)
+            | (IndexState::Building, IndexState::Stale)
+            | (IndexState::Stale, IndexState::Building) => true,
+            (current, target) => current == target,
+        }
+    }
 
+    /// Validates a state transition and returns the target state on success.
+    pub fn transition_to(self, next: IndexState) -> Result<IndexState, CatalogError> {
+        if self.can_transition_to(next) {
+            Ok(next)
+        } else {
+            Err(CatalogError::InvalidSchema(format!(
+                "invalid index state transition: {self:?} -> {next:?}"
+            )))
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ValueKey {
@@ -569,6 +604,7 @@ impl CollectionSchema {
 pub struct Collection {
     schema: CollectionSchema,
     index: Box<dyn VectorIndex>,
+    index_state: IndexState,
     vectors: HashMap<DocumentId, Vec<f32>>,
     vector_ids: HashSet<DocumentId>,
     vector_store: Option<BudgetedVectorStore>,
@@ -586,6 +622,7 @@ impl fmt::Debug for Collection {
             .field("schema", &self.schema)
             .field("vectors", &self.vector_ids.len())
             .field("payloads", &self.payloads.len())
+            .field("index_state", &self.index_state)
             .field("vector_store", &self.vector_store.is_some())
             .field("dimension", &self.dimension)
             .field("metric", &self.metric)
@@ -606,17 +643,27 @@ impl Collection {
         let bm25_config = schema.bm25_config();
         schema.set_vector_index(index_type.clone());
 
-        let vector_store = if std::env::var("BARQ_VECTOR_STORE_MODE").ok().as_deref() == Some("mmap") {
-            let base = std::env::var("BARQ_VECTOR_STORE_PATH").unwrap_or_else(|_| std::env::temp_dir().display().to_string());
-            let file_path = std::path::Path::new(&base).join(format!("{}.vectors.bin", schema.name));
-            BudgetedVectorStore::open(file_path, Some(dimension), true, VectorStoreConfig::default()).ok()
-        } else {
-            None
-        };
+        let vector_store =
+            if std::env::var("BARQ_VECTOR_STORE_MODE").ok().as_deref() == Some("mmap") {
+                let base = std::env::var("BARQ_VECTOR_STORE_PATH")
+                    .unwrap_or_else(|_| std::env::temp_dir().display().to_string());
+                let file_path =
+                    std::path::Path::new(&base).join(format!("{}.vectors.bin", schema.name));
+                BudgetedVectorStore::open(
+                    file_path,
+                    Some(dimension),
+                    true,
+                    VectorStoreConfig::default(),
+                )
+                .ok()
+            } else {
+                None
+            };
 
         let mut collection = Self {
             schema,
             index: build_index(IndexConfig::new(metric, dimension, index_type.clone())),
+            index_state: IndexState::Ready,
             vectors: HashMap::new(),
             vector_ids: HashSet::new(),
             vector_store,
@@ -655,12 +702,13 @@ impl Collection {
         let mut stored_in_vector_store = false;
         if let (Some(store), DocumentId::U64(id)) = (&mut self.vector_store, &document.id) {
             stored_in_vector_store = true;
-            store
-                .insert(*id, &document.vector)
-                .map_err(|e| CatalogError::InvalidSchema(format!("vector store insert failed: {e}")))?;
+            store.insert(*id, &document.vector).map_err(|e| {
+                CatalogError::InvalidSchema(format!("vector store insert failed: {e}"))
+            })?;
         }
         if !stored_in_vector_store {
-            self.vectors.insert(document.id.clone(), document.vector.clone());
+            self.vectors
+                .insert(document.id.clone(), document.vector.clone());
         }
         self.vector_ids.insert(document.id.clone());
         if let Some(index) = &mut self.text_index {
@@ -696,7 +744,9 @@ impl Collection {
     }
 
     pub fn document_footprint(&self, id: &DocumentId) -> Option<usize> {
-        let vector_bytes = self.vector_slice(id).map(|v| v.len() * std::mem::size_of::<f32>());
+        let vector_bytes = self
+            .vector_slice(id)
+            .map(|v| v.len() * std::mem::size_of::<f32>());
         let payload_bytes = self
             .payloads
             .get(id)
@@ -763,7 +813,7 @@ impl Collection {
             self.validate_filter(f)?;
         }
         let candidates = filter.and_then(|f| self.metadata_index.candidates(f));
-        
+
         let mut results = if let Some(ids) = &candidates {
             self.search_over_candidates(vector, ids)?
         } else {
@@ -772,13 +822,17 @@ impl Collection {
 
         results = self.filter_results(results, filter);
         if results.len() < top_k {
-           // Simple fallback strategy (could be improved with FilteredVectorSearch in future)
-           let search_k = if candidates.is_some() { top_k * 10 } else { top_k * 4 };
-           let fallback = self.index.search(vector, search_k)?;
-           let filtered_fallback = self.filter_results(fallback, filter);
-           results.extend(filtered_fallback);
+            // Simple fallback strategy (could be improved with FilteredVectorSearch in future)
+            let search_k = if candidates.is_some() {
+                top_k * 10
+            } else {
+                top_k * 4
+            };
+            let fallback = self.index.search(vector, search_k)?;
+            let filtered_fallback = self.filter_results(fallback, filter);
+            results.extend(filtered_fallback);
         }
-        
+
         results.par_sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
@@ -795,29 +849,32 @@ impl Collection {
         top_k: usize,
     ) -> Result<Vec<Vec<SearchResult>>, CatalogError> {
         let batch_search = BatchSearch::new(&*self.index);
-        
+
         let candidates_provider = |filter: &Filter| -> Option<Vec<DocumentId>> {
-            self.metadata_index.candidates(filter).map(|set| set.into_iter().collect())
+            self.metadata_index
+                .candidates(filter)
+                .map(|set| set.into_iter().collect())
         };
 
         let check_provider = |id: &DocumentId, filter: &Filter| -> bool {
-             if let Some(payload) = self.payloads.get(id) {
-                 filter.matches(payload)
-             } else {
-                 false
-             }
+            if let Some(payload) = self.payloads.get(id) {
+                filter.matches(payload)
+            } else {
+                false
+            }
         };
-        
+
         let match_scorer = |id: &DocumentId, query: &[f32]| -> Option<f32> {
-             self.vector_slice(id).map(|vec| score_with_metric(self.metric, vec, query))
+            self.vector_slice(id)
+                .map(|vec| score_with_metric(self.metric, vec, query))
         };
-        
+
         Ok(batch_search.search_filtered(
-            queries, 
-            top_k, 
-            &match_scorer, 
-            &candidates_provider, 
-            &check_provider
+            queries,
+            top_k,
+            &match_scorer,
+            &candidates_provider,
+            &check_provider,
         )?)
     }
 
@@ -830,7 +887,6 @@ impl Collection {
         }
         None
     }
-
 
     fn search_over_candidates(
         &self,
@@ -1016,6 +1072,15 @@ impl Collection {
 
     pub fn schema(&self) -> &CollectionSchema {
         &self.schema
+    }
+
+    pub fn index_state(&self) -> IndexState {
+        self.index_state
+    }
+
+    pub fn set_index_state(&mut self, next: IndexState) -> Result<(), CatalogError> {
+        self.index_state = self.index_state.transition_to(next)?;
+        Ok(())
     }
 
     pub fn vector_dimension(&self) -> usize {
@@ -1228,14 +1293,17 @@ impl Catalog {
         self.collections.iter()
     }
 
-
     pub fn total_resident_vector_memory_bytes(&self, tenant: &TenantId) -> usize {
         self.collections
             .get(tenant)
-            .map(|collections| collections.values().map(Collection::resident_vector_memory_bytes).sum())
+            .map(|collections| {
+                collections
+                    .values()
+                    .map(Collection::resident_vector_memory_bytes)
+                    .sum()
+            })
             .unwrap_or(0)
     }
-
 }
 
 fn normalize_scores(results: &[SearchResult]) -> HashMap<DocumentId, f32> {
@@ -1345,6 +1413,35 @@ mod tests {
             bm25_config: None,
             tenant_id: TenantId::default(),
         }
+    }
+
+    #[test]
+    fn index_state_allows_valid_transitions() {
+        let cases = [
+            (IndexState::Ready, IndexState::Ready),
+            (IndexState::Ready, IndexState::Building),
+            (IndexState::Ready, IndexState::Stale),
+            (IndexState::Building, IndexState::Building),
+            (IndexState::Building, IndexState::Ready),
+            (IndexState::Building, IndexState::Stale),
+            (IndexState::Stale, IndexState::Stale),
+            (IndexState::Stale, IndexState::Building),
+        ];
+
+        for (from, to) in cases {
+            assert_eq!(from.transition_to(to).unwrap(), to, "{from:?} -> {to:?}");
+        }
+    }
+
+    #[test]
+    fn index_state_rejects_invalid_transitions() {
+        let err = IndexState::Stale
+            .transition_to(IndexState::Ready)
+            .unwrap_err();
+
+        assert!(
+            matches!(err, CatalogError::InvalidSchema(message) if message.contains("invalid index state transition"))
+        );
     }
 
     #[test]
@@ -1755,9 +1852,17 @@ mod tests {
         std::env::remove_var("BARQ_VECTOR_STORE_MODE");
         let mut catalog = Catalog::new();
         let tenant = default_tenant();
-        catalog.create_collection(tenant.clone(), sample_schema()).unwrap();
+        catalog
+            .create_collection(tenant.clone(), sample_schema())
+            .unwrap();
         let collection = catalog.collection_mut(&tenant, "products").unwrap();
-        collection.insert(Document { id: DocumentId::U64(1), vector: vec![1.0, 0.0, 0.0], payload: None }).unwrap();
+        collection
+            .insert(Document {
+                id: DocumentId::U64(1),
+                vector: vec![1.0, 0.0, 0.0],
+                payload: None,
+            })
+            .unwrap();
 
         let doc = collection.get(&DocumentId::U64(1)).unwrap();
         assert_eq!(doc.vector, vec![1.0, 0.0, 0.0]);
@@ -1775,9 +1880,17 @@ mod tests {
 
         let mut catalog = Catalog::new();
         let tenant = default_tenant();
-        catalog.create_collection(tenant.clone(), sample_schema()).unwrap();
+        catalog
+            .create_collection(tenant.clone(), sample_schema())
+            .unwrap();
         let collection = catalog.collection_mut(&tenant, "products").unwrap();
-        collection.insert(Document { id: DocumentId::U64(2), vector: vec![0.0, 1.0, 0.0], payload: None }).unwrap();
+        collection
+            .insert(Document {
+                id: DocumentId::U64(2),
+                vector: vec![0.0, 1.0, 0.0],
+                payload: None,
+            })
+            .unwrap();
 
         let doc = collection.get(&DocumentId::U64(2)).unwrap();
         assert_eq!(doc.vector, vec![0.0, 1.0, 0.0]);
@@ -1798,18 +1911,36 @@ mod tests {
 
         let tenant = default_tenant();
         let mut catalog = Catalog::new();
-        catalog.create_collection(tenant.clone(), sample_schema()).unwrap();
+        catalog
+            .create_collection(tenant.clone(), sample_schema())
+            .unwrap();
         {
             let collection = catalog.collection_mut(&tenant, "products").unwrap();
-            collection.insert(Document { id: DocumentId::U64(3), vector: vec![0.0, 0.0, 1.0], payload: None }).unwrap();
+            collection
+                .insert(Document {
+                    id: DocumentId::U64(3),
+                    vector: vec![0.0, 0.0, 1.0],
+                    payload: None,
+                })
+                .unwrap();
             let r = collection.search(&[0.0, 0.0, 1.0], 1).unwrap();
             assert_eq!(r[0].id, DocumentId::U64(3));
         }
 
         let mut catalog_restarted = Catalog::new();
-        catalog_restarted.create_collection(tenant.clone(), sample_schema()).unwrap();
-        let collection = catalog_restarted.collection_mut(&tenant, "products").unwrap();
-        collection.insert(Document { id: DocumentId::U64(3), vector: vec![0.0, 0.0, 1.0], payload: None }).unwrap();
+        catalog_restarted
+            .create_collection(tenant.clone(), sample_schema())
+            .unwrap();
+        let collection = catalog_restarted
+            .collection_mut(&tenant, "products")
+            .unwrap();
+        collection
+            .insert(Document {
+                id: DocumentId::U64(3),
+                vector: vec![0.0, 0.0, 1.0],
+                payload: None,
+            })
+            .unwrap();
         let r = collection.search(&[0.0, 0.0, 1.0], 1).unwrap();
         assert_eq!(r[0].id, DocumentId::U64(3));
 
@@ -1826,14 +1957,24 @@ mod tests {
 
         let tenant = default_tenant();
         let mut catalog = Catalog::new();
-        catalog.create_collection(tenant.clone(), sample_schema()).unwrap();
+        catalog
+            .create_collection(tenant.clone(), sample_schema())
+            .unwrap();
         {
             let collection = catalog.collection_mut(&tenant, "products").unwrap();
-            collection.insert(Document { id: DocumentId::U64(7), vector: vec![0.3, 0.4, 0.5], payload: None }).unwrap();
+            collection
+                .insert(Document {
+                    id: DocumentId::U64(7),
+                    vector: vec![0.3, 0.4, 0.5],
+                    payload: None,
+                })
+                .unwrap();
         }
 
         let mut restarted = Catalog::new();
-        restarted.create_collection(tenant.clone(), sample_schema()).unwrap();
+        restarted
+            .create_collection(tenant.clone(), sample_schema())
+            .unwrap();
         let collection = restarted.collection(&tenant, "products").unwrap();
         let r = collection.search(&[0.3, 0.4, 0.5], 1).unwrap();
         assert_eq!(r[0].id, DocumentId::U64(7));
@@ -1856,13 +1997,30 @@ mod tests {
 
         catalog.create_collection(tenant.clone(), schema_a).unwrap();
         catalog.create_collection(tenant.clone(), schema_b).unwrap();
-        catalog.collection_mut(&tenant, "products_a").unwrap().insert(Document { id: DocumentId::U64(1), vector: vec![1.0, 0.0, 0.0], payload: None }).unwrap();
-        catalog.collection_mut(&tenant, "products_b").unwrap().insert(Document { id: DocumentId::U64(2), vector: vec![0.0, 1.0, 0.0], payload: None }).unwrap();
+        catalog
+            .collection_mut(&tenant, "products_a")
+            .unwrap()
+            .insert(Document {
+                id: DocumentId::U64(1),
+                vector: vec![1.0, 0.0, 0.0],
+                payload: None,
+            })
+            .unwrap();
+        catalog
+            .collection_mut(&tenant, "products_b")
+            .unwrap()
+            .insert(Document {
+                id: DocumentId::U64(2),
+                vector: vec![0.0, 1.0, 0.0],
+                payload: None,
+            })
+            .unwrap();
 
-        assert!(catalog.total_resident_vector_memory_bytes(&tenant) >= 2 * 3 * std::mem::size_of::<f32>());
+        assert!(
+            catalog.total_resident_vector_memory_bytes(&tenant)
+                >= 2 * 3 * std::mem::size_of::<f32>()
+        );
     }
-
-
 }
 
 fn evaluate_filter(filter: &Filter, payload: Option<&PayloadValue>) -> bool {
@@ -1968,7 +2126,4 @@ fn compare_values(lhs: &PayloadValue, rhs: &PayloadValue, desired: Ordering) -> 
         }
         _ => false,
     }
-
 }
-
-
