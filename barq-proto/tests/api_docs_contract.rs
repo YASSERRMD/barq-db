@@ -22,6 +22,12 @@ fn canonical_proto_is_documented_across_docs_and_sdks() {
             &[
                 "Barq v2",
                 "database engine release line",
+                "production-focused retrieval architecture",
+                "No Breaking Changes",
+                "Disk-backed vector storage",
+                "Async ingestion",
+                "gRPC-first architecture",
+                "does **not** claim full consensus or Raft",
                 "Phase 1",
                 "Phase 8",
                 "proto/barq.proto",

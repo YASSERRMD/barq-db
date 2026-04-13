@@ -22,21 +22,99 @@ Barq is a **high-performance vector database** built in Rust, designed for seman
 
 Barq v2 is the current database engine release line documented in this repository.
 
-- gRPC is the primary external contract via `proto/barq.proto`.
-- SDKs are aligned to that gRPC contract first, with HTTP kept as a compatibility surface.
-- Observability and admin capabilities now ship through the canonical API surface.
-- Benchmark tooling is available through `barq-bench` and documented under [Performance Benchmarks](./docs/src/reference/performance.md).
+### Overview
 
-## Barq v2 Main Delivery Phases
+Barq-DB v2 introduces a production-focused retrieval architecture with improved memory control, ingestion stability, and hybrid search capabilities.
 
-1. Phase 1: Vector store foundation, mmap-backed persistence, memory budgeting, and restart hydration.
+Barq-DB v2 focuses on building a stable retrieval foundation with improved ingestion, memory management, and hybrid search capabilities.
+
+### Top 5 Highlights
+
+1. **Memory Control**: Disk-backed vector storage, memory budgeting, and eviction reduce full RAM pressure on larger datasets.
+2. **Async Ingestion**: Queued, batched ingestion with explicit backpressure keeps writes from directly blocking the query path.
+3. **Segment Lifecycle**: Growing, sealed, and compacted segment states improve long-running stability and compaction control.
+4. **Hybrid Retrieval**: Vector search and BM25 text retrieval now run through a more explicit weighted-fusion path.
+5. **gRPC-First API**: `proto/barq.proto` is now the primary external contract, with SDKs aligned to it and REST kept for compatibility.
+
+### Key Improvements
+
+#### 1. Storage & Memory
+
+- Disk-backed vector storage with mmap support
+- Memory budget and eviction control
+- Reduced RAM pressure for large datasets
+
+#### 2. Data Lifecycle
+
+- Segment lifecycle management: `Growing -> Sealed -> Compacted`
+- Background compaction support
+- Improved restart recovery and long-running stability
+
+#### 3. Ingestion Pipeline
+
+- Async ingestion queue with batching
+- Explicit backpressure policies
+- Better stability under sustained write load
+
+#### 4. Query & Retrieval
+
+- Improved hybrid retrieval with vector + BM25 weighted fusion
+- Query fallback when indexes are not ready
+- More explicit planning and deterministic merge behavior
+
+#### 5. Observability
+
+- Metrics for ingestion, memory, WAL, segments, compaction, indexing, and query latency
+- Ingestion lag visibility
+- Admin metrics surface and cluster/segment status APIs
+
+#### 6. Distributed Layer
+
+- Sharding and routing behavior are improved
+- Replication behavior is reported explicitly and honestly
+- Routed replication is supported today; this release does **not** claim full consensus or Raft
+- The current cluster layer is a foundation for stronger consensus semantics, not a complete consensus system
+
+#### 7. Benchmarking
+
+- Built-in benchmarking tool through `barq-bench`
+- Stress-test style benchmark scripts for large dataset runs
+- Reproducible simulation entrypoints documented under [Performance Benchmarks](./docs/src/reference/performance.md)
+
+#### 8. API & SDK
+
+- gRPC-first architecture via `proto/barq.proto`
+- REST compatibility maintained for existing integrations
+- Updated SDK support across Python, TypeScript, Go, and Rust
+
+### SDK Changes
+
+#### No Breaking Changes
+
+Existing SDK methods remain unchanged and compatible with current integrations.
+
+#### New Capabilities
+
+- `InsertOptions` with `wait_for_commit`
+- `SearchOptions` with `consistency` and `allow_fallback`
+- Native gRPC client support across Python, TypeScript, Go, and Rust
+- Async ingestion support through gRPC
+- Admin and observability APIs for metrics, cluster status, and segment info
+
+### Main Delivery Phases
+
+1. Phase 1: Vector store foundation, mmap-backed persistence, memory budgeting, restart hydration, and compaction-oriented vector-store hardening.
 2. Phase 2: Segment lifecycle, sealing, compaction behavior, persisted lifecycle replay, and lifecycle stress coverage.
 3. Phase 3: Deterministic benchmark tooling through `barq-bench`.
 4. Phase 4: Async ingestion pipeline with queueing, batching, backpressure, and ingestion metrics.
 5. Phase 5: Production-oriented index lifecycle with `Building`, `Ready`, and `Stale` states.
 6. Phase 6: Honest cluster capability reporting and explicit durability semantics instead of inaccurate consensus claims.
-7. Phase 7: Query planning improvements, explicit hybrid execution, and deterministic merge behavior.
+7. Phase 7: Query planning improvements, explicit hybrid execution, fallback behavior, and deterministic merge behavior.
 8. Phase 8: Production-grade observability for ingestion, storage, indexing, query latency, and admin metrics surfaces.
+
+### Reality Check
+
+Barq-DB v2 is architecturally stronger and materially more complete than the earlier line, but it still needs continued real-world validation under production workloads.
 
 ## Key Features
 
