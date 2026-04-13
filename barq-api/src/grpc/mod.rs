@@ -1,17 +1,17 @@
 pub mod compat;
 
-use crate::{ApiError, ApiPermission, AppState};
+use crate::{ApiError, ApiPermission, AppState, ReadPreference};
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use barq_core::{
     CatalogError, CollectionSchema, DistanceMetric, Document, DocumentId, FieldSchema, FieldType,
-    Filter, PayloadValue, TenantId,
+    Filter, IndexState, PayloadValue, TenantId,
 };
 use barq_proto::barq::barq_server::Barq;
 use barq_proto::barq::{
-    BatchSearchRequest, BatchSearchResponse, CreateCollectionRequest, CreateCollectionResponse,
-    HealthRequest, HealthResponse, InsertDocumentRequest, InsertDocumentResponse, InsertRequest,
-    InsertResponse, QueryResults, SearchRequest, SearchResponse, SearchResult, StatusRequest,
-    StatusResponse,
+    BatchSearchRequest, BatchSearchResponse, Consistency, CreateCollectionRequest,
+    CreateCollectionResponse, HealthRequest, HealthResponse, InsertDocumentRequest,
+    InsertDocumentResponse, InsertOptions, InsertRequest, InsertResponse, QueryResults,
+    SearchOptions, SearchRequest, SearchResponse, SearchResult, StatusRequest, StatusResponse,
 };
 use barq_storage::StorageError;
 use tonic::metadata::MetadataMap;
@@ -82,6 +82,7 @@ impl GrpcService {
         id: String,
         vector: Vec<f32>,
         payload_json: String,
+        wait_for_commit: bool,
     ) -> Result<InsertResponse, Status> {
         Self::require_non_empty(&collection, "collection")?;
         Self::require_non_empty(&id, "id")?;
@@ -99,7 +100,7 @@ impl GrpcService {
             .ensure_primary_for_document(&tenant, &document.id)
             .map_err(api_error_to_status)?;
         self.state
-            .enqueue_insert_for_tenant(&tenant, &collection, document, false)
+            .enqueue_insert_for_tenant(&tenant, &collection, document, false, wait_for_commit)
             .await
             .map_err(api_error_to_status)?;
 
@@ -119,11 +120,22 @@ impl GrpcService {
             return Err(Status::invalid_argument("top_k must be positive"));
         }
 
-        self.state
-            .ensure_local_for_tenant(&tenant)
+        apply_search_consistency(&self.state, &tenant, request.options.as_ref())
             .map_err(api_error_to_status)?;
-
         let mut storage = self.state.storage.lock().await;
+        if !allow_fallback(request.options.as_ref()) {
+            let collection = storage
+                .catalog()
+                .collection(&tenant, &request.collection)
+                .map_err(StorageError::Catalog)
+                .map_err(storage_error_to_status)?;
+            if collection.index_state() != IndexState::Ready {
+                return Err(Status::failed_precondition(format!(
+                    "vector index for collection {} is not ready; allow_fallback=false",
+                    request.collection
+                )));
+            }
+        }
         let results = storage
             .search_for_tenant(
                 &tenant,
@@ -148,6 +160,54 @@ impl GrpcService {
                 .collect(),
         })
     }
+}
+
+fn wait_for_commit(options: Option<&InsertOptions>) -> bool {
+    options.map_or(true, |options| options.wait_for_commit)
+}
+
+fn allow_fallback(options: Option<&SearchOptions>) -> bool {
+    options.map_or(true, |options| options.allow_fallback)
+}
+
+fn apply_search_consistency(
+    state: &AppState,
+    tenant: &TenantId,
+    options: Option<&SearchOptions>,
+) -> Result<(), ApiError> {
+    match search_consistency(options)? {
+        SearchConsistency::Default | SearchConsistency::Any => state.ensure_local_for_tenant(tenant),
+        SearchConsistency::Primary => {
+            state.ensure_read_target_for_tenant(tenant, ReadPreference::Primary)
+        }
+        SearchConsistency::Followers => {
+            state.ensure_read_target_for_tenant(tenant, ReadPreference::Followers)
+        }
+    }
+}
+
+fn search_consistency(options: Option<&SearchOptions>) -> Result<SearchConsistency, ApiError> {
+    let Some(options) = options else {
+        return Ok(SearchConsistency::Default);
+    };
+
+    let consistency = Consistency::try_from(options.consistency).map_err(|_| {
+        ApiError::BadRequest(format!("invalid consistency value: {}", options.consistency))
+    })?;
+
+    Ok(match consistency {
+        Consistency::Unspecified => SearchConsistency::Default,
+        Consistency::Primary => SearchConsistency::Primary,
+        Consistency::Followers => SearchConsistency::Followers,
+        Consistency::Any => SearchConsistency::Any,
+    })
+}
+
+enum SearchConsistency {
+    Default,
+    Primary,
+    Followers,
+    Any,
 }
 
 fn metadata_to_headers(metadata: &MetadataMap) -> Result<HeaderMap, Status> {
@@ -256,6 +316,7 @@ impl Barq for GrpcService {
         request: Request<InsertRequest>,
     ) -> Result<Response<InsertResponse>, Status> {
         let tenant = self.authenticate(request.metadata(), ApiPermission::Write)?;
+        let wait_for_commit = wait_for_commit(request.get_ref().options.as_ref());
         let response = self
             .insert_internal(
                 tenant,
@@ -263,6 +324,7 @@ impl Barq for GrpcService {
                 request.get_ref().id.clone(),
                 request.get_ref().vector.clone(),
                 request.get_ref().payload_json.clone(),
+                wait_for_commit,
             )
             .await?;
         Ok(Response::new(response))
@@ -315,7 +377,7 @@ impl Barq for GrpcService {
         let tenant = self.authenticate(request.metadata(), ApiPermission::Write)?;
         let req = request.into_inner();
         let response = self
-            .insert_internal(tenant, req.collection, req.id, req.vector, req.payload_json)
+            .insert_internal(tenant, req.collection, req.id, req.vector, req.payload_json, true)
             .await?;
         Ok(Response::new(InsertDocumentResponse {
             success: response.success,
@@ -389,6 +451,8 @@ impl Barq for GrpcService {
 mod tests {
     use super::*;
     use crate::{ApiAuth, ClusterConfig, ClusterRouter};
+    use barq_cluster::{NodeConfig, NodeId, ShardId, ShardPlacement};
+    use std::collections::HashMap;
     use tonic::Code;
 
     fn grpc_service() -> (tempfile::TempDir, AppState, GrpcService) {
@@ -399,6 +463,71 @@ mod tests {
             ApiAuth::new(),
             ClusterRouter::from_config(ClusterConfig::single_node()).unwrap(),
         );
+        let service = GrpcService::new(state.clone());
+        (dir, state, service)
+    }
+
+    fn follower_grpc_service() -> (tempfile::TempDir, AppState, GrpcService) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut storage = barq_storage::Storage::open(dir.path()).unwrap();
+        storage
+            .create_collection_for_tenant(
+                TenantId::default(),
+                CollectionSchema {
+                    name: "docs".to_string(),
+                    fields: vec![FieldSchema {
+                        name: "vector".to_string(),
+                        field_type: FieldType::Vector {
+                            dimension: 2,
+                            metric: DistanceMetric::Cosine,
+                            index: None,
+                        },
+                        required: true,
+                    }],
+                    bm25_config: None,
+                    tenant_id: TenantId::default(),
+                },
+            )
+            .unwrap();
+        storage
+            .insert_for_tenant(
+                &TenantId::default(),
+                "docs",
+                Document {
+                    id: DocumentId::Str("doc-1".to_string()),
+                    vector: vec![1.0, 0.0],
+                    payload: None,
+                },
+                false,
+            )
+            .unwrap();
+
+        let config = ClusterConfig {
+            node_id: NodeId::new("node-1"),
+            nodes: vec![
+                NodeConfig {
+                    id: NodeId::new("node-0"),
+                    address: "http://node-0:50051".to_string(),
+                },
+                NodeConfig {
+                    id: NodeId::new("node-1"),
+                    address: "http://node-1:50051".to_string(),
+                },
+            ],
+            shard_count: 1,
+            replication_factor: 2,
+            read_preference: ReadPreference::Primary,
+            placements: HashMap::from([(
+                ShardId(0),
+                ShardPlacement {
+                    shard: ShardId(0),
+                    primary: NodeId::new("node-0"),
+                    replicas: vec![NodeId::new("node-1")],
+                },
+            )]),
+        };
+
+        let state = AppState::new(storage, ApiAuth::new(), ClusterRouter::from_config(config).unwrap());
         let service = GrpcService::new(state.clone());
         (dir, state, service)
     }
@@ -505,5 +634,196 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(invalid_search.code(), Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn insert_wait_for_commit_false_returns_after_queue_admission() {
+        let (_dir, state, service) = grpc_service();
+        create_collection(&service, "docs").await;
+        let hook = state.ingestion.install_pause_before_dequeue();
+
+        let response = service
+            .insert(Request::new(InsertRequest {
+                collection: "docs".to_string(),
+                id: "doc-async".to_string(),
+                vector: vec![1.0, 0.0],
+                payload_json: "{}".to_string(),
+                options: Some(InsertOptions {
+                    wait_for_commit: false,
+                }),
+            }))
+            .await
+            .unwrap();
+        assert!(response.into_inner().success);
+
+        hook.wait_until_reached().await;
+        assert_eq!(state.ingestion.queue_len(), 1);
+        let document = state
+            .storage
+            .lock()
+            .await
+            .get_document(
+                &TenantId::default(),
+                "docs",
+                &DocumentId::Str("doc-async".to_string()),
+            )
+            .unwrap();
+        assert!(document.is_none());
+
+        hook.release();
+        state.ingestion.drain().await;
+        let document = state
+            .storage
+            .lock()
+            .await
+            .get_document(
+                &TenantId::default(),
+                "docs",
+                &DocumentId::Str("doc-async".to_string()),
+            )
+            .unwrap();
+        assert!(document.is_some());
+    }
+
+    #[tokio::test]
+    async fn insert_wait_for_commit_defaults_to_existing_behavior() {
+        let (_dir, state, service) = grpc_service();
+        create_collection(&service, "docs").await;
+        let hook = state.ingestion.install_pause_before_dequeue();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let insert_service = service;
+        tokio::spawn(async move {
+            let response = insert_service
+                .insert(Request::new(InsertRequest {
+                    collection: "docs".to_string(),
+                    id: "doc-sync".to_string(),
+                    vector: vec![1.0, 0.0],
+                    payload_json: "{}".to_string(),
+                    options: None,
+                }))
+                .await;
+            tx.send(response.map(|response| response.into_inner().success))
+                .unwrap();
+        });
+
+        hook.wait_until_reached().await;
+        assert!(rx.try_recv().is_err());
+
+        hook.release();
+        let completed = rx.recv().await.expect("insert should complete");
+        assert!(completed.unwrap());
+
+        let document = state
+            .storage
+            .lock()
+            .await
+            .get_document(
+                &TenantId::default(),
+                "docs",
+                &DocumentId::Str("doc-sync".to_string()),
+            )
+            .unwrap();
+        assert!(document.is_some());
+    }
+
+    #[tokio::test]
+    async fn search_allow_fallback_false_rejects_non_ready_index() {
+        let (_dir, state, service) = grpc_service();
+        create_collection(&service, "docs").await;
+        service
+            .insert(Request::new(InsertRequest {
+                collection: "docs".to_string(),
+                id: "doc-1".to_string(),
+                vector: vec![1.0, 0.0],
+                payload_json: "{}".to_string(),
+                options: None,
+            }))
+            .await
+            .unwrap();
+
+        state
+            .storage
+            .lock()
+            .await
+            .seal_segment_for_tenant(&TenantId::default(), "docs")
+            .unwrap();
+
+        let err = service
+            .search(Request::new(SearchRequest {
+                collection: "docs".to_string(),
+                vector: vec![1.0, 0.0],
+                top_k: 1,
+                options: Some(SearchOptions {
+                    consistency: Consistency::Unspecified as i32,
+                    allow_fallback: false,
+                }),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Code::FailedPrecondition);
+        assert!(err.message().contains("allow_fallback=false"));
+
+        let response = service
+            .search(Request::new(SearchRequest {
+                collection: "docs".to_string(),
+                vector: vec![1.0, 0.0],
+                top_k: 1,
+                options: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].id, "doc-1");
+    }
+
+    #[tokio::test]
+    async fn search_consistency_options_route_reads_without_changing_default_behavior() {
+        let (_dir, _state, service) = follower_grpc_service();
+
+        let default_response = service
+            .search(Request::new(SearchRequest {
+                collection: "docs".to_string(),
+                vector: vec![1.0, 0.0],
+                top_k: 1,
+                options: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(default_response.results.len(), 1);
+        assert_eq!(default_response.results[0].id, "doc-1");
+
+        let primary_err = service
+            .search(Request::new(SearchRequest {
+                collection: "docs".to_string(),
+                vector: vec![1.0, 0.0],
+                top_k: 1,
+                options: Some(SearchOptions {
+                    consistency: Consistency::Primary as i32,
+                    allow_fallback: true,
+                }),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(primary_err.code(), Code::FailedPrecondition);
+        assert!(primary_err.message().contains("request must be routed to"));
+
+        let follower_response = service
+            .search(Request::new(SearchRequest {
+                collection: "docs".to_string(),
+                vector: vec![1.0, 0.0],
+                top_k: 1,
+                options: Some(SearchOptions {
+                    consistency: Consistency::Followers as i32,
+                    allow_fallback: true,
+                }),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(follower_response.results.len(), 1);
+        assert_eq!(follower_response.results[0].id, "doc-1");
     }
 }
