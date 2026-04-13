@@ -1491,6 +1491,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sdk_observability_clients_parse_metrics_and_status() {
+        let _env_lock = sdk_env_lock().lock().unwrap();
+        let (_dir, _state, service) = grpc_service();
+        create_collection(&service, "sdk-observability").await;
+        service
+            .insert(Request::new(InsertRequest {
+                collection: "sdk-observability".to_string(),
+                id: "seed-doc".to_string(),
+                vector: vec![1.0, 0.0],
+                payload_json: "{\"seed\":true}".to_string(),
+                options: None,
+            }))
+            .await
+            .unwrap();
+
+        let (addr, handle, shutdown) = start_grpc_server(service).await;
+        let grpc_addr = addr.to_string();
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let _grpc_override = EnvVarGuard::set("BARQ_GRPC_ADDR", &grpc_addr);
+
+        let rust_task = tokio::spawn(async move {
+            let client = PublicBarqClient::new("http://127.0.0.1:8080", "");
+            let metrics = client.get_metrics().await.expect("rust get metrics");
+            assert!(!metrics.definitions.is_empty());
+            assert!(
+                metrics
+                    .storage
+                    .as_ref()
+                    .expect("rust metrics storage")
+                    .total_resident_vector_memory_bytes
+                    > 0
+            );
+
+            let status = client
+                .get_cluster_status()
+                .await
+                .expect("rust get cluster status");
+            assert_eq!(status.mode, ClusterMode::SingleNode as i32);
+            assert_eq!(status.node_count, 1);
+            assert_eq!(status.shard_count, 1);
+        });
+
+        let python = spawn_command(
+            &workspace_root.join("barq-sdk-python"),
+            &[
+                ("PYTHONPATH", "."),
+                ("BARQ_BASE_URL", "http://127.0.0.1:8080"),
+                ("BARQ_GRPC_ADDR", grpc_addr.as_str()),
+            ],
+            "python3",
+            [
+                "-m",
+                "unittest",
+                "discover",
+                "-s",
+                "tests",
+                "-p",
+                "test_observability_smoke.py",
+            ],
+        )
+        .await;
+
+        let go = spawn_command(
+            &workspace_root.join("barq-sdk-go"),
+            &[
+                ("BARQ_BASE_URL", "http://127.0.0.1:8080"),
+                ("BARQ_GRPC_ADDR", grpc_addr.as_str()),
+            ],
+            "go",
+            [
+                "test",
+                "./...",
+                "-run",
+                "TestObservabilityClientReadsMetricsAndClusterStatus",
+                "-count=1",
+            ],
+        )
+        .await;
+
+        let typescript_build = spawn_command(
+            &workspace_root.join("barq-sdk-ts"),
+            &[],
+            "node",
+            ["./node_modules/typescript/lib/tsc.js", "--pretty", "false"],
+        )
+        .await;
+        wait_for_success("typescript build", typescript_build).await;
+
+        let typescript = spawn_command(
+            &workspace_root.join("barq-sdk-ts"),
+            &[
+                ("BARQ_BASE_URL", "http://127.0.0.1:8080"),
+                ("BARQ_GRPC_ADDR", grpc_addr.as_str()),
+            ],
+            "node",
+            ["--test", "test/observability_smoke.test.js"],
+        )
+        .await;
+
+        rust_task.await.unwrap();
+        wait_for_success("python observability smoke", python).await;
+        wait_for_success("go observability smoke", go).await;
+        wait_for_success("typescript observability smoke", typescript).await;
+
+        shutdown.send(()).unwrap();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn get_insert_status_reports_state_transitions() {
         let (_dir, state, service) = grpc_service();
         create_collection(&service, "docs").await;

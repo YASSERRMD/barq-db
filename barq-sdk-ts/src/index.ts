@@ -174,6 +174,16 @@ export class BarqClient {
         });
     }
 
+    async getMetrics(): Promise<any> {
+        ensureSupportedApiVersion();
+        return this.grpc().getMetrics();
+    }
+
+    async getClusterStatus(): Promise<any> {
+        ensureSupportedApiVersion();
+        return this.grpc().getClusterStatus();
+    }
+
     collection(name: string) {
         return new Collection(this, name);
     }
@@ -296,6 +306,24 @@ export class GrpcClient {
 
     health(): Promise<boolean> {
         return this.status();
+    }
+
+    getMetrics(): Promise<any> {
+        return new Promise((resolve, reject) => {
+            this.client.getMetrics({}, this.metadata, (err, response) => {
+                if (err) return reject(err);
+                resolve(response ?? {});
+            });
+        });
+    }
+
+    getClusterStatus(): Promise<any> {
+        return new Promise((resolve, reject) => {
+            this.client.getClusterStatus({}, this.metadata, (err, response) => {
+                if (err) return reject(err);
+                resolve(response ?? {});
+            });
+        });
     }
 
     createCollection(name: string, dimension: number, metric: string = "L2"): Promise<void> {

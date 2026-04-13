@@ -191,6 +191,30 @@ func (c *Client) GetInsertStatus(ctx context.Context, requestID string) (InsertS
 	return grpcClient.GetInsertStatus(ctx, requestID)
 }
 
+func (c *Client) GetMetrics(ctx context.Context) (*pb.GetMetricsResponse, error) {
+	if err := requireSupportedAPIVersion(); err != nil {
+		return nil, err
+	}
+	grpcClient, err := NewGrpcClientWithAPIKey(c.grpcTarget(), c.config.APIKey)
+	if err != nil {
+		return nil, err
+	}
+	defer grpcClient.Close()
+	return grpcClient.GetMetrics(ctx)
+}
+
+func (c *Client) GetClusterStatus(ctx context.Context) (*pb.GetClusterStatusResponse, error) {
+	if err := requireSupportedAPIVersion(); err != nil {
+		return nil, err
+	}
+	grpcClient, err := NewGrpcClientWithAPIKey(c.grpcTarget(), c.config.APIKey)
+	if err != nil {
+		return nil, err
+	}
+	defer grpcClient.Close()
+	return grpcClient.GetClusterStatus(ctx)
+}
+
 type SearchRequest struct {
 	Vector  []float32      `json:"vector,omitempty"`
 	Query   string         `json:"query,omitempty"`
@@ -352,6 +376,14 @@ func (c *GrpcClient) GetInsertStatus(ctx context.Context, requestID string) (Ins
 		State:        insertStateFromProto(resp.State),
 		ErrorMessage: resp.ErrorMessage,
 	}, nil
+}
+
+func (c *GrpcClient) GetMetrics(ctx context.Context) (*pb.GetMetricsResponse, error) {
+	return c.client.GetMetrics(c.authContext(ctx), &pb.GetMetricsRequest{})
+}
+
+func (c *GrpcClient) GetClusterStatus(ctx context.Context) (*pb.GetClusterStatusResponse, error) {
+	return c.client.GetClusterStatus(c.authContext(ctx), &pb.GetClusterStatusRequest{})
 }
 
 func (c *GrpcClient) InsertWithOptions(ctx context.Context, collection string, id interface{}, vector []float32, payload interface{}, options *InsertOptions) error {

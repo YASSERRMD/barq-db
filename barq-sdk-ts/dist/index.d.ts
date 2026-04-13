@@ -39,6 +39,8 @@ export declare class BarqClient {
     private request;
     health(): Promise<boolean>;
     createCollection(req: CreateCollectionRequest): Promise<void>;
+    getMetrics(): Promise<any>;
+    getClusterStatus(): Promise<any>;
     collection(name: string): Collection;
     grpc(): GrpcClient;
 }
@@ -57,6 +59,8 @@ export declare class GrpcClient {
     constructor(address: string, protoPath?: string, apiKey?: string, tenantId?: string);
     status(): Promise<boolean>;
     health(): Promise<boolean>;
+    getMetrics(): Promise<any>;
+    getClusterStatus(): Promise<any>;
     createCollection(name: string, dimension: number, metric?: string): Promise<void>;
     insert(collection: string, id: string | number, vector: number[], payload?: any, options?: InsertOptions): Promise<void>;
     insertAsync(collection: string, id: string | number, vector: number[], payload?: any, options?: InsertOptions): Promise<string>;

@@ -64,6 +64,21 @@ class BarqStub(object):
                 request_serializer=barq__pb2.SearchRequest.SerializeToString,
                 response_deserializer=barq__pb2.SearchResponse.FromString,
                 _registered_method=True)
+        self.GetMetrics = channel.unary_unary(
+                '/barq.Barq/GetMetrics',
+                request_serializer=barq__pb2.GetMetricsRequest.SerializeToString,
+                response_deserializer=barq__pb2.GetMetricsResponse.FromString,
+                _registered_method=True)
+        self.GetClusterStatus = channel.unary_unary(
+                '/barq.Barq/GetClusterStatus',
+                request_serializer=barq__pb2.GetClusterStatusRequest.SerializeToString,
+                response_deserializer=barq__pb2.GetClusterStatusResponse.FromString,
+                _registered_method=True)
+        self.GetSegmentInfo = channel.unary_unary(
+                '/barq.Barq/GetSegmentInfo',
+                request_serializer=barq__pb2.GetSegmentInfoRequest.SerializeToString,
+                response_deserializer=barq__pb2.GetSegmentInfoResponse.FromString,
+                _registered_method=True)
         self.Health = channel.unary_unary(
                 '/barq.Barq/Health',
                 request_serializer=barq__pb2.HealthRequest.SerializeToString,
@@ -120,6 +135,24 @@ class BarqServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetMetrics(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetClusterStatus(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetSegmentInfo(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def Health(self, request, context):
         """Legacy RPCs kept temporarily while SDKs migrate to the canonical contract.
         """
@@ -171,6 +204,21 @@ def add_BarqServicer_to_server(servicer, server):
                     servicer.Search,
                     request_deserializer=barq__pb2.SearchRequest.FromString,
                     response_serializer=barq__pb2.SearchResponse.SerializeToString,
+            ),
+            'GetMetrics': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetMetrics,
+                    request_deserializer=barq__pb2.GetMetricsRequest.FromString,
+                    response_serializer=barq__pb2.GetMetricsResponse.SerializeToString,
+            ),
+            'GetClusterStatus': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetClusterStatus,
+                    request_deserializer=barq__pb2.GetClusterStatusRequest.FromString,
+                    response_serializer=barq__pb2.GetClusterStatusResponse.SerializeToString,
+            ),
+            'GetSegmentInfo': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetSegmentInfo,
+                    request_deserializer=barq__pb2.GetSegmentInfoRequest.FromString,
+                    response_serializer=barq__pb2.GetSegmentInfoResponse.SerializeToString,
             ),
             'Health': grpc.unary_unary_rpc_method_handler(
                     servicer.Health,
@@ -350,6 +398,87 @@ class Barq(object):
             '/barq.Barq/Search',
             barq__pb2.SearchRequest.SerializeToString,
             barq__pb2.SearchResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetMetrics(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/barq.Barq/GetMetrics',
+            barq__pb2.GetMetricsRequest.SerializeToString,
+            barq__pb2.GetMetricsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetClusterStatus(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/barq.Barq/GetClusterStatus',
+            barq__pb2.GetClusterStatusRequest.SerializeToString,
+            barq__pb2.GetClusterStatusResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetSegmentInfo(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/barq.Barq/GetSegmentInfo',
+            barq__pb2.GetSegmentInfoRequest.SerializeToString,
+            barq__pb2.GetSegmentInfoResponse.FromString,
             options,
             channel_credentials,
             insecure,

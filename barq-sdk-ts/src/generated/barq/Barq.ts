@@ -6,8 +6,14 @@ import type { BatchSearchRequest as _barq_BatchSearchRequest, BatchSearchRequest
 import type { BatchSearchResponse as _barq_BatchSearchResponse, BatchSearchResponse__Output as _barq_BatchSearchResponse__Output } from '../barq/BatchSearchResponse';
 import type { CreateCollectionRequest as _barq_CreateCollectionRequest, CreateCollectionRequest__Output as _barq_CreateCollectionRequest__Output } from '../barq/CreateCollectionRequest';
 import type { CreateCollectionResponse as _barq_CreateCollectionResponse, CreateCollectionResponse__Output as _barq_CreateCollectionResponse__Output } from '../barq/CreateCollectionResponse';
+import type { GetClusterStatusRequest as _barq_GetClusterStatusRequest, GetClusterStatusRequest__Output as _barq_GetClusterStatusRequest__Output } from '../barq/GetClusterStatusRequest';
+import type { GetClusterStatusResponse as _barq_GetClusterStatusResponse, GetClusterStatusResponse__Output as _barq_GetClusterStatusResponse__Output } from '../barq/GetClusterStatusResponse';
 import type { GetInsertStatusRequest as _barq_GetInsertStatusRequest, GetInsertStatusRequest__Output as _barq_GetInsertStatusRequest__Output } from '../barq/GetInsertStatusRequest';
 import type { GetInsertStatusResponse as _barq_GetInsertStatusResponse, GetInsertStatusResponse__Output as _barq_GetInsertStatusResponse__Output } from '../barq/GetInsertStatusResponse';
+import type { GetMetricsRequest as _barq_GetMetricsRequest, GetMetricsRequest__Output as _barq_GetMetricsRequest__Output } from '../barq/GetMetricsRequest';
+import type { GetMetricsResponse as _barq_GetMetricsResponse, GetMetricsResponse__Output as _barq_GetMetricsResponse__Output } from '../barq/GetMetricsResponse';
+import type { GetSegmentInfoRequest as _barq_GetSegmentInfoRequest, GetSegmentInfoRequest__Output as _barq_GetSegmentInfoRequest__Output } from '../barq/GetSegmentInfoRequest';
+import type { GetSegmentInfoResponse as _barq_GetSegmentInfoResponse, GetSegmentInfoResponse__Output as _barq_GetSegmentInfoResponse__Output } from '../barq/GetSegmentInfoResponse';
 import type { HealthRequest as _barq_HealthRequest, HealthRequest__Output as _barq_HealthRequest__Output } from '../barq/HealthRequest';
 import type { HealthResponse as _barq_HealthResponse, HealthResponse__Output as _barq_HealthResponse__Output } from '../barq/HealthResponse';
 import type { InsertAsyncResponse as _barq_InsertAsyncResponse, InsertAsyncResponse__Output as _barq_InsertAsyncResponse__Output } from '../barq/InsertAsyncResponse';
@@ -39,6 +45,15 @@ export interface BarqClient extends grpc.Client {
   createCollection(argument: _barq_CreateCollectionRequest, options: grpc.CallOptions, callback: grpc.requestCallback<_barq_CreateCollectionResponse__Output>): grpc.ClientUnaryCall;
   createCollection(argument: _barq_CreateCollectionRequest, callback: grpc.requestCallback<_barq_CreateCollectionResponse__Output>): grpc.ClientUnaryCall;
   
+  GetClusterStatus(argument: _barq_GetClusterStatusRequest, metadata: grpc.Metadata, options: grpc.CallOptions, callback: grpc.requestCallback<_barq_GetClusterStatusResponse__Output>): grpc.ClientUnaryCall;
+  GetClusterStatus(argument: _barq_GetClusterStatusRequest, metadata: grpc.Metadata, callback: grpc.requestCallback<_barq_GetClusterStatusResponse__Output>): grpc.ClientUnaryCall;
+  GetClusterStatus(argument: _barq_GetClusterStatusRequest, options: grpc.CallOptions, callback: grpc.requestCallback<_barq_GetClusterStatusResponse__Output>): grpc.ClientUnaryCall;
+  GetClusterStatus(argument: _barq_GetClusterStatusRequest, callback: grpc.requestCallback<_barq_GetClusterStatusResponse__Output>): grpc.ClientUnaryCall;
+  getClusterStatus(argument: _barq_GetClusterStatusRequest, metadata: grpc.Metadata, options: grpc.CallOptions, callback: grpc.requestCallback<_barq_GetClusterStatusResponse__Output>): grpc.ClientUnaryCall;
+  getClusterStatus(argument: _barq_GetClusterStatusRequest, metadata: grpc.Metadata, callback: grpc.requestCallback<_barq_GetClusterStatusResponse__Output>): grpc.ClientUnaryCall;
+  getClusterStatus(argument: _barq_GetClusterStatusRequest, options: grpc.CallOptions, callback: grpc.requestCallback<_barq_GetClusterStatusResponse__Output>): grpc.ClientUnaryCall;
+  getClusterStatus(argument: _barq_GetClusterStatusRequest, callback: grpc.requestCallback<_barq_GetClusterStatusResponse__Output>): grpc.ClientUnaryCall;
+  
   GetInsertStatus(argument: _barq_GetInsertStatusRequest, metadata: grpc.Metadata, options: grpc.CallOptions, callback: grpc.requestCallback<_barq_GetInsertStatusResponse__Output>): grpc.ClientUnaryCall;
   GetInsertStatus(argument: _barq_GetInsertStatusRequest, metadata: grpc.Metadata, callback: grpc.requestCallback<_barq_GetInsertStatusResponse__Output>): grpc.ClientUnaryCall;
   GetInsertStatus(argument: _barq_GetInsertStatusRequest, options: grpc.CallOptions, callback: grpc.requestCallback<_barq_GetInsertStatusResponse__Output>): grpc.ClientUnaryCall;
@@ -47,6 +62,24 @@ export interface BarqClient extends grpc.Client {
   getInsertStatus(argument: _barq_GetInsertStatusRequest, metadata: grpc.Metadata, callback: grpc.requestCallback<_barq_GetInsertStatusResponse__Output>): grpc.ClientUnaryCall;
   getInsertStatus(argument: _barq_GetInsertStatusRequest, options: grpc.CallOptions, callback: grpc.requestCallback<_barq_GetInsertStatusResponse__Output>): grpc.ClientUnaryCall;
   getInsertStatus(argument: _barq_GetInsertStatusRequest, callback: grpc.requestCallback<_barq_GetInsertStatusResponse__Output>): grpc.ClientUnaryCall;
+  
+  GetMetrics(argument: _barq_GetMetricsRequest, metadata: grpc.Metadata, options: grpc.CallOptions, callback: grpc.requestCallback<_barq_GetMetricsResponse__Output>): grpc.ClientUnaryCall;
+  GetMetrics(argument: _barq_GetMetricsRequest, metadata: grpc.Metadata, callback: grpc.requestCallback<_barq_GetMetricsResponse__Output>): grpc.ClientUnaryCall;
+  GetMetrics(argument: _barq_GetMetricsRequest, options: grpc.CallOptions, callback: grpc.requestCallback<_barq_GetMetricsResponse__Output>): grpc.ClientUnaryCall;
+  GetMetrics(argument: _barq_GetMetricsRequest, callback: grpc.requestCallback<_barq_GetMetricsResponse__Output>): grpc.ClientUnaryCall;
+  getMetrics(argument: _barq_GetMetricsRequest, metadata: grpc.Metadata, options: grpc.CallOptions, callback: grpc.requestCallback<_barq_GetMetricsResponse__Output>): grpc.ClientUnaryCall;
+  getMetrics(argument: _barq_GetMetricsRequest, metadata: grpc.Metadata, callback: grpc.requestCallback<_barq_GetMetricsResponse__Output>): grpc.ClientUnaryCall;
+  getMetrics(argument: _barq_GetMetricsRequest, options: grpc.CallOptions, callback: grpc.requestCallback<_barq_GetMetricsResponse__Output>): grpc.ClientUnaryCall;
+  getMetrics(argument: _barq_GetMetricsRequest, callback: grpc.requestCallback<_barq_GetMetricsResponse__Output>): grpc.ClientUnaryCall;
+  
+  GetSegmentInfo(argument: _barq_GetSegmentInfoRequest, metadata: grpc.Metadata, options: grpc.CallOptions, callback: grpc.requestCallback<_barq_GetSegmentInfoResponse__Output>): grpc.ClientUnaryCall;
+  GetSegmentInfo(argument: _barq_GetSegmentInfoRequest, metadata: grpc.Metadata, callback: grpc.requestCallback<_barq_GetSegmentInfoResponse__Output>): grpc.ClientUnaryCall;
+  GetSegmentInfo(argument: _barq_GetSegmentInfoRequest, options: grpc.CallOptions, callback: grpc.requestCallback<_barq_GetSegmentInfoResponse__Output>): grpc.ClientUnaryCall;
+  GetSegmentInfo(argument: _barq_GetSegmentInfoRequest, callback: grpc.requestCallback<_barq_GetSegmentInfoResponse__Output>): grpc.ClientUnaryCall;
+  getSegmentInfo(argument: _barq_GetSegmentInfoRequest, metadata: grpc.Metadata, options: grpc.CallOptions, callback: grpc.requestCallback<_barq_GetSegmentInfoResponse__Output>): grpc.ClientUnaryCall;
+  getSegmentInfo(argument: _barq_GetSegmentInfoRequest, metadata: grpc.Metadata, callback: grpc.requestCallback<_barq_GetSegmentInfoResponse__Output>): grpc.ClientUnaryCall;
+  getSegmentInfo(argument: _barq_GetSegmentInfoRequest, options: grpc.CallOptions, callback: grpc.requestCallback<_barq_GetSegmentInfoResponse__Output>): grpc.ClientUnaryCall;
+  getSegmentInfo(argument: _barq_GetSegmentInfoRequest, callback: grpc.requestCallback<_barq_GetSegmentInfoResponse__Output>): grpc.ClientUnaryCall;
   
   Health(argument: _barq_HealthRequest, metadata: grpc.Metadata, options: grpc.CallOptions, callback: grpc.requestCallback<_barq_HealthResponse__Output>): grpc.ClientUnaryCall;
   Health(argument: _barq_HealthRequest, metadata: grpc.Metadata, callback: grpc.requestCallback<_barq_HealthResponse__Output>): grpc.ClientUnaryCall;
@@ -109,7 +142,13 @@ export interface BarqHandlers extends grpc.UntypedServiceImplementation {
   
   CreateCollection: grpc.handleUnaryCall<_barq_CreateCollectionRequest__Output, _barq_CreateCollectionResponse>;
   
+  GetClusterStatus: grpc.handleUnaryCall<_barq_GetClusterStatusRequest__Output, _barq_GetClusterStatusResponse>;
+  
   GetInsertStatus: grpc.handleUnaryCall<_barq_GetInsertStatusRequest__Output, _barq_GetInsertStatusResponse>;
+  
+  GetMetrics: grpc.handleUnaryCall<_barq_GetMetricsRequest__Output, _barq_GetMetricsResponse>;
+  
+  GetSegmentInfo: grpc.handleUnaryCall<_barq_GetSegmentInfoRequest__Output, _barq_GetSegmentInfoResponse>;
   
   Health: grpc.handleUnaryCall<_barq_HealthRequest__Output, _barq_HealthResponse>;
   
@@ -128,7 +167,10 @@ export interface BarqHandlers extends grpc.UntypedServiceImplementation {
 export interface BarqDefinition extends grpc.ServiceDefinition {
   BatchSearch: MethodDefinition<_barq_BatchSearchRequest, _barq_BatchSearchResponse, _barq_BatchSearchRequest__Output, _barq_BatchSearchResponse__Output>
   CreateCollection: MethodDefinition<_barq_CreateCollectionRequest, _barq_CreateCollectionResponse, _barq_CreateCollectionRequest__Output, _barq_CreateCollectionResponse__Output>
+  GetClusterStatus: MethodDefinition<_barq_GetClusterStatusRequest, _barq_GetClusterStatusResponse, _barq_GetClusterStatusRequest__Output, _barq_GetClusterStatusResponse__Output>
   GetInsertStatus: MethodDefinition<_barq_GetInsertStatusRequest, _barq_GetInsertStatusResponse, _barq_GetInsertStatusRequest__Output, _barq_GetInsertStatusResponse__Output>
+  GetMetrics: MethodDefinition<_barq_GetMetricsRequest, _barq_GetMetricsResponse, _barq_GetMetricsRequest__Output, _barq_GetMetricsResponse__Output>
+  GetSegmentInfo: MethodDefinition<_barq_GetSegmentInfoRequest, _barq_GetSegmentInfoResponse, _barq_GetSegmentInfoRequest__Output, _barq_GetSegmentInfoResponse__Output>
   Health: MethodDefinition<_barq_HealthRequest, _barq_HealthResponse, _barq_HealthRequest__Output, _barq_HealthResponse__Output>
   Insert: MethodDefinition<_barq_InsertRequest, _barq_InsertResponse, _barq_InsertRequest__Output, _barq_InsertResponse__Output>
   InsertAsync: MethodDefinition<_barq_InsertRequest, _barq_InsertAsyncResponse, _barq_InsertRequest__Output, _barq_InsertAsyncResponse__Output>

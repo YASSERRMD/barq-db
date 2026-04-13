@@ -131,6 +131,18 @@ class GrpcClient:
             "error_message": response.error_message or None,
         }
 
+    def get_metrics(self):
+        return self.stub.GetMetrics(
+            barq_pb2.GetMetricsRequest(),
+            metadata=self.metadata,
+        )
+
+    def get_cluster_status(self):
+        return self.stub.GetClusterStatus(
+            barq_pb2.GetClusterStatusRequest(),
+            metadata=self.metadata,
+        )
+
     def _insert_options(self, options: Optional[Dict[str, Any]]):
         if not options or "wait_for_commit" not in options:
             return None

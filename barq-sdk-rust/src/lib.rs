@@ -3,7 +3,8 @@ pub use barq_core::{
 };
 use barq_proto::barq::barq_client::BarqClient as TonicBarqClient;
 use barq_proto::barq::{
-    Consistency as ProtoConsistency, CreateCollectionRequest, GetInsertStatusRequest,
+    Consistency as ProtoConsistency, CreateCollectionRequest, GetClusterStatusRequest,
+    GetClusterStatusResponse, GetInsertStatusRequest, GetMetricsRequest, GetMetricsResponse,
     InsertOptions as ProtoInsertOptions, InsertRequest,
     InsertStatusState as ProtoInsertStatusState, SearchOptions as ProtoSearchOptions,
     SearchRequest, StatusRequest,
@@ -207,6 +208,26 @@ impl BarqClient {
                 message: "grpc status returned not ok".to_string(),
             })
         }
+    }
+
+    pub async fn get_metrics(&self) -> Result<GetMetricsResponse> {
+        ensure_supported_api_version()?;
+        let mut client = BarqGrpcClient::connect_with_api_key(
+            grpc_endpoint(&self.base_url)?,
+            self.api_key.clone(),
+        )
+        .await?;
+        client.get_metrics().await
+    }
+
+    pub async fn get_cluster_status(&self) -> Result<GetClusterStatusResponse> {
+        ensure_supported_api_version()?;
+        let mut client = BarqGrpcClient::connect_with_api_key(
+            grpc_endpoint(&self.base_url)?,
+            self.api_key.clone(),
+        )
+        .await?;
+        client.get_cluster_status().await
     }
 
     pub async fn create_collection(
@@ -754,6 +775,22 @@ impl BarqGrpcClient {
                 Some(response.error_message)
             },
         })
+    }
+
+    pub async fn get_metrics(&mut self) -> Result<GetMetricsResponse> {
+        Ok(self
+            .client
+            .get_metrics(self.request(GetMetricsRequest {})?)
+            .await?
+            .into_inner())
+    }
+
+    pub async fn get_cluster_status(&mut self) -> Result<GetClusterStatusResponse> {
+        Ok(self
+            .client
+            .get_cluster_status(self.request(GetClusterStatusRequest {})?)
+            .await?
+            .into_inner())
     }
 
     pub async fn batch_search(

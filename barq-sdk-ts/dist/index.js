@@ -151,6 +151,14 @@ class BarqClient {
             body: JSON.stringify(req),
         });
     }
+    async getMetrics() {
+        ensureSupportedApiVersion();
+        return this.grpc().getMetrics();
+    }
+    async getClusterStatus() {
+        ensureSupportedApiVersion();
+        return this.grpc().getClusterStatus();
+    }
     collection(name) {
         return new Collection(this, name);
     }
@@ -243,6 +251,24 @@ class GrpcClient {
     }
     health() {
         return this.status();
+    }
+    getMetrics() {
+        return new Promise((resolve, reject) => {
+            this.client.getMetrics({}, this.metadata, (err, response) => {
+                if (err)
+                    return reject(err);
+                resolve(response ?? {});
+            });
+        });
+    }
+    getClusterStatus() {
+        return new Promise((resolve, reject) => {
+            this.client.getClusterStatus({}, this.metadata, (err, response) => {
+                if (err)
+                    return reject(err);
+                resolve(response ?? {});
+            });
+        });
     }
     createCollection(name, dimension, metric = "L2") {
         return new Promise((resolve, reject) => {
