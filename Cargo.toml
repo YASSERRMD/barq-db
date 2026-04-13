@@ -7,7 +7,7 @@ members = [
     "barq-cluster",
     "barq-api",
     "barq-admin", "barq-sdk-rust", "barq-proto",
-    "deploy/k8s-operator",
+    "deploy/k8s-operator", "barq-bench",
 ]
 resolver = "2"
 
