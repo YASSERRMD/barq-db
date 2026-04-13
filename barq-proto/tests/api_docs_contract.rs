@@ -27,7 +27,7 @@ fn canonical_proto_is_documented_across_docs_and_sdks() {
                 "Async ingestion",
                 "Reciprocal Rank Fusion (RRF)",
                 "gRPC is the primary API surface",
-                "routed replication",
+                "Replicated multi-node deployments now route writes through per-shard Raft quorum commit",
                 "Raft leader election",
                 "proto/barq.proto",
                 "Benchmarking",

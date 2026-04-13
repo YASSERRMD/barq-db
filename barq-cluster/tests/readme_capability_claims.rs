@@ -26,15 +26,15 @@ fn readme_does_not_claim_raft_consensus() {
 fn readme_describes_routed_replication_honestly() {
     let readme = workspace_readme();
     assert!(
-        readme.contains("routed replication"),
-        "README should describe the current cluster capability honestly"
+        readme.contains("Replicated multi-node deployments now route writes through per-shard Raft quorum commit"),
+        "README should document the runtime quorum commit path"
     );
     assert!(
         readme.contains("Raft leader election"),
         "README should mention the deterministic consensus engine when it exists"
     );
     assert!(
-        readme.contains("not yet routed through that consensus engine by default"),
-        "README should keep the default runtime consistency model honest"
+        readme.contains("Single-replica multi-node deployments remain routed replication without quorum durability"),
+        "README should keep the routed-replication fallback honest"
     );
 }

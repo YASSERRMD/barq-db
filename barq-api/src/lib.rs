@@ -21,7 +21,7 @@ use barq_metrics::MetricsRegistry;
 use barq_storage::{SegmentState, Storage, StorageError, TenantQuota, TenantUsageReport};
 use ingest::{
     ingestion_metric_definitions, validate_insert_document, IngestionConfig,
-    IngestionInsertRequest, IngestionService, QueueAdmissionError,
+    IngestionApplyError, IngestionInsertRequest, IngestionService, QueueAdmissionError,
 };
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use serde::{Deserialize, Serialize};
@@ -64,7 +64,7 @@ impl AppState {
         let storage = Arc::new(Mutex::new(storage));
         let metric_registry = init_metric_registry();
         Self {
-            ingestion: IngestionService::new(storage.clone(), config),
+            ingestion: IngestionService::new(storage.clone(), cluster.clone(), config),
             storage,
             auth,
             metrics: init_metrics_recorder(),
@@ -140,6 +140,32 @@ fn search_metric_definitions() -> Vec<MetricDefinition> {
 struct AdminMetricsResponse {
     definitions: Vec<MetricDefinition>,
     storage: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+enum RuntimeWriteLogEntry {
+    CreateCollection {
+        tenant: String,
+        collection: String,
+    },
+    DropCollection {
+        tenant: String,
+        collection: String,
+    },
+    DeleteDocument {
+        tenant: String,
+        collection: String,
+        document_id: String,
+    },
+    RebuildIndex {
+        tenant: String,
+        collection: String,
+        index: Option<String>,
+    },
+    SetTenantQuota {
+        tenant: String,
+    },
 }
 
 fn execution_path_label(path: QueryExecutionPath) -> &'static str {
@@ -269,7 +295,8 @@ impl AppState {
         if wait_for_commit {
             completion
                 .await
-                .map_err(|_| ApiError::Busy("ingestion worker is unavailable".to_string()))??;
+                .map_err(|_| ApiError::Busy("ingestion worker is unavailable".to_string()))?
+                .map_err(map_ingestion_apply_error)?;
         }
         Ok(())
     }
@@ -308,10 +335,6 @@ impl AppState {
         Ok(request_id)
     }
 
-    fn ensure_primary_for_tenant(&self, tenant: &TenantId) -> Result<(), ApiError> {
-        self.map_cluster_local_result(self.cluster.ensure_primary(tenant.as_str()))
-    }
-
     fn ensure_primary_for_document(
         &self,
         tenant: &TenantId,
@@ -323,6 +346,26 @@ impl AppState {
 
     fn ensure_local_for_tenant(&self, tenant: &TenantId) -> Result<(), ApiError> {
         self.map_cluster_local_result(self.cluster.ensure_local(tenant.as_str(), None))
+    }
+
+    fn commit_tenant_write(
+        &self,
+        tenant: &TenantId,
+        entry: RuntimeWriteLogEntry,
+    ) -> Result<(), ApiError> {
+        let payload = serde_json::to_vec(&entry).expect("runtime write log should serialize");
+        self.map_cluster_local_result(self.cluster.commit_write(tenant.as_str(), payload))
+    }
+
+    fn commit_document_write(
+        &self,
+        tenant: &TenantId,
+        document: &DocumentId,
+        entry: RuntimeWriteLogEntry,
+    ) -> Result<(), ApiError> {
+        let key = format!("{}:{}", tenant.as_str(), document);
+        let payload = serde_json::to_vec(&entry).expect("runtime write log should serialize");
+        self.map_cluster_local_result(self.cluster.commit_write(&key, payload))
     }
 
     fn ensure_read_target_for_tenant(
@@ -352,6 +395,13 @@ impl AppState {
             }) => Err(ApiError::Redirect(address)),
             Err(err) => Err(ApiError::Cluster(err)),
         }
+    }
+}
+
+fn map_ingestion_apply_error(error: IngestionApplyError) -> ApiError {
+    match error {
+        IngestionApplyError::Storage(error) => ApiError::Storage(error),
+        IngestionApplyError::Cluster(error) => ApiError::Cluster(error),
     }
 }
 
@@ -794,13 +844,19 @@ async fn create_collection(
         .auth
         .authenticate(&headers, ApiPermission::TenantAdmin, None)?;
     let tenant = identity.tenant.clone();
-    state.ensure_primary_for_tenant(&tenant)?;
     let schema = CollectionSchema {
         name: payload.name.clone(),
         fields,
         bm25_config: payload.bm25_config,
         tenant_id: tenant.clone(),
     };
+    state.commit_tenant_write(
+        &tenant,
+        RuntimeWriteLogEntry::CreateCollection {
+            tenant: tenant.as_str().to_string(),
+            collection: payload.name.clone(),
+        },
+    )?;
 
     let mut storage = state.storage.lock().await;
     storage.create_collection_for_tenant(tenant, schema)?;
@@ -839,7 +895,13 @@ async fn drop_collection(
         .auth
         .authenticate(&headers, ApiPermission::TenantAdmin, None)?;
     let tenant = identity.tenant.clone();
-    state.ensure_primary_for_tenant(&tenant)?;
+    state.commit_tenant_write(
+        &tenant,
+        RuntimeWriteLogEntry::DropCollection {
+            tenant: tenant.as_str().to_string(),
+            collection: name.clone(),
+        },
+    )?;
     let mut storage = state.storage.lock().await;
     storage.drop_collection_for_tenant(&tenant, &name)?;
     audit_log(
@@ -922,7 +984,15 @@ async fn delete_document(
         .auth
         .authenticate(&headers, ApiPermission::Write, None)?;
     let tenant = identity.tenant.clone();
-    state.ensure_primary_for_document(&tenant, &document_id)?;
+    state.commit_document_write(
+        &tenant,
+        &document_id,
+        RuntimeWriteLogEntry::DeleteDocument {
+            tenant: tenant.as_str().to_string(),
+            collection: name.clone(),
+            document_id: document_id.to_string(),
+        },
+    )?;
     let mut storage = state.storage.lock().await;
     let id_for_log = document_id.clone();
     let existed = storage.delete_for_tenant(&tenant, &name, document_id)?;
@@ -994,11 +1064,18 @@ async fn rebuild_collection_index(
         .auth
         .authenticate(&headers, ApiPermission::TenantAdmin, None)?;
     let tenant = identity.tenant.clone();
-    state.ensure_primary_for_tenant(&tenant)?;
     {
         let storage = state.storage.lock().await;
         storage.collection_schema_for_tenant(&tenant, &name)?;
     }
+    state.commit_tenant_write(
+        &tenant,
+        RuntimeWriteLogEntry::RebuildIndex {
+            tenant: tenant.as_str().to_string(),
+            collection: name.clone(),
+            index: payload.index.as_ref().map(|index| format!("{index:?}")),
+        },
+    )?;
 
     let mut storage = state.storage.lock().await;
     storage.rebuild_index_for_tenant(&tenant, &name, payload.index.clone())?;
@@ -1324,7 +1401,12 @@ async fn set_tenant_quota(
         state
             .auth
             .authenticate(&headers, ApiPermission::TenantAdmin, Some(&tenant_id))?;
-    state.ensure_primary_for_tenant(&tenant_id)?;
+    state.commit_tenant_write(
+        &tenant_id,
+        RuntimeWriteLogEntry::SetTenantQuota {
+            tenant: tenant_id.as_str().to_string(),
+        },
+    )?;
     let mut storage = state.storage.lock().await;
     storage.set_tenant_quota(tenant_id, payload.into());
     audit_log(
@@ -1396,6 +1478,33 @@ mod tests {
 
     fn sample_storage(dir: &Path) -> Storage {
         Storage::open(dir).unwrap()
+    }
+
+    fn consensus_cluster_config() -> ClusterConfig {
+        ClusterConfig {
+            node_id: NodeId::new("node-0"),
+            nodes: vec![
+                NodeConfig {
+                    id: NodeId::new("node-0"),
+                    address: "http://node-0".into(),
+                },
+                NodeConfig {
+                    id: NodeId::new("node-1"),
+                    address: "http://node-1".into(),
+                },
+            ],
+            shard_count: 1,
+            replication_factor: 2,
+            read_preference: ReadPreference::Primary,
+            placements: HashMap::from([(
+                ShardId(0),
+                ShardPlacement {
+                    shard: ShardId(0),
+                    primary: NodeId::new("node-0"),
+                    replicas: vec![NodeId::new("node-1")],
+                },
+            )]),
+        }
     }
 
     fn seeded_search_storage(dir: &Path, collection: &str) -> Storage {
@@ -2026,7 +2135,7 @@ mod tests {
                 },
             ],
             shard_count: 2,
-            replication_factor: 2,
+            replication_factor: 1,
             read_preference: ReadPreference::Primary,
             placements: HashMap::new(),
         };
@@ -2050,6 +2159,35 @@ mod tests {
         );
         assert_eq!(status.node_count, 2);
         assert_eq!(status.shard_count, 2);
+
+        shutdown.send(()).unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn admin_status_reports_consensus_backed_mode() {
+        init_tracing();
+        let dir = tempfile::tempdir().unwrap();
+        let cluster = ClusterRouter::from_config(consensus_cluster_config()).unwrap();
+
+        let (addr, shutdown, handle) = start_test_server_with_cluster(dir.path(), cluster).await;
+        let client = Client::new();
+
+        let response = client
+            .get(format!("http://{}/admin/status", addr))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        let status: ClusterStatus = response.json().await.unwrap();
+        assert_eq!(status.mode, ClusterMode::ConsensusBacked);
+        assert_eq!(
+            status.write_durability,
+            barq_cluster::WriteDurability::ConsensusQuorum
+        );
+        assert_eq!(status.node_count, 2);
+        assert_eq!(status.shard_count, 1);
 
         shutdown.send(()).unwrap();
         handle.await.unwrap().unwrap();
@@ -2107,6 +2245,119 @@ mod tests {
             document.document.is_some(),
             "document should exist after ack"
         );
+
+        shutdown.send(()).unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn consensus_quorum_write_is_visible_after_ack() {
+        init_tracing();
+        let dir = tempfile::tempdir().unwrap();
+        let cluster = ClusterRouter::from_config(consensus_cluster_config()).unwrap();
+        let (addr, shutdown, handle) = start_test_server_with_cluster(dir.path(), cluster.clone()).await;
+        let client = Client::new();
+
+        let create = serde_json::json!({
+            "name": "products",
+            "dimension": 3,
+            "metric": "Cosine"
+        });
+        client
+            .post(format!("http://{}/collections", addr))
+            .json(&create)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+
+        let insert = serde_json::json!({
+            "id": 1,
+            "vector": [0.0, 1.0, 0.0],
+            "payload": {"name": "widget"}
+        });
+        let insert_response = client
+            .post(format!("http://{}/collections/products/documents", addr))
+            .json(&insert)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(insert_response.status(), StatusCode::CREATED);
+
+        let document: GetDocumentResponse = client
+            .get(format!("http://{}/collections/products/documents/1", addr))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(document.document.is_some());
+
+        let leader = cluster
+            .consensus_state(ShardId(0), &NodeId::new("node-0"))
+            .unwrap();
+        let follower = cluster
+            .consensus_state(ShardId(0), &NodeId::new("node-1"))
+            .unwrap();
+        assert!(leader.commit_index() >= 2);
+        assert!(follower.commit_index() >= 2);
+
+        shutdown.send(()).unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn consensus_quorum_loss_rejects_insert_write() {
+        init_tracing();
+        let dir = tempfile::tempdir().unwrap();
+        let tenant = TenantId::default();
+        let mut storage = sample_storage(dir.path());
+        storage
+            .create_collection_for_tenant(
+                tenant.clone(),
+                CollectionSchema {
+                    name: "products".to_string(),
+                    fields: vec![FieldSchema {
+                        name: "vector".to_string(),
+                        field_type: FieldType::Vector {
+                            dimension: 3,
+                            metric: DistanceMetric::Cosine,
+                            index: Some(IndexType::Flat),
+                        },
+                        required: true,
+                    }],
+                    bm25_config: None,
+                    tenant_id: tenant,
+                },
+            )
+            .unwrap();
+
+        let cluster = ClusterRouter::from_config(consensus_cluster_config()).unwrap();
+        cluster
+            .isolate_consensus_node(ShardId(0), &NodeId::new("node-1"))
+            .unwrap();
+        let (addr, shutdown, handle) =
+            start_test_server_with_storage_and_cluster(storage, cluster).await;
+        let client = Client::new();
+
+        let insert = serde_json::json!({
+            "id": 1,
+            "vector": [0.0, 1.0, 0.0],
+            "payload": {"name": "widget"}
+        });
+        let response = client
+            .post(format!("http://{}/collections/products/documents", addr))
+            .json(&insert)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = response.text().await.unwrap();
+        assert!(body.contains("consensus quorum was not reached"));
 
         shutdown.send(()).unwrap();
         handle.await.unwrap().unwrap();

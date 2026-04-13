@@ -566,7 +566,13 @@ impl Barq for GrpcService {
         };
 
         self.state
-            .ensure_primary_for_tenant(&tenant)
+            .commit_tenant_write(
+                &tenant,
+                crate::RuntimeWriteLogEntry::CreateCollection {
+                    tenant: tenant.as_str().to_string(),
+                    collection: req.name.clone(),
+                },
+            )
             .map_err(api_error_to_status)?;
 
         let mut storage = self.state.storage.lock().await;
@@ -868,6 +874,42 @@ mod tests {
         (dir, state, service)
     }
 
+    fn consensus_grpc_service() -> (tempfile::TempDir, AppState, GrpcService) {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = barq_storage::Storage::open(dir.path()).unwrap();
+        let config = ClusterConfig {
+            node_id: NodeId::new("node-0"),
+            nodes: vec![
+                NodeConfig {
+                    id: NodeId::new("node-0"),
+                    address: "http://node-0:50051".to_string(),
+                },
+                NodeConfig {
+                    id: NodeId::new("node-1"),
+                    address: "http://node-1:50051".to_string(),
+                },
+            ],
+            shard_count: 1,
+            replication_factor: 2,
+            read_preference: ReadPreference::Primary,
+            placements: HashMap::from([(
+                ShardId(0),
+                ShardPlacement {
+                    shard: ShardId(0),
+                    primary: NodeId::new("node-0"),
+                    replicas: vec![NodeId::new("node-1")],
+                },
+            )]),
+        };
+        let state = AppState::new(
+            storage,
+            ApiAuth::new(),
+            ClusterRouter::from_config(config).unwrap(),
+        );
+        let service = GrpcService::new(state.clone());
+        (dir, state, service)
+    }
+
     fn follower_grpc_service() -> (tempfile::TempDir, AppState, GrpcService) {
         let dir = tempfile::tempdir().unwrap();
         let mut storage = barq_storage::Storage::open(dir.path()).unwrap();
@@ -916,7 +958,7 @@ mod tests {
                 },
             ],
             shard_count: 1,
-            replication_factor: 2,
+            replication_factor: 1,
             read_preference: ReadPreference::Primary,
             placements: HashMap::from([(
                 ShardId(0),
@@ -1133,6 +1175,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn grpc_get_cluster_status_returns_consensus_mode() {
+        let (_dir, _state, service) = consensus_grpc_service();
+
+        let response = service
+            .get_cluster_status(Request::new(GetClusterStatusRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(response.mode, ClusterMode::ConsensusBacked as i32);
+        assert_eq!(
+            response.write_durability,
+            WriteDurability::ConsensusQuorum as i32
+        );
+        assert_eq!(response.node_count, 2);
+        assert_eq!(response.shard_count, 1);
+    }
+
+    #[tokio::test]
     async fn grpc_get_segment_info_returns_populated_collection_fields() {
         let (_dir, state, service) = grpc_service();
         create_collection(&service, "docs").await;
@@ -1173,6 +1234,46 @@ mod tests {
             .segment_counts
             .iter()
             .any(|count| { count.state == ProtoSegmentState::Sealed as i32 && count.count >= 1 }));
+    }
+
+    #[tokio::test]
+    async fn grpc_insert_uses_consensus_commit_path() {
+        let (_dir, state, service) = consensus_grpc_service();
+        create_collection(&service, "docs").await;
+
+        service
+            .insert(Request::new(InsertRequest {
+                collection: "docs".to_string(),
+                id: "doc-consensus".to_string(),
+                vector: vec![1.0, 0.0],
+                payload_json: "{}".to_string(),
+                options: None,
+            }))
+            .await
+            .unwrap();
+
+        let document = {
+            let storage = state.storage.lock().await;
+            storage
+                .get_document(
+                    &TenantId::default(),
+                    "docs",
+                    &DocumentId::Str("doc-consensus".to_string()),
+                )
+                .unwrap()
+        };
+        assert!(document.is_some());
+
+        let leader = state
+            .cluster
+            .consensus_state(ShardId(0), &NodeId::new("node-0"))
+            .unwrap();
+        let follower = state
+            .cluster
+            .consensus_state(ShardId(0), &NodeId::new("node-1"))
+            .unwrap();
+        assert!(leader.commit_index() >= 2);
+        assert!(follower.commit_index() >= 2);
     }
 
     #[tokio::test]

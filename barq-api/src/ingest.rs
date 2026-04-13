@@ -1,6 +1,8 @@
+use barq_cluster::ClusterRouter;
 use barq_core::{CollectionSchema, Document, FieldType, PayloadValue, TenantId};
 use barq_metrics::{MetricDefinition, MetricKind};
 use barq_storage::{Storage, StorageError};
+use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -183,6 +185,16 @@ impl std::fmt::Display for QueueAdmissionError {
 
 impl std::error::Error for QueueAdmissionError {}
 
+/// Error surfaced once a queued write is applied through consensus and storage.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum IngestionApplyError {
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+
+    #[error(transparent)]
+    Cluster(#[from] barq_cluster::ClusterError),
+}
+
 /// Lifecycle state for a tracked asynchronous insert request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TrackedInsertState {
@@ -223,7 +235,7 @@ struct PendingInsert {
     request: IngestionInsertRequest,
     request_id: Option<String>,
     enqueued_at: Instant,
-    completion: oneshot::Sender<Result<(), StorageError>>,
+    completion: oneshot::Sender<Result<(), IngestionApplyError>>,
     permit: OwnedSemaphorePermit,
 }
 
@@ -279,6 +291,7 @@ impl IngestionMetrics {
 #[derive(Debug)]
 pub(crate) struct IngestionService {
     storage: Arc<AsyncMutex<Storage>>,
+    cluster: ClusterRouter,
     queue: Mutex<IngestionQueue<PendingInsert>>,
     tracked_inserts: Mutex<HashMap<String, TrackedInsertStatus>>,
     queue_slots: Arc<Semaphore>,
@@ -304,7 +317,11 @@ pub(crate) struct IngestionService {
 
 impl IngestionService {
     /// Creates a new ingestion service backed by the provided storage engine.
-    pub(crate) fn new(storage: Arc<AsyncMutex<Storage>>, config: IngestionConfig) -> Arc<Self> {
+    pub(crate) fn new(
+        storage: Arc<AsyncMutex<Storage>>,
+        cluster: ClusterRouter,
+        config: IngestionConfig,
+    ) -> Arc<Self> {
         assert!(
             config.queue_capacity > 0,
             "ingestion queue capacity must be positive"
@@ -315,6 +332,7 @@ impl IngestionService {
         );
         Arc::new(Self {
             storage,
+            cluster,
             queue: Mutex::new(IngestionQueue::new(config.queue_capacity)),
             tracked_inserts: Mutex::new(HashMap::new()),
             queue_slots: Arc::new(Semaphore::new(config.queue_capacity)),
@@ -342,14 +360,17 @@ impl IngestionService {
     pub(crate) async fn submit(
         self: &Arc<Self>,
         request: IngestionInsertRequest,
-    ) -> Result<oneshot::Receiver<Result<(), StorageError>>, QueueAdmissionError> {
+    ) -> Result<oneshot::Receiver<Result<(), IngestionApplyError>>, QueueAdmissionError> {
         self.submit_internal(request, None).await
     }
 
     pub(crate) async fn submit_tracked(
         self: &Arc<Self>,
         request: IngestionInsertRequest,
-    ) -> Result<(String, oneshot::Receiver<Result<(), StorageError>>), QueueAdmissionError> {
+    ) -> Result<
+        (String, oneshot::Receiver<Result<(), IngestionApplyError>>),
+        QueueAdmissionError,
+    > {
         let request_id = self.allocate_request_id();
         self.update_tracked_status(&request_id, TrackedInsertState::Queued, None);
         match self
@@ -371,7 +392,7 @@ impl IngestionService {
         self: &Arc<Self>,
         request: IngestionInsertRequest,
         request_id: Option<String>,
-    ) -> Result<oneshot::Receiver<Result<(), StorageError>>, QueueAdmissionError> {
+    ) -> Result<oneshot::Receiver<Result<(), IngestionApplyError>>, QueueAdmissionError> {
         if self.shutdown_requested.load(Ordering::SeqCst) {
             return Err(QueueAdmissionError::Closed);
         }
@@ -571,12 +592,17 @@ impl IngestionService {
                 apply_hook.pause().await;
             }
             let _permit = permit;
-            let result = storage.insert_for_tenant(
-                &request.tenant,
-                &request.collection,
-                request.document,
-                request.upsert,
-            );
+            let result = self
+                .commit_insert(&request)
+                .and_then(|()| {
+                    storage.insert_for_tenant(
+                        &request.tenant,
+                        &request.collection,
+                        request.document,
+                        request.upsert,
+                    )
+                    .map_err(IngestionApplyError::from)
+                });
             match &result {
                 Ok(()) => self.metrics.record_success(),
                 Err(_) => self.metrics.record_failure(),
@@ -616,6 +642,30 @@ impl IngestionService {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn metrics_snapshot(&self) -> IngestionMetricsSnapshot {
         self.metrics.snapshot()
+    }
+
+    fn commit_insert(&self, request: &IngestionInsertRequest) -> Result<(), IngestionApplyError> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "snake_case")]
+        struct InsertCommit<'a> {
+            operation: &'static str,
+            tenant: &'a str,
+            collection: &'a str,
+            document_id: String,
+            upsert: bool,
+        }
+
+        let key = format!("{}:{}", request.tenant.as_str(), request.document.id);
+        let payload = serde_json::to_vec(&InsertCommit {
+            operation: "insert_document",
+            tenant: request.tenant.as_str(),
+            collection: &request.collection,
+            document_id: request.document.id.to_string(),
+            upsert: request.upsert,
+        })
+        .map_err(StorageError::from)?;
+        self.cluster.commit_write(&key, payload)?;
+        Ok(())
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
