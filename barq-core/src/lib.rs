@@ -145,6 +145,30 @@ impl IndexState {
     }
 }
 
+/// Immutable input required to rebuild a collection index off the main thread.
+#[derive(Debug, Clone)]
+pub struct IndexBuildSnapshot {
+    pub metric: DistanceMetric,
+    pub dimension: usize,
+    pub index_type: IndexType,
+    pub vectors: Vec<(DocumentId, Vec<f32>)>,
+}
+
+impl IndexBuildSnapshot {
+    /// Builds a fresh vector index from the captured snapshot.
+    pub fn build(&self) -> Result<Box<dyn VectorIndex>, CatalogError> {
+        let mut index = build_index(IndexConfig::new(
+            self.metric,
+            self.dimension,
+            self.index_type.clone(),
+        ));
+        for (id, vector) in &self.vectors {
+            index.insert(id.clone(), vector.clone())?;
+        }
+        Ok(index)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ValueKey {
     Bool(bool),
@@ -1052,22 +1076,41 @@ impl Collection {
         Ok(results.into_iter().find(|res| &res.id == id))
     }
 
-    pub fn rebuild_index(&mut self, index_type: Option<IndexType>) -> Result<(), CatalogError> {
-        let target = index_type.unwrap_or_else(|| self.index_type.clone());
-        let mut new_index = build_index(IndexConfig::new(
-            self.metric,
-            self.dimension,
-            target.clone(),
-        ));
-        for id in self.vector_ids.iter() {
-            if let Some(vector) = self.vector_slice(id) {
-                new_index.insert(id.clone(), vector.to_vec())?;
-            }
+    pub fn index_build_snapshot(&self, index_type: Option<IndexType>) -> IndexBuildSnapshot {
+        let mut vectors: Vec<_> = self
+            .vector_ids
+            .iter()
+            .filter_map(|id| {
+                self.vector_slice(id)
+                    .map(|vector| (id.clone(), vector.to_vec()))
+            })
+            .collect();
+        vectors.sort_by(|(left, _), (right, _)| left.cmp(right));
+        IndexBuildSnapshot {
+            metric: self.metric,
+            dimension: self.dimension,
+            index_type: index_type.unwrap_or_else(|| self.index_type.clone()),
+            vectors,
         }
-        self.index = new_index;
-        self.index_type = target.clone();
-        self.schema.set_vector_index(target);
+    }
+
+    pub fn install_rebuilt_index(
+        &mut self,
+        index_type: IndexType,
+        index: Box<dyn VectorIndex>,
+    ) -> Result<(), CatalogError> {
+        self.set_index_state(IndexState::Ready)?;
+        self.index = index;
+        self.index_type = index_type.clone();
+        self.schema.set_vector_index(index_type);
         Ok(())
+    }
+
+    pub fn rebuild_index(&mut self, index_type: Option<IndexType>) -> Result<(), CatalogError> {
+        self.set_index_state(IndexState::Building)?;
+        let snapshot = self.index_build_snapshot(index_type);
+        let index = snapshot.build()?;
+        self.install_rebuilt_index(snapshot.index_type, index)
     }
 
     pub fn schema(&self) -> &CollectionSchema {
