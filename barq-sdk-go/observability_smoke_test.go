@@ -38,4 +38,16 @@ func TestObservabilityClientReadsMetricsAndClusterStatus(t *testing.T) {
 	if status.ShardCount != 1 {
 		t.Fatalf("unexpected shard count %d", status.ShardCount)
 	}
+
+	collection := getenv("BARQ_TEST_COLLECTION", "sdk-observability")
+	segmentInfo, err := client.GetSegmentInfo(context.Background(), collection)
+	if err != nil {
+		t.Fatalf("get segment info: %v", err)
+	}
+	if len(segmentInfo.Collections) != 1 {
+		t.Fatalf("unexpected segment collection count %d", len(segmentInfo.Collections))
+	}
+	if segmentInfo.Collections[0].Collection != collection {
+		t.Fatalf("unexpected segment collection %q", segmentInfo.Collections[0].Collection)
+	}
 }

@@ -5,9 +5,9 @@ use barq_proto::barq::barq_client::BarqClient as TonicBarqClient;
 use barq_proto::barq::{
     Consistency as ProtoConsistency, CreateCollectionRequest, GetClusterStatusRequest,
     GetClusterStatusResponse, GetInsertStatusRequest, GetMetricsRequest, GetMetricsResponse,
-    InsertOptions as ProtoInsertOptions, InsertRequest,
-    InsertStatusState as ProtoInsertStatusState, SearchOptions as ProtoSearchOptions,
-    SearchRequest, StatusRequest,
+    GetSegmentInfoRequest, GetSegmentInfoResponse, InsertOptions as ProtoInsertOptions,
+    InsertRequest, InsertStatusState as ProtoInsertStatusState,
+    SearchOptions as ProtoSearchOptions, SearchRequest, StatusRequest,
 };
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -228,6 +228,19 @@ impl BarqClient {
         )
         .await?;
         client.get_cluster_status().await
+    }
+
+    pub async fn get_segment_info(
+        &self,
+        collection: Option<&str>,
+    ) -> Result<GetSegmentInfoResponse> {
+        ensure_supported_api_version()?;
+        let mut client = BarqGrpcClient::connect_with_api_key(
+            grpc_endpoint(&self.base_url)?,
+            self.api_key.clone(),
+        )
+        .await?;
+        client.get_segment_info(collection).await
     }
 
     pub async fn create_collection(
@@ -789,6 +802,19 @@ impl BarqGrpcClient {
         Ok(self
             .client
             .get_cluster_status(self.request(GetClusterStatusRequest {})?)
+            .await?
+            .into_inner())
+    }
+
+    pub async fn get_segment_info(
+        &mut self,
+        collection: Option<&str>,
+    ) -> Result<GetSegmentInfoResponse> {
+        Ok(self
+            .client
+            .get_segment_info(self.request(GetSegmentInfoRequest {
+                collection: collection.unwrap_or_default().to_string(),
+            })?)
             .await?
             .into_inner())
     }

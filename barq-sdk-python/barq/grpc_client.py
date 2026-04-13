@@ -3,6 +3,11 @@ import grpc
 import json
 from . import barq_pb2
 from . import barq_pb2_grpc
+from .observability import (
+    cluster_status_from_proto,
+    metrics_from_proto,
+    segment_info_from_proto,
+)
 from typing import Optional, List, Any, Dict
 
 class GrpcClient:
@@ -132,16 +137,25 @@ class GrpcClient:
         }
 
     def get_metrics(self):
-        return self.stub.GetMetrics(
+        response = self.stub.GetMetrics(
             barq_pb2.GetMetricsRequest(),
             metadata=self.metadata,
         )
+        return metrics_from_proto(response)
 
     def get_cluster_status(self):
-        return self.stub.GetClusterStatus(
+        response = self.stub.GetClusterStatus(
             barq_pb2.GetClusterStatusRequest(),
             metadata=self.metadata,
         )
+        return cluster_status_from_proto(response)
+
+    def get_segment_info(self, collection: Optional[str] = None):
+        response = self.stub.GetSegmentInfo(
+            barq_pb2.GetSegmentInfoRequest(collection=collection or ""),
+            metadata=self.metadata,
+        )
+        return segment_info_from_proto(response)
 
     def _insert_options(self, options: Optional[Dict[str, Any]]):
         if not options or "wait_for_commit" not in options:

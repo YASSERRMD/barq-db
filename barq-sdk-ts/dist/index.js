@@ -95,6 +95,121 @@ function insertStateFromProto(state) {
             return "queued";
     }
 }
+function enumSuffix(value, prefix) {
+    if (typeof value !== "string" || !value.startsWith(prefix)) {
+        throw new Error(`invalid enum value: ${String(value)}`);
+    }
+    return value.slice(prefix.length).toLowerCase();
+}
+function metricKindFromProto(kind) {
+    const suffix = enumSuffix(kind, "METRIC_KIND_");
+    if (suffix === "counter" || suffix === "gauge" || suffix === "histogram") {
+        return suffix;
+    }
+    throw new Error(`invalid metric kind: ${String(kind)}`);
+}
+function segmentStateFromProto(state) {
+    const suffix = enumSuffix(state, "SEGMENT_STATE_");
+    if (suffix === "growing" || suffix === "sealed" || suffix === "compacted") {
+        return suffix;
+    }
+    throw new Error(`invalid segment state: ${String(state)}`);
+}
+function clusterModeFromProto(mode) {
+    const suffix = enumSuffix(mode, "CLUSTER_MODE_");
+    if (suffix === "single_node" || suffix === "routed_replication" || suffix === "consensus_backed") {
+        return suffix;
+    }
+    throw new Error(`invalid cluster mode: ${String(mode)}`);
+}
+function writeDurabilityFromProto(value) {
+    const suffix = enumSuffix(value, "WRITE_DURABILITY_");
+    if (suffix === "node_local" || suffix === "primary_only" || suffix === "consensus_quorum") {
+        return suffix;
+    }
+    throw new Error(`invalid write durability: ${String(value)}`);
+}
+function indexStateFromProto(value) {
+    const suffix = enumSuffix(value, "INDEX_STATE_");
+    if (suffix === "building" || suffix === "ready" || suffix === "stale") {
+        return suffix;
+    }
+    throw new Error(`invalid index state: ${String(value)}`);
+}
+function metricsFromProto(response) {
+    if (!response?.storage) {
+        throw new Error("metrics response missing storage payload");
+    }
+    return {
+        definitions: (response.definitions ?? []).map((definition) => ({
+            name: definition.name ?? "",
+            kind: metricKindFromProto(definition.kind),
+            description: definition.description ?? "",
+            unit: definition.unit || undefined,
+            labels: definition.labels ?? [],
+        })),
+        storage: {
+            refreshCount: Number(response.storage.refreshCount ?? 0),
+            totalResidentVectorMemoryBytes: Number(response.storage.totalResidentVectorMemoryBytes ?? 0),
+            walAppendsTotal: Number(response.storage.walAppendsTotal ?? 0),
+            walBytesWrittenTotal: Number(response.storage.walBytesWrittenTotal ?? 0),
+            compactionsTotal: Number(response.storage.compactionsTotal ?? 0),
+            tenantMemoryBytes: (response.storage.tenantMemoryBytes ?? []).map((sample) => ({
+                tenant: sample.tenant ?? "",
+                residentVectorMemoryBytes: Number(sample.residentVectorMemoryBytes ?? 0),
+            })),
+            collectionMemoryBytes: (response.storage.collectionMemoryBytes ?? []).map((sample) => ({
+                tenant: sample.tenant ?? "",
+                collection: sample.collection ?? "",
+                residentVectorMemoryBytes: Number(sample.residentVectorMemoryBytes ?? 0),
+            })),
+            collectionWal: (response.storage.collectionWal ?? []).map((sample) => ({
+                tenant: sample.tenant ?? "",
+                collection: sample.collection ?? "",
+                entries: Number(sample.entries ?? 0),
+                bytes: Number(sample.bytes ?? 0),
+            })),
+            collectionSegmentFiles: (response.storage.collectionSegmentFiles ?? []).map((sample) => ({
+                tenant: sample.tenant ?? "",
+                collection: sample.collection ?? "",
+                state: segmentStateFromProto(sample.state),
+                count: Number(sample.count ?? 0),
+            })),
+            collectionSegmentStates: (response.storage.collectionSegmentStates ?? []).map((sample) => ({
+                tenant: sample.tenant ?? "",
+                collection: sample.collection ?? "",
+                state: segmentStateFromProto(sample.state),
+                active: Boolean(sample.active),
+            })),
+        },
+    };
+}
+function clusterStatusFromProto(response) {
+    if (!response) {
+        throw new Error("cluster status response missing payload");
+    }
+    return {
+        nodeId: response.nodeId ?? "",
+        mode: clusterModeFromProto(response.mode),
+        writeDurability: writeDurabilityFromProto(response.writeDurability),
+        shardCount: Number(response.shardCount ?? 0),
+        nodeCount: Number(response.nodeCount ?? 0),
+    };
+}
+function segmentInfoFromProto(response) {
+    return {
+        collections: (response?.collections ?? []).map((collection) => ({
+            tenant: collection.tenant ?? "",
+            collection: collection.collection ?? "",
+            currentState: segmentStateFromProto(collection.currentState),
+            indexState: indexStateFromProto(collection.indexState),
+            segmentCounts: (collection.segmentCounts ?? []).map((count) => ({
+                state: segmentStateFromProto(count.state),
+                count: Number(count.count ?? 0),
+            })),
+        })),
+    };
+}
 function grpcTargetFromBaseUrl(baseUrl) {
     const override = process.env.BARQ_GRPC_ADDR;
     if (override) {
@@ -158,6 +273,10 @@ class BarqClient {
     async getClusterStatus() {
         ensureSupportedApiVersion();
         return this.grpc().getClusterStatus();
+    }
+    async getSegmentInfo(collection) {
+        ensureSupportedApiVersion();
+        return this.grpc().getSegmentInfo(collection);
     }
     collection(name) {
         return new Collection(this, name);
@@ -257,7 +376,7 @@ class GrpcClient {
             this.client.getMetrics({}, this.metadata, (err, response) => {
                 if (err)
                     return reject(err);
-                resolve(response ?? {});
+                resolve(metricsFromProto(response));
             });
         });
     }
@@ -266,7 +385,16 @@ class GrpcClient {
             this.client.getClusterStatus({}, this.metadata, (err, response) => {
                 if (err)
                     return reject(err);
-                resolve(response ?? {});
+                resolve(clusterStatusFromProto(response));
+            });
+        });
+    }
+    getSegmentInfo(collection) {
+        return new Promise((resolve, reject) => {
+            this.client.getSegmentInfo({ collection: collection ?? "" }, this.metadata, (err, response) => {
+                if (err)
+                    return reject(err);
+                resolve(segmentInfoFromProto(response));
             });
         });
     }

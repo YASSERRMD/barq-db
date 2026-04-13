@@ -127,6 +127,10 @@ class BarqClient:
         _require_supported_api_version()
         return self._grpc().get_cluster_status()
 
+    def get_segment_info(self, collection: Optional[str] = None):
+        _require_supported_api_version()
+        return self._grpc().get_segment_info(collection)
+
     def search(
         self,
         collection: str,

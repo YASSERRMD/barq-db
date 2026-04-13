@@ -1534,6 +1534,13 @@ mod tests {
             assert_eq!(status.mode, ClusterMode::SingleNode as i32);
             assert_eq!(status.node_count, 1);
             assert_eq!(status.shard_count, 1);
+
+            let segment_info = client
+                .get_segment_info(Some("sdk-observability"))
+                .await
+                .expect("rust get segment info");
+            assert_eq!(segment_info.collections.len(), 1);
+            assert_eq!(segment_info.collections[0].collection, "sdk-observability");
         });
 
         let python = spawn_command(
@@ -1542,6 +1549,7 @@ mod tests {
                 ("PYTHONPATH", "."),
                 ("BARQ_BASE_URL", "http://127.0.0.1:8080"),
                 ("BARQ_GRPC_ADDR", grpc_addr.as_str()),
+                ("BARQ_TEST_COLLECTION", "sdk-observability"),
             ],
             "python3",
             [
@@ -1561,6 +1569,7 @@ mod tests {
             &[
                 ("BARQ_BASE_URL", "http://127.0.0.1:8080"),
                 ("BARQ_GRPC_ADDR", grpc_addr.as_str()),
+                ("BARQ_TEST_COLLECTION", "sdk-observability"),
             ],
             "go",
             [
@@ -1587,6 +1596,7 @@ mod tests {
             &[
                 ("BARQ_BASE_URL", "http://127.0.0.1:8080"),
                 ("BARQ_GRPC_ADDR", grpc_addr.as_str()),
+                ("BARQ_TEST_COLLECTION", "sdk-observability"),
             ],
             "node",
             ["--test", "test/observability_smoke.test.js"],

@@ -215,6 +215,18 @@ func (c *Client) GetClusterStatus(ctx context.Context) (*pb.GetClusterStatusResp
 	return grpcClient.GetClusterStatus(ctx)
 }
 
+func (c *Client) GetSegmentInfo(ctx context.Context, collection string) (*pb.GetSegmentInfoResponse, error) {
+	if err := requireSupportedAPIVersion(); err != nil {
+		return nil, err
+	}
+	grpcClient, err := NewGrpcClientWithAPIKey(c.grpcTarget(), c.config.APIKey)
+	if err != nil {
+		return nil, err
+	}
+	defer grpcClient.Close()
+	return grpcClient.GetSegmentInfo(ctx, collection)
+}
+
 type SearchRequest struct {
 	Vector  []float32      `json:"vector,omitempty"`
 	Query   string         `json:"query,omitempty"`
@@ -384,6 +396,12 @@ func (c *GrpcClient) GetMetrics(ctx context.Context) (*pb.GetMetricsResponse, er
 
 func (c *GrpcClient) GetClusterStatus(ctx context.Context) (*pb.GetClusterStatusResponse, error) {
 	return c.client.GetClusterStatus(c.authContext(ctx), &pb.GetClusterStatusRequest{})
+}
+
+func (c *GrpcClient) GetSegmentInfo(ctx context.Context, collection string) (*pb.GetSegmentInfoResponse, error) {
+	return c.client.GetSegmentInfo(c.authContext(ctx), &pb.GetSegmentInfoRequest{
+		Collection: collection,
+	})
 }
 
 func (c *GrpcClient) InsertWithOptions(ctx context.Context, collection string, id interface{}, vector []float32, payload interface{}, options *InsertOptions) error {
