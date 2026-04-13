@@ -16,6 +16,7 @@ pub(crate) const DEFAULT_INGEST_QUEUE_CAPACITY: usize = 64;
 pub(crate) struct IngestionConfig {
     pub(crate) batch_size: usize,
     pub(crate) queue_capacity: usize,
+    pub(crate) backpressure_policy: BackpressurePolicy,
 }
 
 impl Default for IngestionConfig {
@@ -23,6 +24,7 @@ impl Default for IngestionConfig {
         Self {
             batch_size: DEFAULT_INGEST_BATCH_SIZE,
             queue_capacity: DEFAULT_INGEST_QUEUE_CAPACITY,
+            backpressure_policy: BackpressurePolicy::Reject,
         }
     }
 }
@@ -35,8 +37,17 @@ impl IngestionConfig {
                 "BARQ_INGEST_QUEUE_CAPACITY",
                 DEFAULT_INGEST_QUEUE_CAPACITY,
             ),
+            backpressure_policy: parse_backpressure_policy("BARQ_INGEST_BACKPRESSURE_POLICY"),
         }
     }
+}
+
+/// Saturation policy for the ingestion queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BackpressurePolicy {
+    Block,
+    Reject,
+    Drop,
 }
 
 /// Bounded FIFO queue used by the asynchronous ingestion pipeline.
@@ -104,6 +115,7 @@ pub(crate) struct IngestionInsertRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum QueueAdmissionError {
     Full { capacity: usize },
+    Dropped { capacity: usize },
     Closed,
 }
 
@@ -112,6 +124,12 @@ impl std::fmt::Display for QueueAdmissionError {
         match self {
             QueueAdmissionError::Full { capacity } => {
                 write!(f, "ingestion queue is full (capacity {capacity})")
+            }
+            QueueAdmissionError::Dropped { capacity } => {
+                write!(
+                    f,
+                    "ingestion queue dropped the write because policy=drop and capacity {capacity} is exhausted"
+                )
             }
             QueueAdmissionError::Closed => write!(f, "ingestion queue is closed"),
         }
@@ -126,6 +144,15 @@ fn parse_env_usize(name: &str, default: usize) -> usize {
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(default)
+}
+
+fn parse_backpressure_policy(name: &str) -> BackpressurePolicy {
+    match std::env::var(name).ok().as_deref() {
+        Some("block") => BackpressurePolicy::Block,
+        Some("drop") => BackpressurePolicy::Drop,
+        Some("reject") => BackpressurePolicy::Reject,
+        _ => BackpressurePolicy::Reject,
+    }
 }
 
 #[derive(Debug)]
@@ -144,6 +171,7 @@ pub(crate) struct IngestionService {
     queue_slots: Arc<Semaphore>,
     batch_size: usize,
     queue_capacity: usize,
+    backpressure_policy: BackpressurePolicy,
     pending_jobs: AtomicUsize,
     item_available: Notify,
     worker_handle: AsyncMutex<Option<tokio::task::JoinHandle<()>>>,
@@ -151,26 +179,25 @@ pub(crate) struct IngestionService {
     pause_before_dequeue: Mutex<Option<Arc<PauseBeforeDequeue>>>,
     #[cfg(test)]
     observed_batch_sizes: Mutex<Vec<usize>>,
+    #[cfg(test)]
+    observed_document_ids: Mutex<Vec<barq_index::DocumentId>>,
 }
 
 impl IngestionService {
     /// Creates a new ingestion service backed by the provided storage engine.
-    pub(crate) fn new(
-        storage: Arc<AsyncMutex<Storage>>,
-        queue_capacity: usize,
-        batch_size: usize,
-    ) -> Arc<Self> {
+    pub(crate) fn new(storage: Arc<AsyncMutex<Storage>>, config: IngestionConfig) -> Arc<Self> {
         assert!(
-            queue_capacity > 0,
+            config.queue_capacity > 0,
             "ingestion queue capacity must be positive"
         );
-        assert!(batch_size > 0, "ingestion batch size must be positive");
+        assert!(config.batch_size > 0, "ingestion batch size must be positive");
         Arc::new(Self {
             storage,
-            queue: Mutex::new(IngestionQueue::new(queue_capacity)),
-            queue_slots: Arc::new(Semaphore::new(queue_capacity)),
-            batch_size,
-            queue_capacity,
+            queue: Mutex::new(IngestionQueue::new(config.queue_capacity)),
+            queue_slots: Arc::new(Semaphore::new(config.queue_capacity)),
+            batch_size: config.batch_size,
+            queue_capacity: config.queue_capacity,
+            backpressure_policy: config.backpressure_policy,
             pending_jobs: AtomicUsize::new(0),
             item_available: Notify::new(),
             worker_handle: AsyncMutex::new(None),
@@ -178,6 +205,8 @@ impl IngestionService {
             pause_before_dequeue: Mutex::new(None),
             #[cfg(test)]
             observed_batch_sizes: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            observed_document_ids: Mutex::new(Vec::new()),
         })
     }
 
@@ -187,16 +216,34 @@ impl IngestionService {
     ) -> Result<oneshot::Receiver<Result<(), StorageError>>, QueueAdmissionError> {
         self.ensure_worker_started().await;
 
-        let permit = self
-            .queue_slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|err| match err {
-                TryAcquireError::NoPermits => QueueAdmissionError::Full {
-                    capacity: self.queue_capacity,
-                },
-                TryAcquireError::Closed => QueueAdmissionError::Closed,
-            })?;
+        let permit = match self.backpressure_policy {
+            BackpressurePolicy::Block => self
+                .queue_slots
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| QueueAdmissionError::Closed)?,
+            BackpressurePolicy::Reject => self
+                .queue_slots
+                .clone()
+                .try_acquire_owned()
+                .map_err(|err| match err {
+                    TryAcquireError::NoPermits => QueueAdmissionError::Full {
+                        capacity: self.queue_capacity,
+                    },
+                    TryAcquireError::Closed => QueueAdmissionError::Closed,
+                })?,
+            BackpressurePolicy::Drop => self
+                .queue_slots
+                .clone()
+                .try_acquire_owned()
+                .map_err(|err| match err {
+                    TryAcquireError::NoPermits => QueueAdmissionError::Dropped {
+                        capacity: self.queue_capacity,
+                    },
+                    TryAcquireError::Closed => QueueAdmissionError::Closed,
+                })?,
+        };
 
         let (completion_tx, completion_rx) = oneshot::channel();
         let pending = PendingInsert {
@@ -282,6 +329,11 @@ impl IngestionService {
 
         for pending in batch {
             let _lag = pending.enqueued_at.elapsed();
+            #[cfg(test)]
+            self.observed_document_ids
+                .lock()
+                .expect("observed document ids lock poisoned")
+                .push(pending.request.document.id.clone());
             let _permit = pending.permit;
             let result = storage.insert_for_tenant(
                 &pending.request.tenant,
@@ -322,6 +374,14 @@ impl IngestionService {
         self.observed_batch_sizes
             .lock()
             .expect("observed batch sizes lock poisoned")
+            .clone()
+    }
+
+    #[cfg(test)]
+    fn observed_document_ids(&self) -> Vec<barq_index::DocumentId> {
+        self.observed_document_ids
+            .lock()
+            .expect("observed document ids lock poisoned")
             .clone()
     }
 }
@@ -401,8 +461,8 @@ impl PauseBeforeDequeue {
 #[cfg(test)]
 mod tests {
     use super::{
-        validate_insert_document, IngestionConfig, IngestionQueue, DEFAULT_INGEST_BATCH_SIZE,
-        DEFAULT_INGEST_QUEUE_CAPACITY,
+        validate_insert_document, BackpressurePolicy, IngestionConfig, IngestionQueue,
+        DEFAULT_INGEST_BATCH_SIZE, DEFAULT_INGEST_QUEUE_CAPACITY,
     };
     use crate::{
         insert_document, ApiAuth, ApiError, ApiRole, AppState, ClusterConfig, ClusterRouter,
@@ -423,6 +483,14 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn build_state(queue_capacity: usize, batch_size: usize) -> (TempDir, AppState, TenantId) {
+        build_state_with_policy(queue_capacity, batch_size, BackpressurePolicy::Reject)
+    }
+
+    fn build_state_with_policy(
+        queue_capacity: usize,
+        batch_size: usize,
+        backpressure_policy: BackpressurePolicy,
+    ) -> (TempDir, AppState, TenantId) {
         let dir = TempDir::new().unwrap();
         let tenant = TenantId::new("tenant-ingest");
         let mut storage = Storage::open(dir.path()).unwrap();
@@ -449,8 +517,16 @@ mod tests {
         let auth = ApiAuth::new().require_keys();
         auth.insert("writer", tenant.clone(), ApiRole::Writer);
         let cluster = ClusterRouter::from_config(ClusterConfig::single_node()).unwrap();
-        let state =
-            AppState::new_with_ingestion_settings(storage, auth, cluster, queue_capacity, batch_size);
+        let state = AppState::new_with_ingestion_config(
+            storage,
+            auth,
+            cluster,
+            IngestionConfig {
+                batch_size,
+                queue_capacity,
+                backpressure_policy,
+            },
+        );
         (dir, state, tenant)
     }
 
@@ -590,6 +666,7 @@ mod tests {
                     IngestionConfig {
                         batch_size: DEFAULT_INGEST_BATCH_SIZE,
                         queue_capacity: DEFAULT_INGEST_QUEUE_CAPACITY,
+                        backpressure_policy: BackpressurePolicy::Reject,
                     }
                 );
             },
@@ -602,6 +679,7 @@ mod tests {
             &[
                 ("BARQ_INGEST_BATCH_SIZE", Some("7")),
                 ("BARQ_INGEST_QUEUE_CAPACITY", Some("19")),
+                ("BARQ_INGEST_BACKPRESSURE_POLICY", Some("block")),
             ],
             || {
                 assert_eq!(
@@ -609,6 +687,7 @@ mod tests {
                     IngestionConfig {
                         batch_size: 7,
                         queue_capacity: 19,
+                        backpressure_policy: BackpressurePolicy::Block,
                     }
                 );
             },
@@ -628,6 +707,24 @@ mod tests {
                     IngestionConfig {
                         batch_size: DEFAULT_INGEST_BATCH_SIZE,
                         queue_capacity: DEFAULT_INGEST_QUEUE_CAPACITY,
+                        backpressure_policy: BackpressurePolicy::Reject,
+                    }
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn ingestion_config_invalid_policy_falls_back_to_reject() {
+        with_ingestion_env(
+            &[("BARQ_INGEST_BACKPRESSURE_POLICY", Some("unsupported-policy"))],
+            || {
+                assert_eq!(
+                    IngestionConfig::from_env(),
+                    IngestionConfig {
+                        batch_size: DEFAULT_INGEST_BATCH_SIZE,
+                        queue_capacity: DEFAULT_INGEST_QUEUE_CAPACITY,
+                        backpressure_policy: BackpressurePolicy::Reject,
                     }
                 );
             },
@@ -866,6 +963,145 @@ mod tests {
             .get_document(&tenant, "docs", &barq_index::DocumentId::U64(1))
             .unwrap()
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn block_policy_waits_for_capacity_and_preserves_order() {
+        let (_dir, state, tenant) = build_state_with_policy(1, 1, BackpressurePolicy::Block);
+        let hook = state.ingestion.install_pause_before_dequeue();
+
+        let first_state = state.clone();
+        let first = tokio::spawn(async move {
+            insert_document(
+                AxumPath("docs".to_string()),
+                State(first_state),
+                auth_headers(),
+                Json(insert_request(1, vec![1.0, 0.0])),
+            )
+            .await
+        });
+
+        hook.wait_until_reached().await;
+        assert_eq!(state.ingestion.queue_len(), 1);
+
+        let second_state = state.clone();
+        let second = tokio::spawn(async move {
+            insert_document(
+                AxumPath("docs".to_string()),
+                State(second_state),
+                auth_headers(),
+                Json(insert_request(2, vec![0.0, 1.0])),
+            )
+            .await
+        });
+
+        let third_state = state.clone();
+        let third = tokio::spawn(async move {
+            insert_document(
+                AxumPath("docs".to_string()),
+                State(third_state),
+                auth_headers(),
+                Json(insert_request(3, vec![0.5, 0.5])),
+            )
+            .await
+        });
+
+        hook.release();
+        assert_eq!(first.await.unwrap().unwrap(), StatusCode::CREATED);
+        assert_eq!(second.await.unwrap().unwrap(), StatusCode::CREATED);
+        assert_eq!(third.await.unwrap().unwrap(), StatusCode::CREATED);
+        assert_eq!(
+            state.ingestion.observed_document_ids(),
+            vec![
+                barq_index::DocumentId::U64(1),
+                barq_index::DocumentId::U64(2),
+                barq_index::DocumentId::U64(3),
+            ]
+        );
+
+        let storage = state.storage.lock().await;
+        for id in 1..=3 {
+            assert!(storage
+                .get_document(&tenant, "docs", &barq_index::DocumentId::U64(id))
+                .unwrap()
+                .is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn reject_policy_reports_saturation() {
+        let (_dir, state, _tenant) = build_state_with_policy(1, 1, BackpressurePolicy::Reject);
+        let hook = state.ingestion.install_pause_before_dequeue();
+
+        let first_state = state.clone();
+        let first = tokio::spawn(async move {
+            insert_document(
+                AxumPath("docs".to_string()),
+                State(first_state),
+                auth_headers(),
+                Json(insert_request(1, vec![1.0, 0.0])),
+            )
+            .await
+        });
+
+        hook.wait_until_reached().await;
+
+        let err = insert_document(
+            AxumPath("docs".to_string()),
+            State(state.clone()),
+            auth_headers(),
+            Json(insert_request(2, vec![0.0, 1.0])),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, ApiError::Busy(message) if message.contains("queue is full")));
+
+        hook.release();
+        assert_eq!(first.await.unwrap().unwrap(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn drop_policy_reports_explicit_drop_without_silent_loss() {
+        let (_dir, state, tenant) = build_state_with_policy(1, 1, BackpressurePolicy::Drop);
+        let hook = state.ingestion.install_pause_before_dequeue();
+
+        let first_state = state.clone();
+        let first = tokio::spawn(async move {
+            insert_document(
+                AxumPath("docs".to_string()),
+                State(first_state),
+                auth_headers(),
+                Json(insert_request(1, vec![1.0, 0.0])),
+            )
+            .await
+        });
+
+        hook.wait_until_reached().await;
+
+        let err = insert_document(
+            AxumPath("docs".to_string()),
+            State(state.clone()),
+            auth_headers(),
+            Json(insert_request(2, vec![0.0, 1.0])),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, ApiError::Busy(message) if message.contains("dropped")));
+
+        hook.release();
+        assert_eq!(first.await.unwrap().unwrap(), StatusCode::CREATED);
+
+        let storage = state.storage.lock().await;
+        assert!(storage
+            .get_document(&tenant, "docs", &barq_index::DocumentId::U64(1))
+            .unwrap()
+            .is_some());
+        assert!(storage
+            .get_document(&tenant, "docs", &barq_index::DocumentId::U64(2))
+            .unwrap()
+            .is_none());
     }
 
     proptest! {

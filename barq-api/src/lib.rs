@@ -48,26 +48,18 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(storage: Storage, auth: ApiAuth, cluster: ClusterRouter) -> Self {
-        let config = IngestionConfig::from_env();
-        Self::new_with_ingestion_settings(
-            storage,
-            auth,
-            cluster,
-            config.queue_capacity,
-            config.batch_size,
-        )
+        Self::new_with_ingestion_config(storage, auth, cluster, IngestionConfig::from_env())
     }
 
-    fn new_with_ingestion_settings(
+    fn new_with_ingestion_config(
         storage: Storage,
         auth: ApiAuth,
         cluster: ClusterRouter,
-        queue_capacity: usize,
-        batch_size: usize,
+        config: IngestionConfig,
     ) -> Self {
         let storage = Arc::new(Mutex::new(storage));
         Self {
-            ingestion: IngestionService::new(storage.clone(), queue_capacity, batch_size),
+            ingestion: IngestionService::new(storage.clone(), config),
             storage,
             auth,
             metrics: init_metrics_recorder(),
@@ -164,6 +156,9 @@ impl AppState {
                 QueueAdmissionError::Full { capacity } => {
                     ApiError::Busy(format!("ingestion queue is full (capacity {capacity})"))
                 }
+                QueueAdmissionError::Dropped { capacity } => ApiError::Busy(format!(
+                    "ingestion queue dropped the write because policy=drop and capacity {capacity} is exhausted"
+                )),
                 QueueAdmissionError::Closed => {
                     ApiError::Busy("ingestion worker is unavailable".to_string())
                 }
