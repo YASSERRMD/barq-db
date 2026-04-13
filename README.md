@@ -23,7 +23,7 @@ Barq is a **high-performance vector database** built in Rust, designed for seman
 - **Vector Search** - HNSW, IVF, and flat indexes with SIMD-optimized distance calculations
 - **Hybrid Retrieval** - Combine vector similarity + BM25 keyword search with RRF fusion. Advanced text analysis for multiple languages, including Arabic with root extraction.
 - **Multi-Tenancy** - Namespace isolation, RBAC, and per-tenant quotas
-- **Cloud-Native** - Sharded architecture with replication and consensus
+- **Cloud-Native** - Sharded architecture with routed replication
 - **Automated Operations** - Kubernetes operator for seamless deployment, scaling, and storage tiering (Hot/Warm/Cold)
 - **Multi-Language SDKs** - Python, TypeScript, Go, and Rust clients
 
@@ -182,7 +182,7 @@ Each document contains:
 ├─────────────────────────────────────────────────────┤
 │  Storage Engine (WAL + Snapshots + Compaction)     │
 ├─────────────────────────────────────────────────────┤
-│  Cluster Layer (Sharding + Raft Consensus)         │
+│  Cluster Layer (Sharding + Routed Replication)     │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -194,7 +194,7 @@ Each document contains:
 | `barq-index` | HNSW, IVF, flat indexes, SIMD kernels |
 | `barq-bm25` | Text search engine, analyzers |
 | `barq-storage` | WAL, snapshots, persistence |
-| `barq-cluster` | Sharding, replication, consensus |
+| `barq-cluster` | Sharding, routing, replication helpers |
 | `barq-api` | HTTP/gRPC APIs, auth, validation |
 
 ---
@@ -249,7 +249,7 @@ cargo test
 
 - SDK improvements and async support
 - Additional language analyzers
-- Distributed Cluster Consensus (Raft)
+- Consensus-backed distributed clustering (future work)
 - Performance benchmarks (In Progress)
 - [Storage Tiering (S3/GCS/Azure)](docs/src/guides/tiering.md) - **Completed**
 - [Kubernetes Operator](docs/src/deployment/operator.md) - **Completed**
