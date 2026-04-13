@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::hash::{BuildHasher, BuildHasherDefault, Hasher};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -151,6 +152,7 @@ pub struct ClusterRouter {
     pub placements: HashMap<ShardId, ShardPlacement>,
     pub read_preference: ReadPreference,
     node_addresses: HashMap<NodeId, String>,
+    consensus: Option<ConsensusRuntime>,
 }
 
 #[derive(Debug, Error)]
@@ -172,6 +174,20 @@ pub enum ClusterError {
 
     #[error("node {0:?} is not part of the configured cluster")]
     UnknownNode(NodeId),
+
+    #[error("consensus error for shard {shard:?}: {source}")]
+    Consensus {
+        shard: ShardId,
+        #[source]
+        source: RaftError,
+    },
+
+    #[error("consensus quorum was not reached for shard {shard:?}; acknowledged {acked} of {quorum}")]
+    QuorumUnavailable {
+        shard: ShardId,
+        acked: usize,
+        quorum: usize,
+    },
 
     #[error("shard {shard:?} is not hosted on node {node:?}; target node: {target:?}")]
     NotLocal {
@@ -231,11 +247,18 @@ impl ClusterRouter {
             }
         }
 
+        let consensus = if config.nodes.len() > 1 && config.replication_factor > 1 {
+            Some(ConsensusRuntime::from_placements(&placements)?)
+        } else {
+            None
+        };
+
         Ok(Self {
             node_id: config.node_id,
             placements,
             read_preference: config.read_preference,
             node_addresses,
+            consensus,
         })
     }
 
@@ -249,6 +272,8 @@ impl ClusterRouter {
     pub fn mode(&self) -> ClusterMode {
         if self.node_addresses.len() <= 1 {
             ClusterMode::SingleNode
+        } else if self.consensus.is_some() {
+            ClusterMode::ConsensusBacked
         } else {
             ClusterMode::RoutedReplication
         }
@@ -355,6 +380,144 @@ impl ClusterRouter {
                 target_address: routing.target_address,
             })
         }
+    }
+
+    /// Commit a write through the active runtime write path.
+    pub fn commit_write(&self, key: &str, payload: Vec<u8>) -> Result<(), ClusterError> {
+        let routing = self.route(key, Some(ReadPreference::Primary));
+        if routing.target != self.node_id {
+            return Err(ClusterError::NotLocal {
+                shard: routing.shard,
+                node: self.node_id.clone(),
+                target: routing.target,
+                target_address: routing.target_address,
+            });
+        }
+
+        if let Some(consensus) = &self.consensus {
+            let outcome = consensus
+                .append(routing.shard, &routing.primary, payload)
+                .map_err(|source| ClusterError::Consensus {
+                    shard: routing.shard,
+                    source,
+                })?;
+            if !outcome.committed {
+                return Err(ClusterError::QuorumUnavailable {
+                    shard: routing.shard,
+                    acked: outcome.acked,
+                    quorum: outcome.quorum,
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn isolate_consensus_node(&self, shard: ShardId, node: &NodeId) -> Result<(), ClusterError> {
+        let consensus = self
+            .consensus
+            .as_ref()
+            .ok_or(ClusterError::UnknownShard(shard))?;
+        consensus
+            .isolate(shard, node)
+            .map_err(|source| ClusterError::Consensus { shard, source })
+    }
+
+    #[cfg(test)]
+    pub fn heal_consensus_node(&self, shard: ShardId, node: &NodeId) -> Result<(), ClusterError> {
+        let consensus = self
+            .consensus
+            .as_ref()
+            .ok_or(ClusterError::UnknownShard(shard))?;
+        consensus
+            .heal(shard, node)
+            .map_err(|source| ClusterError::Consensus { shard, source })
+    }
+
+    #[cfg(test)]
+    pub fn consensus_state(
+        &self,
+        shard: ShardId,
+        node: &NodeId,
+    ) -> Result<RaftNodeState, ClusterError> {
+        let consensus = self
+            .consensus
+            .as_ref()
+            .ok_or(ClusterError::UnknownShard(shard))?;
+        consensus
+            .state(shard, node)
+            .map_err(|source| ClusterError::Consensus { shard, source })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ConsensusRuntime {
+    shards: Arc<Mutex<HashMap<ShardId, RaftCluster>>>,
+}
+
+impl ConsensusRuntime {
+    fn from_placements(
+        placements: &HashMap<ShardId, ShardPlacement>,
+    ) -> Result<Self, ClusterError> {
+        let mut shards = HashMap::new();
+        for placement in placements.values() {
+            let mut nodes = Vec::with_capacity(1 + placement.replicas.len());
+            nodes.push(placement.primary.clone());
+            nodes.extend(placement.replicas.iter().cloned());
+
+            let mut cluster = RaftCluster::new(nodes);
+            cluster
+                .elect_leader(&placement.primary)
+                .map_err(|source| ClusterError::Consensus {
+                    shard: placement.shard,
+                    source,
+                })?;
+            shards.insert(placement.shard, cluster);
+        }
+        Ok(Self {
+            shards: Arc::new(Mutex::new(shards)),
+        })
+    }
+
+    fn append(
+        &self,
+        shard: ShardId,
+        leader: &NodeId,
+        payload: Vec<u8>,
+    ) -> Result<AppendOutcome, RaftError> {
+        let mut shards = self.shards.lock().expect("consensus runtime lock poisoned");
+        let cluster = shards
+            .get_mut(&shard)
+            .ok_or_else(|| RaftError::UnknownNode(leader.clone()))?;
+        cluster.append_entry(leader, payload)
+    }
+
+    #[cfg(test)]
+    fn isolate(&self, shard: ShardId, node: &NodeId) -> Result<(), RaftError> {
+        let mut shards = self.shards.lock().expect("consensus runtime lock poisoned");
+        let cluster = shards
+            .get_mut(&shard)
+            .ok_or_else(|| RaftError::UnknownNode(node.clone()))?;
+        cluster.isolate(node)
+    }
+
+    #[cfg(test)]
+    fn heal(&self, shard: ShardId, node: &NodeId) -> Result<(), RaftError> {
+        let mut shards = self.shards.lock().expect("consensus runtime lock poisoned");
+        let cluster = shards
+            .get_mut(&shard)
+            .ok_or_else(|| RaftError::UnknownNode(node.clone()))?;
+        cluster.heal(node)
+    }
+
+    #[cfg(test)]
+    fn state(&self, shard: ShardId, node: &NodeId) -> Result<RaftNodeState, RaftError> {
+        let shards = self.shards.lock().expect("consensus runtime lock poisoned");
+        let cluster = shards
+            .get(&shard)
+            .ok_or_else(|| RaftError::UnknownNode(node.clone()))?;
+        cluster.state(node).cloned()
     }
 }
 
@@ -555,6 +718,26 @@ mod tests {
         }
     }
 
+    fn routed_test_config() -> ClusterConfig {
+        let mut config = test_config();
+        config.replication_factor = 1;
+        config
+    }
+
+    fn local_primary_key(router: &ClusterRouter) -> (String, ShardId) {
+        (0..10_000)
+            .map(|i| format!("key-{i}"))
+            .find_map(|candidate| {
+                let routing = router.route(&candidate, Some(ReadPreference::Primary));
+                if routing.primary == router.node_id {
+                    Some((candidate, routing.shard))
+                } else {
+                    None
+                }
+            })
+            .expect("expected a key for a local primary shard")
+    }
+
     #[test]
     fn builds_placements_round_robin() {
         let router = ClusterRouter::from_config(test_config()).unwrap();
@@ -599,7 +782,7 @@ mod tests {
 
     #[test]
     fn rejects_remote_primary() {
-        let router = ClusterRouter::from_config(test_config()).unwrap();
+        let router = ClusterRouter::from_config(routed_test_config()).unwrap();
         let key = "key-on-other";
         let routing = router.route(key, None);
         if routing.primary != router.node_id {
@@ -611,7 +794,7 @@ mod tests {
 
     #[test]
     fn exposes_target_address_when_not_local() {
-        let config = test_config();
+        let config = routed_test_config();
         let router = ClusterRouter::from_config(config.clone()).unwrap();
 
         let remote_shard = router
@@ -805,10 +988,68 @@ mod tests {
     fn cluster_status_reports_honest_mode() {
         let router = ClusterRouter::from_config(test_config()).unwrap();
         let status = router.status();
-        assert_eq!(status.mode, ClusterMode::RoutedReplication);
-        assert_eq!(status.write_durability, WriteDurability::PrimaryOnly);
+        assert_eq!(status.mode, ClusterMode::ConsensusBacked);
+        assert_eq!(status.write_durability, WriteDurability::ConsensusQuorum);
         assert_eq!(status.node_count, 3);
         assert_eq!(status.shard_count, 4);
+    }
+
+    #[test]
+    fn single_replica_multi_node_stays_routed_replication() {
+        let router = ClusterRouter::from_config(routed_test_config()).unwrap();
+        let status = router.status();
+        assert_eq!(status.mode, ClusterMode::RoutedReplication);
+        assert_eq!(status.write_durability, WriteDurability::PrimaryOnly);
+    }
+
+    #[test]
+    fn consensus_commit_routes_runtime_writes_through_quorum() {
+        let router = ClusterRouter::from_config(test_config()).unwrap();
+        let (key, shard) = local_primary_key(&router);
+
+        router.commit_write(&key, b"set:key=1".to_vec()).unwrap();
+
+        let leader = router.consensus_state(shard, &router.node_id).unwrap();
+        assert_eq!(leader.commit_index(), 1);
+        assert_eq!(leader.entries().len(), 1);
+        let follower = router
+            .placements
+            .get(&shard)
+            .unwrap()
+            .replicas
+            .first()
+            .unwrap()
+            .clone();
+        let follower_state = router.consensus_state(shard, &follower).unwrap();
+        assert_eq!(follower_state.commit_index(), 1);
+        assert_eq!(follower_state.entries().len(), 1);
+    }
+
+    #[test]
+    fn consensus_commit_rejects_when_quorum_is_lost() {
+        let router = ClusterRouter::from_config(test_config()).unwrap();
+        let (key, shard) = local_primary_key(&router);
+        let follower = router
+            .placements
+            .get(&shard)
+            .unwrap()
+            .replicas
+            .first()
+            .unwrap()
+            .clone();
+        router.isolate_consensus_node(shard, &follower).unwrap();
+
+        let err = router
+            .commit_write(&key, b"set:key=2".to_vec())
+            .expect_err("quorum loss should reject the write");
+        assert!(matches!(
+            err,
+            ClusterError::QuorumUnavailable {
+                shard: failed_shard,
+                acked: 1,
+                quorum: 2
+            } if failed_shard == shard
+        ));
     }
 
     #[test]
