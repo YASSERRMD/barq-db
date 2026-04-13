@@ -17,6 +17,17 @@ While many vector databases exist, Barq focuses on:
 2.  **Cost Efficiency**: Tiering lets you store PB-scale datasets without PB-scale SSD costs.
 3.  **Developer Experience**: Typed SDKs for Python, TypeScript, Go, and Rust, aligned to the canonical gRPC contract in `proto/barq.proto`.
 
+## Barq v2 Main Delivery Phases
+
+1. **Phase 1**: Vector store foundation, mmap-backed persistence, memory budgeting, and restart hydration.
+2. **Phase 2**: Segment lifecycle, sealing, compaction behavior, persisted lifecycle replay, and lifecycle stress coverage.
+3. **Phase 3**: Deterministic benchmark tooling through `barq-bench`.
+4. **Phase 4**: Async ingestion with queueing, batching, backpressure, and ingestion metrics.
+5. **Phase 5**: Explicit index lifecycle with `Building`, `Ready`, and `Stale` states.
+6. **Phase 6**: Honest cluster capability reporting and explicit durability semantics.
+7. **Phase 7**: Query planning improvements, explicit hybrid execution, and deterministic merge behavior.
+8. **Phase 8**: Observability across ingestion, storage, indexing, query latency, and admin metrics.
+
 ## Getting Started
 
 Ready to dive in? Check out the [Installation Guide](getting-started/installation.md) to set up your first cluster in minutes.

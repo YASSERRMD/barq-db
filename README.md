@@ -18,6 +18,26 @@
 
 Barq is a **high-performance vector database** built in Rust, designed for semantic search, RAG applications, and AI-powered recommendations. It combines dense vector search with BM25 text retrieval in a single, unified API.
 
+## Barq v2
+
+Barq v2 is the current database engine release line documented in this repository.
+
+- gRPC is the primary external contract via `proto/barq.proto`.
+- SDKs are aligned to that gRPC contract first, with HTTP kept as a compatibility surface.
+- Observability and admin capabilities now ship through the canonical API surface.
+- Benchmark tooling is available through `barq-bench` and documented under [Performance Benchmarks](./docs/src/reference/performance.md).
+
+## Barq v2 Main Delivery Phases
+
+1. Phase 1: Vector store foundation, mmap-backed persistence, memory budgeting, and restart hydration.
+2. Phase 2: Segment lifecycle, sealing, compaction behavior, persisted lifecycle replay, and lifecycle stress coverage.
+3. Phase 3: Deterministic benchmark tooling through `barq-bench`.
+4. Phase 4: Async ingestion pipeline with queueing, batching, backpressure, and ingestion metrics.
+5. Phase 5: Production-oriented index lifecycle with `Building`, `Ready`, and `Stale` states.
+6. Phase 6: Honest cluster capability reporting and explicit durability semantics instead of inaccurate consensus claims.
+7. Phase 7: Query planning improvements, explicit hybrid execution, and deterministic merge behavior.
+8. Phase 8: Production-grade observability for ingestion, storage, indexing, query latency, and admin metrics surfaces.
+
 ## Key Features
 
 - **Vector Search** - HNSW, IVF, and flat indexes with SIMD-optimized distance calculations
@@ -55,7 +75,7 @@ The API is available at `http://localhost:8080` (HTTP) and `localhost:50051` (gR
 
 ## SDK Quick Start
 
-Choose your language to get started:
+Choose your language to get started with Barq v2:
 
 | Language | Package | Documentation |
 |----------|---------|---------------|
@@ -258,7 +278,7 @@ cargo test
 - SDK improvements and async support
 - Additional language analyzers
 - Consensus-backed distributed clustering (future work)
-- Performance benchmarks (In Progress)
+- [Performance benchmarks](docs/src/reference/performance.md) - **Available**
 - [Storage Tiering (S3/GCS/Azure)](docs/src/guides/tiering.md) - **Completed**
 - [Kubernetes Operator](docs/src/deployment/operator.md) - **Completed**
 
@@ -269,6 +289,12 @@ Comprehensive documentation is available in the `docs/` directory. You can build
 ```bash
 mdbook serve docs
 ```
+
+Key reference pages:
+
+- [API Specification](./docs/src/reference/api.md)
+- [SDKs](./docs/src/reference/sdks.md)
+- [Performance Benchmarks](./docs/src/reference/performance.md)
 
 ---
 

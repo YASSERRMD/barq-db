@@ -19,7 +19,28 @@ fn canonical_proto_is_documented_across_docs_and_sdks() {
     let cases: &[(&str, &[&str])] = &[
         (
             "README.md",
-            &["proto/barq.proto", "gRPC is the primary API surface"],
+            &[
+                "Barq v2",
+                "database engine release line",
+                "Phase 1",
+                "Phase 8",
+                "proto/barq.proto",
+                "gRPC is the primary API surface",
+                "Performance Benchmarks",
+            ],
+        ),
+        (
+            "docs/src/introduction.md",
+            &["Barq v2 Main Delivery Phases", "Phase 1", "Phase 8", "proto/barq.proto"],
+        ),
+        (
+            "docs/src/reference/performance.md",
+            &[
+                "Barq v2 Performance Benchmarks",
+                "barq-bench",
+                "./benchmarks/scripts/run_1m.sh",
+                "cargo run -p barq-bench",
+            ],
         ),
         (
             "docs/src/reference/api.md",
@@ -34,28 +55,58 @@ fn canonical_proto_is_documented_across_docs_and_sdks() {
         ),
         (
             "docs/src/reference/sdks.md",
-            &["proto/barq.proto", "GrpcClient", "get_metrics", "GetMetrics"],
+            &[
+                "Barq v2 database engine",
+                "proto/barq.proto",
+                "GrpcClient",
+                "get_metrics",
+                "GetMetrics",
+                "Performance Benchmarks",
+            ],
         ),
         (
             "barq-sdk-python/README.md",
-            &["proto/barq.proto", "GrpcClient", "get_metrics()", "get_segment_info()"],
+            &[
+                "Barq v2 database engine",
+                "proto/barq.proto",
+                "GrpcClient",
+                "get_metrics()",
+                "get_segment_info()",
+                "Performance Benchmarks",
+            ],
         ),
         (
             "barq-sdk-go/README.md",
-            &["proto/barq.proto", "GrpcClient", "GetMetrics", "GetSegmentInfo"],
+            &[
+                "Barq v2 database engine",
+                "proto/barq.proto",
+                "GrpcClient",
+                "GetMetrics",
+                "GetSegmentInfo",
+                "Performance Benchmarks",
+            ],
         ),
         (
             "barq-sdk-rust/README.md",
             &[
+                "Barq v2 database engine",
                 "proto/barq.proto",
                 "BarqGrpcClient",
                 "get_metrics",
                 "get_segment_info",
+                "Performance Benchmarks",
             ],
         ),
         (
             "barq-sdk-ts/README.md",
-            &["proto/barq.proto", "GrpcClient", "getMetrics()", "getSegmentInfo()"],
+            &[
+                "Barq v2 database engine",
+                "proto/barq.proto",
+                "GrpcClient",
+                "getMetrics()",
+                "getSegmentInfo()",
+                "Performance Benchmarks",
+            ],
         ),
     ];
 

@@ -6,7 +6,7 @@
   <a href="https://github.com/YASSERRMD/barq-db/blob/main/LICENSE"><img src="https://img.shields.io/github/license/YASSERRMD/barq-db" alt="License"></a>
 </p>
 
-The official Rust SDK for [Barq DB](https://github.com/YASSERRMD/barq-db) - a high-performance vector database built in Rust.
+The official Rust SDK for [Barq DB](https://github.com/YASSERRMD/barq-db), compatible with the Barq v2 database engine release line.
 
 ---
 
@@ -27,6 +27,7 @@ barq-sdk-rust = { path = "../barq-sdk-rust" }
 
 - `BarqGrpcClient` maps to that gRPC surface directly.
 - `BarqClient` remains available for compatibility with the current HTTP endpoints.
+- Performance benchmark docs for the Barq v2 database engine live in [Performance Benchmarks](../docs/src/reference/performance.md).
 
 ---
 
