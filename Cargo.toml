@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "barq-core",
+    "barq-metrics",
     "barq-index",
     "barq-bm25",
     "barq-storage",
