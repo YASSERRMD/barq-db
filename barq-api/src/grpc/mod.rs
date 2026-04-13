@@ -1,4 +1,7 @@
-use crate::{ApiError, AppState};
+pub mod compat;
+
+use crate::{ApiError, ApiPermission, AppState};
+use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use barq_core::{
     CatalogError, CollectionSchema, DistanceMetric, Document, DocumentId, FieldSchema, FieldType,
     Filter, PayloadValue, TenantId,
@@ -11,6 +14,7 @@ use barq_proto::barq::{
     StatusResponse,
 };
 use barq_storage::StorageError;
+use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status};
 
 pub struct GrpcService {
@@ -20,10 +24,6 @@ pub struct GrpcService {
 impl GrpcService {
     pub fn new(state: AppState) -> Self {
         Self { state }
-    }
-
-    fn default_tenant() -> TenantId {
-        TenantId::default()
     }
 
     fn status_response() -> StatusResponse {
@@ -61,8 +61,23 @@ impl GrpcService {
         }
     }
 
+    fn authenticate(
+        &self,
+        metadata: &MetadataMap,
+        required: ApiPermission,
+    ) -> Result<TenantId, Status> {
+        let headers = metadata_to_headers(metadata)?;
+        Ok(self
+            .state
+            .auth
+            .authenticate(&headers, required, None)
+            .map_err(api_error_to_status)?
+            .tenant)
+    }
+
     async fn insert_internal(
         &self,
+        tenant: TenantId,
         collection: String,
         id: String,
         vector: Vec<f32>,
@@ -74,7 +89,6 @@ impl GrpcService {
             return Err(Status::invalid_argument("vector must not be empty"));
         }
 
-        let tenant = Self::default_tenant();
         let document = Document {
             id: Self::parse_document_id(&id),
             vector,
@@ -92,7 +106,11 @@ impl GrpcService {
         Ok(InsertResponse { success: true })
     }
 
-    async fn search_internal(&self, request: SearchRequest) -> Result<SearchResponse, Status> {
+    async fn search_internal(
+        &self,
+        tenant: TenantId,
+        request: SearchRequest,
+    ) -> Result<SearchResponse, Status> {
         Self::require_non_empty(&request.collection, "collection")?;
         if request.vector.is_empty() {
             return Err(Status::invalid_argument("vector must not be empty"));
@@ -101,7 +119,6 @@ impl GrpcService {
             return Err(Status::invalid_argument("top_k must be positive"));
         }
 
-        let tenant = Self::default_tenant();
         self.state
             .ensure_local_for_tenant(&tenant)
             .map_err(api_error_to_status)?;
@@ -131,6 +148,30 @@ impl GrpcService {
                 .collect(),
         })
     }
+}
+
+fn metadata_to_headers(metadata: &MetadataMap) -> Result<HeaderMap, Status> {
+    let mut headers = HeaderMap::new();
+    copy_ascii_metadata(metadata, "x-api-key", &mut headers)?;
+    copy_ascii_metadata(metadata, "x-tenant-id", &mut headers)?;
+    copy_ascii_metadata(metadata, "authorization", &mut headers)?;
+    Ok(headers)
+}
+
+fn copy_ascii_metadata(
+    metadata: &MetadataMap,
+    key: &'static str,
+    headers: &mut HeaderMap,
+) -> Result<(), Status> {
+    if let Some(value) = metadata.get(key) {
+        let value = value
+            .to_str()
+            .map_err(|_| Status::invalid_argument(format!("{key} metadata must be ascii")))?;
+        let header_value = HeaderValue::from_str(value)
+            .map_err(|_| Status::invalid_argument(format!("{key} metadata is invalid")))?;
+        headers.insert(HeaderName::from_static(key), header_value);
+    }
+    Ok(())
 }
 
 fn storage_error_to_status(error: StorageError) -> Status {
@@ -214,8 +255,10 @@ impl Barq for GrpcService {
         &self,
         request: Request<InsertRequest>,
     ) -> Result<Response<InsertResponse>, Status> {
+        let tenant = self.authenticate(request.metadata(), ApiPermission::Write)?;
         let response = self
             .insert_internal(
+                tenant,
                 request.get_ref().collection.clone(),
                 request.get_ref().id.clone(),
                 request.get_ref().vector.clone(),
@@ -229,6 +272,7 @@ impl Barq for GrpcService {
         &self,
         request: Request<CreateCollectionRequest>,
     ) -> Result<Response<CreateCollectionResponse>, Status> {
+        let tenant = self.authenticate(request.metadata(), ApiPermission::TenantAdmin)?;
         let req = request.into_inner();
 
         let metric = match req.metric.to_uppercase().as_str() {
@@ -249,16 +293,18 @@ impl Barq for GrpcService {
                 required: true,
             }],
             bm25_config: None,
-            tenant_id: barq_core::TenantId::new("default"),
+            tenant_id: tenant.clone(),
         };
 
-        let tenant = schema.tenant_id.clone();
+        self.state
+            .ensure_primary_for_tenant(&tenant)
+            .map_err(api_error_to_status)?;
 
         let mut storage = self.state.storage.lock().await;
 
         match storage.create_collection_for_tenant(tenant, schema) {
             Ok(_) => Ok(Response::new(CreateCollectionResponse { success: true })),
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(storage_error_to_status(e)),
         }
     }
 
@@ -266,9 +312,10 @@ impl Barq for GrpcService {
         &self,
         request: Request<InsertDocumentRequest>,
     ) -> Result<Response<InsertDocumentResponse>, Status> {
+        let tenant = self.authenticate(request.metadata(), ApiPermission::Write)?;
         let req = request.into_inner();
         let response = self
-            .insert_internal(req.collection, req.id, req.vector, req.payload_json)
+            .insert_internal(tenant, req.collection, req.id, req.vector, req.payload_json)
             .await?;
         Ok(Response::new(InsertDocumentResponse {
             success: response.success,
@@ -279,7 +326,8 @@ impl Barq for GrpcService {
         &self,
         request: Request<SearchRequest>,
     ) -> Result<Response<SearchResponse>, Status> {
-        let response = self.search_internal(request.into_inner()).await?;
+        let tenant = self.authenticate(request.metadata(), ApiPermission::Read)?;
+        let response = self.search_internal(tenant, request.into_inner()).await?;
         Ok(Response::new(response))
     }
 
@@ -287,9 +335,9 @@ impl Barq for GrpcService {
         &self,
         request: Request<BatchSearchRequest>,
     ) -> Result<Response<BatchSearchResponse>, Status> {
+        let tenant = self.authenticate(request.metadata(), ApiPermission::Read)?;
         let req = request.into_inner();
         let collection_name = req.collection;
-        let tenant = barq_core::TenantId::from("default");
 
         let storage = self.state.storage.lock().await;
         let collection = storage

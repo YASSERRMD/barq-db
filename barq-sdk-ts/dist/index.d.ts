@@ -14,17 +14,19 @@ export interface CreateCollectionRequest {
     }>;
 }
 export interface SearchResult {
-    id: string | number;
+    id: string | number | Record<string, string | number>;
     score: number;
     payload?: any;
 }
 export declare class BarqClient {
     private config;
+    private grpcCompat?;
     constructor(config: BarqConfig);
     private request;
     health(): Promise<boolean>;
     createCollection(req: CreateCollectionRequest): Promise<void>;
     collection(name: string): Collection;
+    grpc(): GrpcClient;
 }
 export declare class Collection {
     private client;
@@ -35,7 +37,8 @@ export declare class Collection {
 }
 export declare class GrpcClient {
     private client;
-    constructor(address: string, protoPath?: string);
+    private readonly metadata;
+    constructor(address: string, protoPath?: string, apiKey?: string, tenantId?: string);
     status(): Promise<boolean>;
     health(): Promise<boolean>;
     createCollection(name: string, dimension: number, metric?: string): Promise<void>;

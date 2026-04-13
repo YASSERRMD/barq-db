@@ -34,6 +34,30 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.GrpcClient = exports.Collection = exports.BarqClient = void 0;
+function ensureSupportedApiVersion() {
+    const version = process.env.API_VERSION ?? "v1";
+    if (version !== "v1") {
+        throw new Error(`unsupported API_VERSION: ${version}`);
+    }
+}
+function compatDocumentId(value) {
+    const numeric = Number(value);
+    if (Number.isInteger(numeric) && String(numeric) === value) {
+        return { U64: numeric };
+    }
+    return { Str: value };
+}
+function grpcTargetFromBaseUrl(baseUrl) {
+    const override = process.env.BARQ_GRPC_ADDR;
+    if (override) {
+        if (override.includes("://")) {
+            return new URL(override).host;
+        }
+        return override;
+    }
+    const url = new URL(baseUrl);
+    return `${url.hostname}:50051`;
+}
 class BarqClient {
     constructor(config) {
         this.config = config;
@@ -61,14 +85,19 @@ class BarqClient {
     }
     async health() {
         try {
-            await this.request("/health", { method: "GET" });
-            return true;
+            ensureSupportedApiVersion();
+            return await this.grpc().status();
         }
         catch {
             return false;
         }
     }
     async createCollection(req) {
+        ensureSupportedApiVersion();
+        if (!req.index && !(req.text_fields && req.text_fields.length > 0)) {
+            await this.grpc().createCollection(req.name, req.dimension, req.metric);
+            return;
+        }
         await this.request("/collections", {
             method: "POST",
             body: JSON.stringify(req),
@@ -76,6 +105,12 @@ class BarqClient {
     }
     collection(name) {
         return new Collection(this, name);
+    }
+    grpc() {
+        if (!this.grpcCompat) {
+            this.grpcCompat = new GrpcClient(grpcTargetFromBaseUrl(this.config.baseUrl), undefined, this.config.apiKey);
+        }
+        return this.grpcCompat;
     }
 }
 exports.BarqClient = BarqClient;
@@ -85,12 +120,18 @@ class Collection {
         this.name = name;
     }
     async insert(id, vector, payload) {
-        await this.client.request(`/collections/${this.name}/documents`, {
-            method: "POST",
-            body: JSON.stringify({ id, vector, payload }),
-        });
+        ensureSupportedApiVersion();
+        await this.client.grpc().insert(this.name, id, vector, payload ?? {});
     }
     async search(vector, query, topK = 10, filter) {
+        ensureSupportedApiVersion();
+        if (vector && !query && !filter) {
+            const results = await this.client.grpc().search(this.name, vector, topK);
+            return results.map((result) => ({
+                id: compatDocumentId(String(result.id)),
+                score: result.score,
+            }));
+        }
         let path = `/collections/${this.name}/search`;
         if (vector && query)
             path += "/hybrid";
@@ -114,7 +155,7 @@ const grpc = __importStar(require("@grpc/grpc-js"));
 const protoLoader = __importStar(require("@grpc/proto-loader"));
 const path = __importStar(require("path"));
 class GrpcClient {
-    constructor(address, protoPath = path.resolve(__dirname, "../proto/barq.proto")) {
+    constructor(address, protoPath = path.resolve(__dirname, "../proto/barq.proto"), apiKey, tenantId) {
         const packageDefinition = protoLoader.loadSync(protoPath, {
             longs: String,
             enums: String,
@@ -124,10 +165,17 @@ class GrpcClient {
         const protoDescriptor = grpc.loadPackageDefinition(packageDefinition);
         const BarqService = protoDescriptor.barq.Barq;
         this.client = new BarqService(address, grpc.credentials.createInsecure());
+        this.metadata = new grpc.Metadata();
+        if (apiKey) {
+            this.metadata.set("x-api-key", apiKey);
+        }
+        if (tenantId) {
+            this.metadata.set("x-tenant-id", tenantId);
+        }
     }
     status() {
         return new Promise((resolve, reject) => {
-            this.client.status({}, (err, response) => {
+            this.client.status({}, this.metadata, (err, response) => {
                 if (err)
                     return reject(err);
                 resolve(Boolean(response?.ok));
@@ -139,7 +187,7 @@ class GrpcClient {
     }
     createCollection(name, dimension, metric = "L2") {
         return new Promise((resolve, reject) => {
-            this.client.createCollection({ name, dimension, metric }, (err) => {
+            this.client.createCollection({ name, dimension, metric }, this.metadata, (err) => {
                 if (err)
                     return reject(err);
                 resolve();
@@ -154,7 +202,7 @@ class GrpcClient {
             payloadJson: JSON.stringify(payload),
         };
         return new Promise((resolve, reject) => {
-            this.client.insert(request, (err) => {
+            this.client.insert(request, this.metadata, (err) => {
                 if (err)
                     return reject(err);
                 resolve();
@@ -170,7 +218,7 @@ class GrpcClient {
                 collection,
                 vector,
                 topK
-            }, (err, response) => {
+            }, this.metadata, (err, response) => {
                 if (err)
                     return reject(err);
                 const results = (response?.results ?? []).map((r) => ({

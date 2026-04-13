@@ -12,13 +12,42 @@ export interface CreateCollectionRequest {
 }
 
 export interface SearchResult {
-    id: string | number;
+    id: string | number | Record<string, string | number>;
     score: number;
     payload?: any;
 }
 
+function ensureSupportedApiVersion(): void {
+    const version = process.env.API_VERSION ?? "v1";
+    if (version !== "v1") {
+        throw new Error(`unsupported API_VERSION: ${version}`);
+    }
+}
+
+function compatDocumentId(value: string): Record<string, string | number> {
+    const numeric = Number(value);
+    if (Number.isInteger(numeric) && String(numeric) === value) {
+        return { U64: numeric };
+    }
+    return { Str: value };
+}
+
+function grpcTargetFromBaseUrl(baseUrl: string): string {
+    const override = process.env.BARQ_GRPC_ADDR;
+    if (override) {
+        if (override.includes("://")) {
+            return new URL(override).host;
+        }
+        return override;
+    }
+
+    const url = new URL(baseUrl);
+    return `${url.hostname}:50051`;
+}
+
 export class BarqClient {
     private config: BarqConfig;
+    private grpcCompat?: GrpcClient;
 
     constructor(config: BarqConfig) {
         this.config = config;
@@ -49,14 +78,19 @@ export class BarqClient {
 
     async health(): Promise<boolean> {
         try {
-            await this.request("/health", { method: "GET" });
-            return true;
+            ensureSupportedApiVersion();
+            return await this.grpc().status();
         } catch {
             return false;
         }
     }
 
     async createCollection(req: CreateCollectionRequest): Promise<void> {
+        ensureSupportedApiVersion();
+        if (!req.index && !(req.text_fields && req.text_fields.length > 0)) {
+            await this.grpc().createCollection(req.name, req.dimension, req.metric);
+            return;
+        }
         await this.request("/collections", {
             method: "POST",
             body: JSON.stringify(req),
@@ -66,16 +100,25 @@ export class BarqClient {
     collection(name: string) {
         return new Collection(this, name);
     }
+
+    grpc(): GrpcClient {
+        if (!this.grpcCompat) {
+            this.grpcCompat = new GrpcClient(
+                grpcTargetFromBaseUrl(this.config.baseUrl),
+                undefined,
+                this.config.apiKey,
+            );
+        }
+        return this.grpcCompat;
+    }
 }
 
 export class Collection {
     constructor(private client: BarqClient, private name: string) { }
 
     async insert(id: string | number, vector: number[], payload?: any): Promise<void> {
-        await (this.client as any).request(`/collections/${this.name}/documents`, {
-            method: "POST",
-            body: JSON.stringify({ id, vector, payload }),
-        });
+        ensureSupportedApiVersion();
+        await this.client.grpc().insert(this.name, id, vector, payload ?? {});
     }
 
     async search(
@@ -84,6 +127,15 @@ export class Collection {
         topK: number = 10,
         filter?: any
     ): Promise<SearchResult[]> {
+        ensureSupportedApiVersion();
+        if (vector && !query && !filter) {
+            const results = await this.client.grpc().search(this.name, vector, topK);
+            return results.map((result) => ({
+                id: compatDocumentId(String(result.id)),
+                score: result.score,
+            })) as SearchResult[];
+        }
+
         let path = `/collections/${this.name}/search`;
         if (vector && query) path += "/hybrid";
         else if (query) path += "/text";
@@ -114,8 +166,14 @@ import type { StatusResponse__Output } from './generated/barq/StatusResponse';
 
 export class GrpcClient {
     private client: GeneratedBarqClient;
+    private readonly metadata: grpc.Metadata;
 
-    constructor(address: string, protoPath: string = path.resolve(__dirname, "../proto/barq.proto")) {
+    constructor(
+        address: string,
+        protoPath: string = path.resolve(__dirname, "../proto/barq.proto"),
+        apiKey?: string,
+        tenantId?: string,
+    ) {
         const packageDefinition = protoLoader.loadSync(protoPath, {
             longs: String,
             enums: String,
@@ -125,11 +183,18 @@ export class GrpcClient {
         const protoDescriptor = grpc.loadPackageDefinition(packageDefinition) as unknown as ProtoGrpcType;
         const BarqService = protoDescriptor.barq.Barq;
         this.client = new BarqService(address, grpc.credentials.createInsecure());
+        this.metadata = new grpc.Metadata();
+        if (apiKey) {
+            this.metadata.set("x-api-key", apiKey);
+        }
+        if (tenantId) {
+            this.metadata.set("x-tenant-id", tenantId);
+        }
     }
 
     status(): Promise<boolean> {
         return new Promise((resolve, reject) => {
-            this.client.status({}, (err, response?: StatusResponse__Output) => {
+            this.client.status({}, this.metadata, (err, response?: StatusResponse__Output) => {
                 if (err) return reject(err);
                 resolve(Boolean(response?.ok));
             });
@@ -142,7 +207,7 @@ export class GrpcClient {
 
     createCollection(name: string, dimension: number, metric: string = "L2"): Promise<void> {
         return new Promise((resolve, reject) => {
-            this.client.createCollection({ name, dimension, metric }, (err) => {
+            this.client.createCollection({ name, dimension, metric }, this.metadata, (err) => {
                 if (err) return reject(err);
                 resolve();
             });
@@ -158,7 +223,7 @@ export class GrpcClient {
         };
 
         return new Promise((resolve, reject) => {
-            this.client.insert(request, (err) => {
+            this.client.insert(request, this.metadata, (err) => {
                 if (err) return reject(err);
                 resolve();
             });
@@ -175,7 +240,7 @@ export class GrpcClient {
                 collection,
                 vector,
                 topK
-            }, (err, response?: SearchResponse__Output) => {
+            }, this.metadata, (err, response?: SearchResponse__Output) => {
                 if (err) return reject(err);
                 const results = (response?.results ?? []).map((r) => ({
                     id: r.id ?? "",
