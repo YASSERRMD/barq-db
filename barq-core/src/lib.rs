@@ -1646,30 +1646,10 @@ fn merge_search_result_sources(
     results
 }
 
-fn normalize_scores(results: &[SearchResult]) -> HashMap<DocumentId, f32> {
-    if results.is_empty() {
-        return HashMap::new();
-    }
-    let mut min_score = f32::MAX;
-    let mut max_score = f32::MIN;
-    for result in results {
-        let score = sanitize_score(result.score);
-        min_score = min_score.min(score);
-        max_score = max_score.max(score);
-    }
+const HYBRID_RRF_K: f32 = 60.0;
 
-    results
-        .iter()
-        .map(|result| {
-            let score = sanitize_score(result.score);
-            let normalized = if (max_score - min_score).abs() < f32::EPSILON {
-                1.0
-            } else {
-                (score - min_score) / (max_score - min_score)
-            };
-            (result.id.clone(), normalized)
-        })
-        .collect()
+fn reciprocal_rank_score(rank: usize, weight: f32) -> f32 {
+    weight / (HYBRID_RRF_K + rank as f32 + 1.0)
 }
 
 #[derive(Clone, Copy)]
@@ -1683,11 +1663,12 @@ fn project_hybrid_branch(
     branch: HybridBranch,
     weight: f32,
 ) -> Vec<HybridSearchResult> {
-    let normalized = normalize_scores(&results);
     let mut projected: Vec<_> = results
         .into_iter()
+        .enumerate()
         .map(|result| {
-            let score = weight * normalized.get(&result.id).copied().unwrap_or(0.0);
+            let (rank, result) = result;
+            let score = reciprocal_rank_score(rank, weight);
             match branch {
                 HybridBranch::Text => HybridSearchResult {
                     id: result.id,
@@ -1714,40 +1695,37 @@ fn fuse_hybrid_results(
     weights: HybridWeights,
     top_k: usize,
 ) -> Vec<HybridSearchResult> {
-    let normalized_bm25 = normalize_scores(&bm25_results);
-    let normalized_vectors = normalize_scores(&vector_results);
-
     let mut combined: HashMap<DocumentId, HybridSearchResult> = HashMap::new();
 
-    for result in bm25_results {
-        let normalized = *normalized_bm25.get(&result.id).unwrap_or(&0.0);
+    for (rank, result) in bm25_results.into_iter().enumerate() {
+        let score = reciprocal_rank_score(rank, weights.bm25);
         combined
             .entry(result.id.clone())
             .and_modify(|entry| {
                 entry.bm25_score = Some(result.score);
-                entry.score += weights.bm25 * normalized;
+                entry.score += score;
             })
             .or_insert(HybridSearchResult {
                 id: result.id,
                 bm25_score: Some(result.score),
                 vector_score: None,
-                score: weights.bm25 * normalized,
+                score,
             });
     }
 
-    for result in vector_results {
-        let normalized = *normalized_vectors.get(&result.id).unwrap_or(&0.0);
+    for (rank, result) in vector_results.into_iter().enumerate() {
+        let score = reciprocal_rank_score(rank, weights.vector);
         combined
             .entry(result.id.clone())
             .and_modify(|entry| {
                 entry.vector_score = Some(result.score);
-                entry.score += weights.vector * normalized;
+                entry.score += score;
             })
             .or_insert(HybridSearchResult {
                 id: result.id,
                 bm25_score: None,
                 vector_score: Some(result.score),
-                score: weights.vector * normalized,
+                score,
             });
     }
 
@@ -2340,7 +2318,7 @@ mod tests {
     }
 
     #[test]
-    fn hybrid_weighted_fusion_breaks_ties_deterministically() {
+    fn hybrid_rrf_breaks_ties_deterministically() {
         let weights = HybridWeights {
             bm25: 0.5,
             vector: 0.5,
@@ -2373,7 +2351,9 @@ mod tests {
         assert_eq!(first.len(), 2);
         assert_eq!(first[0].id, DocumentId::U64(1));
         assert_eq!(first[1].id, DocumentId::U64(2));
-        assert_eq!(first[0].score, first[1].score);
+        assert_eq!(first[0].score, reciprocal_rank_score(0, 0.5) + reciprocal_rank_score(0, 0.5));
+        assert_eq!(first[1].score, reciprocal_rank_score(1, 0.5) + reciprocal_rank_score(1, 0.5));
+        assert!(first[0].score > first[1].score);
     }
 
     #[test]
@@ -2492,34 +2472,55 @@ mod tests {
     }
 
     #[test]
-    fn normalize_scores_handles_equal_and_non_finite_values() {
-        let equal_scores = vec![
+    fn reciprocal_rank_score_decreases_by_rank() {
+        let first = reciprocal_rank_score(0, 0.5);
+        let second = reciprocal_rank_score(1, 0.5);
+        let tenth = reciprocal_rank_score(9, 0.5);
+
+        assert!(first > second);
+        assert!(second > tenth);
+    }
+
+    #[test]
+    fn sanitize_score_treats_non_finite_as_zero() {
+        assert_eq!(sanitize_score(f32::NAN), 0.0);
+        assert_eq!(sanitize_score(f32::INFINITY), 0.0);
+        assert_eq!(sanitize_score(-f32::INFINITY), 0.0);
+        assert_eq!(sanitize_score(2.0), 2.0);
+    }
+
+    #[test]
+    fn hybrid_rrf_favors_documents_ranked_by_both_branches() {
+        let weights = HybridWeights {
+            bm25: 0.5,
+            vector: 0.5,
+        };
+        let bm25_results = vec![
             SearchResult {
                 id: DocumentId::U64(1),
-                score: 0.0,
+                score: 100.0,
             },
             SearchResult {
                 id: DocumentId::U64(2),
-                score: 0.0,
+                score: 99.0,
             },
         ];
-        let equal = normalize_scores(&equal_scores);
-        assert_eq!(equal.get(&DocumentId::U64(1)), Some(&1.0));
-        assert_eq!(equal.get(&DocumentId::U64(2)), Some(&1.0));
-
-        let mixed_scores = vec![
+        let vector_results = vec![
+            SearchResult {
+                id: DocumentId::U64(2),
+                score: 99.0,
+            },
             SearchResult {
                 id: DocumentId::U64(3),
-                score: f32::NAN,
-            },
-            SearchResult {
-                id: DocumentId::U64(4),
-                score: 2.0,
+                score: 98.0,
             },
         ];
-        let normalized = normalize_scores(&mixed_scores);
-        assert_eq!(normalized.get(&DocumentId::U64(3)), Some(&0.0));
-        assert_eq!(normalized.get(&DocumentId::U64(4)), Some(&1.0));
+
+        let fused = fuse_hybrid_results(bm25_results, vector_results, weights, 3);
+
+        assert_eq!(fused[0].id, DocumentId::U64(2));
+        assert!(fused[0].bm25_score.is_some());
+        assert!(fused[0].vector_score.is_some());
     }
 
     proptest! {
@@ -2949,39 +2950,37 @@ mod tests {
         vector_results = collection.filter_results(vector_results, Some(&filter));
         vector_results.truncate(4);
 
-        let normalized_bm25 = normalize_scores(&bm25_results);
-        let normalized_vectors = normalize_scores(&vector_results);
         let mut combined: HashMap<DocumentId, HybridSearchResult> = HashMap::new();
 
-        for result in bm25_results {
-            let normalized = *normalized_bm25.get(&result.id).unwrap_or(&0.0);
+        for (rank, result) in bm25_results.into_iter().enumerate() {
+            let score = reciprocal_rank_score(rank, weights.bm25);
             combined
                 .entry(result.id.clone())
                 .and_modify(|entry| {
                     entry.bm25_score = Some(result.score);
-                    entry.score += weights.bm25 * normalized;
+                    entry.score += score;
                 })
                 .or_insert(HybridSearchResult {
                     id: result.id,
                     bm25_score: Some(result.score),
                     vector_score: None,
-                    score: weights.bm25 * normalized,
+                    score,
                 });
         }
 
-        for result in vector_results {
-            let normalized = *normalized_vectors.get(&result.id).unwrap_or(&0.0);
+        for (rank, result) in vector_results.into_iter().enumerate() {
+            let score = reciprocal_rank_score(rank, weights.vector);
             combined
                 .entry(result.id.clone())
                 .and_modify(|entry| {
                     entry.vector_score = Some(result.score);
-                    entry.score += weights.vector * normalized;
+                    entry.score += score;
                 })
                 .or_insert(HybridSearchResult {
                     id: result.id,
                     bm25_score: None,
                     vector_score: Some(result.score),
-                    score: weights.vector * normalized,
+                    score,
                 });
         }
 

@@ -71,7 +71,7 @@ Ingestion, indexing, and querying are treated as coordinated stages of a single 
 
 ### Hybrid Retrieval
 - Combined vector similarity and BM25 keyword search  
-- Weighted score fusion  
+- Reciprocal Rank Fusion (RRF)  
 - Deterministic result merging  
 
 ### gRPC-First API

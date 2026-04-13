@@ -25,6 +25,7 @@ fn canonical_proto_is_documented_across_docs_and_sdks() {
                 "No breaking changes",
                 "Disk-backed vector storage using mmap",
                 "Async ingestion",
+                "Reciprocal Rank Fusion (RRF)",
                 "gRPC is the primary API surface",
                 "This release does not implement full consensus",
                 "proto/barq.proto",
