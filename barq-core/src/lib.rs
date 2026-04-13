@@ -594,16 +594,16 @@ impl QueryPlan {
             ));
         }
 
+        let has_text = text.map(|value| !value.trim().is_empty()).unwrap_or(false);
         let has_vector = match vector {
-            Some(values) if values.is_empty() => {
+            Some(values) if values.is_empty() && !has_text => {
                 return Err(CatalogError::InvalidSchema(
                     "vector query cannot be empty".to_string(),
                 ))
             }
-            Some(_) => true,
+            Some(values) => !values.is_empty(),
             None => false,
         };
-        let has_text = text.map(|value| !value.trim().is_empty()).unwrap_or(false);
 
         let variant = match (has_vector, has_text, filter.is_some()) {
             (true, false, false) => QueryVariant::VectorOnly,
@@ -1156,63 +1156,36 @@ impl Collection {
             self.validate_filter(f)?;
         }
         let weights = weights.unwrap_or_default();
-        self.text_index
-            .as_ref()
-            .ok_or_else(|| CatalogError::InvalidSchema("collection has no text index".into()))?;
+        match plan.variant() {
+            QueryVariant::VectorOnly | QueryVariant::FilteredVector => {
+                let results = self.search_with_filter(vector, top_k, filter)?;
+                Ok(project_hybrid_branch(results, HybridBranch::Vector, weights.vector))
+            }
+            QueryVariant::TextOnly | QueryVariant::FilteredText => {
+                self.text_index.as_ref().ok_or_else(|| {
+                    CatalogError::InvalidSchema("collection has no text index".into())
+                })?;
+                let results = self.search_text_with_filter(query, top_k, filter)?;
+                Ok(project_hybrid_branch(results, HybridBranch::Text, weights.bm25))
+            }
+            QueryVariant::Hybrid | QueryVariant::FilteredHybrid => {
+                self.text_index.as_ref().ok_or_else(|| {
+                    CatalogError::InvalidSchema("collection has no text index".into())
+                })?;
 
-        let (bm25_results, vector_results) = rayon::join(
-            || self.search_text_with_filter(query, top_k * 2, filter),
-            || self.search_with_filter(vector, top_k * 2, filter),
-        );
+                let (bm25_results, vector_results) = rayon::join(
+                    || self.search_text_with_filter(query, top_k * 2, filter),
+                    || self.search_with_filter(vector, top_k * 2, filter),
+                );
 
-        let bm25_results = bm25_results?;
-        let vector_results = vector_results?;
-
-        let normalized_bm25 = normalize_scores(&bm25_results);
-        let normalized_vectors = normalize_scores(&vector_results);
-
-        let mut combined: HashMap<DocumentId, HybridSearchResult> = HashMap::new();
-
-        for result in bm25_results {
-            let normalized = *normalized_bm25.get(&result.id).unwrap_or(&0.0);
-            combined
-                .entry(result.id.clone())
-                .and_modify(|entry| {
-                    entry.bm25_score = Some(result.score);
-                    entry.score += weights.bm25 * normalized;
-                })
-                .or_insert(HybridSearchResult {
-                    id: result.id,
-                    bm25_score: Some(result.score),
-                    vector_score: None,
-                    score: weights.bm25 * normalized,
-                });
+                Ok(fuse_hybrid_results(
+                    bm25_results?,
+                    vector_results?,
+                    weights,
+                    top_k,
+                ))
+            }
         }
-
-        for result in vector_results {
-            let normalized = *normalized_vectors.get(&result.id).unwrap_or(&0.0);
-            combined
-                .entry(result.id.clone())
-                .and_modify(|entry| {
-                    entry.vector_score = Some(result.score);
-                    entry.score += weights.vector * normalized;
-                })
-                .or_insert(HybridSearchResult {
-                    id: result.id,
-                    bm25_score: None,
-                    vector_score: Some(result.score),
-                    score: weights.vector * normalized,
-                });
-        }
-
-        let mut results: Vec<HybridSearchResult> = combined.into_values().collect();
-        results.par_sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        results.truncate(top_k.min(results.len()));
-        Ok(results)
     }
 
     pub fn explain_hybrid(
@@ -1507,21 +1480,126 @@ fn normalize_scores(results: &[SearchResult]) -> HashMap<DocumentId, f32> {
     let mut min_score = f32::MAX;
     let mut max_score = f32::MIN;
     for result in results {
-        min_score = min_score.min(result.score);
-        max_score = max_score.max(result.score);
+        let score = sanitize_score(result.score);
+        min_score = min_score.min(score);
+        max_score = max_score.max(score);
     }
 
     results
         .iter()
         .map(|result| {
+            let score = sanitize_score(result.score);
             let normalized = if (max_score - min_score).abs() < f32::EPSILON {
                 1.0
             } else {
-                (result.score - min_score) / (max_score - min_score)
+                (score - min_score) / (max_score - min_score)
             };
             (result.id.clone(), normalized)
         })
         .collect()
+}
+
+#[derive(Clone, Copy)]
+enum HybridBranch {
+    Text,
+    Vector,
+}
+
+fn project_hybrid_branch(
+    results: Vec<SearchResult>,
+    branch: HybridBranch,
+    weight: f32,
+) -> Vec<HybridSearchResult> {
+    let normalized = normalize_scores(&results);
+    let mut projected: Vec<_> = results
+        .into_iter()
+        .map(|result| {
+            let score = weight * normalized.get(&result.id).copied().unwrap_or(0.0);
+            match branch {
+                HybridBranch::Text => HybridSearchResult {
+                    id: result.id,
+                    bm25_score: Some(result.score),
+                    vector_score: None,
+                    score,
+                },
+                HybridBranch::Vector => HybridSearchResult {
+                    id: result.id,
+                    bm25_score: None,
+                    vector_score: Some(result.score),
+                    score,
+                },
+            }
+        })
+        .collect();
+    sort_hybrid_results(&mut projected);
+    projected
+}
+
+fn fuse_hybrid_results(
+    bm25_results: Vec<SearchResult>,
+    vector_results: Vec<SearchResult>,
+    weights: HybridWeights,
+    top_k: usize,
+) -> Vec<HybridSearchResult> {
+    let normalized_bm25 = normalize_scores(&bm25_results);
+    let normalized_vectors = normalize_scores(&vector_results);
+
+    let mut combined: HashMap<DocumentId, HybridSearchResult> = HashMap::new();
+
+    for result in bm25_results {
+        let normalized = *normalized_bm25.get(&result.id).unwrap_or(&0.0);
+        combined
+            .entry(result.id.clone())
+            .and_modify(|entry| {
+                entry.bm25_score = Some(result.score);
+                entry.score += weights.bm25 * normalized;
+            })
+            .or_insert(HybridSearchResult {
+                id: result.id,
+                bm25_score: Some(result.score),
+                vector_score: None,
+                score: weights.bm25 * normalized,
+            });
+    }
+
+    for result in vector_results {
+        let normalized = *normalized_vectors.get(&result.id).unwrap_or(&0.0);
+        combined
+            .entry(result.id.clone())
+            .and_modify(|entry| {
+                entry.vector_score = Some(result.score);
+                entry.score += weights.vector * normalized;
+            })
+            .or_insert(HybridSearchResult {
+                id: result.id,
+                bm25_score: None,
+                vector_score: Some(result.score),
+                score: weights.vector * normalized,
+            });
+    }
+
+    let mut results: Vec<_> = combined.into_values().collect();
+    sort_hybrid_results(&mut results);
+    results.truncate(top_k.min(results.len()));
+    results
+}
+
+fn sanitize_score(score: f32) -> f32 {
+    if score.is_finite() {
+        score
+    } else {
+        0.0
+    }
+}
+
+fn sort_hybrid_results(results: &mut [HybridSearchResult]) {
+    results.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.id.cmp(&right.id))
+    });
 }
 
 #[cfg(test)]
@@ -1900,6 +1978,111 @@ mod tests {
     }
 
     #[test]
+    fn hybrid_weighted_fusion_breaks_ties_deterministically() {
+        let weights = HybridWeights {
+            bm25: 0.5,
+            vector: 0.5,
+        };
+        let bm25_results = vec![
+            SearchResult {
+                id: DocumentId::U64(1),
+                score: 10.0,
+            },
+            SearchResult {
+                id: DocumentId::U64(2),
+                score: 0.0,
+            },
+        ];
+        let vector_results = vec![
+            SearchResult {
+                id: DocumentId::U64(1),
+                score: 0.0,
+            },
+            SearchResult {
+                id: DocumentId::U64(2),
+                score: 10.0,
+            },
+        ];
+
+        let first = fuse_hybrid_results(bm25_results.clone(), vector_results.clone(), weights, 2);
+        let second = fuse_hybrid_results(bm25_results, vector_results, weights, 2);
+
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].id, DocumentId::U64(1));
+        assert_eq!(first[1].id, DocumentId::U64(2));
+        assert_eq!(first[0].score, first[1].score);
+    }
+
+    #[test]
+    fn hybrid_falls_back_to_vector_results_when_text_query_is_blank() {
+        let mut catalog = Catalog::new();
+        let tenant = default_tenant();
+        catalog
+            .create_collection(tenant.clone(), sample_schema())
+            .unwrap();
+        let collection = catalog.collection_mut(&tenant, "products").unwrap();
+
+        collection
+            .insert(Document {
+                id: DocumentId::U64(1),
+                vector: vec![1.0, 0.0, 0.0],
+                payload: None,
+            })
+            .unwrap();
+        collection
+            .insert(Document {
+                id: DocumentId::U64(2),
+                vector: vec![0.0, 1.0, 0.0],
+                payload: None,
+            })
+            .unwrap();
+
+        let results = collection
+            .search_hybrid(&[1.0, 0.0, 0.0], "   ", 2, None, None)
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].id, DocumentId::U64(1));
+        assert!(results.iter().all(|result| result.bm25_score.is_none()));
+        assert!(results.iter().all(|result| result.vector_score.is_some()));
+    }
+
+    #[test]
+    fn hybrid_falls_back_to_text_results_when_vector_query_is_empty() {
+        let mut catalog = Catalog::new();
+        let tenant = default_tenant();
+        catalog
+            .create_collection(tenant.clone(), text_schema())
+            .unwrap();
+        let collection = catalog.collection_mut(&tenant, "articles").unwrap();
+
+        for (id, body) in [
+            (1, "Rust systems programming guide"),
+            (2, "Database internals"),
+        ] {
+            let mut payload = HashMap::new();
+            payload.insert("body".to_string(), PayloadValue::String(body.into()));
+            collection
+                .insert(Document {
+                    id: DocumentId::U64(id),
+                    vector: vec![id as f32, 0.0, 0.0],
+                    payload: Some(PayloadValue::Object(payload)),
+                })
+                .unwrap();
+        }
+
+        let results = collection
+            .search_hybrid(&[], "rust guide", 2, None, None)
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, DocumentId::U64(1));
+        assert!(results.iter().all(|result| result.bm25_score.is_some()));
+        assert!(results.iter().all(|result| result.vector_score.is_none()));
+    }
+
+    #[test]
     fn hybrid_search_remains_correct_while_vector_index_is_building() {
         let mut catalog = Catalog::new();
         let tenant = default_tenant();
@@ -1944,6 +2127,37 @@ mod tests {
             .unwrap();
 
         assert_eq!(fallback, ready);
+    }
+
+    #[test]
+    fn normalize_scores_handles_equal_and_non_finite_values() {
+        let equal_scores = vec![
+            SearchResult {
+                id: DocumentId::U64(1),
+                score: 0.0,
+            },
+            SearchResult {
+                id: DocumentId::U64(2),
+                score: 0.0,
+            },
+        ];
+        let equal = normalize_scores(&equal_scores);
+        assert_eq!(equal.get(&DocumentId::U64(1)), Some(&1.0));
+        assert_eq!(equal.get(&DocumentId::U64(2)), Some(&1.0));
+
+        let mixed_scores = vec![
+            SearchResult {
+                id: DocumentId::U64(3),
+                score: f32::NAN,
+            },
+            SearchResult {
+                id: DocumentId::U64(4),
+                score: 2.0,
+            },
+        ];
+        let normalized = normalize_scores(&mixed_scores);
+        assert_eq!(normalized.get(&DocumentId::U64(3)), Some(&0.0));
+        assert_eq!(normalized.get(&DocumentId::U64(4)), Some(&1.0));
     }
 
     #[test]
