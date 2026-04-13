@@ -30,7 +30,11 @@ fn readme_describes_routed_replication_honestly() {
         "README should describe the current cluster capability honestly"
     );
     assert!(
-        readme.contains("future work"),
-        "README should keep consensus language in future-work framing only"
+        readme.contains("Raft leader election"),
+        "README should mention the deterministic consensus engine when it exists"
+    );
+    assert!(
+        readme.contains("not yet routed through that consensus engine by default"),
+        "README should keep the default runtime consistency model honest"
     );
 }

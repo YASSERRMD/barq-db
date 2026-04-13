@@ -71,7 +71,7 @@ Ingestion, indexing, and querying are treated as coordinated stages of a single 
 
 ### Hybrid Retrieval
 - Combined vector similarity and BM25 keyword search  
-- Weighted score fusion  
+- Reciprocal Rank Fusion (RRF)  
 - Deterministic result merging  
 
 ### gRPC-First API
@@ -108,10 +108,10 @@ Ingestion, indexing, and querying are treated as coordinated stages of a single 
 
 ## Consistency Model (Current)
 
-- Routed replication provides distribution and redundancy  
-- Consistency is not quorum-based in v2  
-- This release does not implement full consensus  
-- Future versions may introduce stronger consistency guarantees  
+- Current runtime deployments use routed replication for distribution and redundancy  
+- `barq-cluster` now includes deterministic Raft leader election, quorum commit, stale-leader rejection, and follower catch-up simulation  
+- API/runtime writes are not yet routed through that consensus engine by default  
+- Current default consistency is still not quorum-based in v2  
 
 ---
 
@@ -122,10 +122,13 @@ Barq-DB v2 includes built-in benchmarking tools.
 Designed to evaluate:
 
 - Ingestion throughput  
-- Query latency (p50 / p95 / p99)  
+- Query latency (p50 / p95 / p99) from live in-process searches  
 - Memory usage under load  
+- RSS before and after a benchmark run  
 
 Supports dataset simulations at scale (1M, 10M, and higher).
+
+Benchmark smoke coverage is checked in CI through [`.github/workflows/benchmarks.yml`](./.github/workflows/benchmarks.yml).
 
 ---
 

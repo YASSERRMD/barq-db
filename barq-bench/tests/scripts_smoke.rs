@@ -10,5 +10,8 @@ fn benchmark_scripts_have_expected_commands() {
         let script = fs::read_to_string(path).expect("script should exist");
         assert!(script.contains("cargo run -p barq-bench"));
         assert!(script.contains("--format json"));
+        assert!(script.contains("--seed 11"));
+        assert!(script.contains("--count"));
+        assert!(script.contains("--dimension 128"));
     }
 }

@@ -1,0 +1,46 @@
+name: Benchmarks
+
+on:
+  push:
+    paths:
+      - ".github/workflows/benchmarks.yml"
+      - "barq-bench/**"
+      - "benchmarks/**"
+      - "barq-core/**"
+      - "README.md"
+      - "docs/src/reference/performance.md"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  pull_request:
+    paths:
+      - ".github/workflows/benchmarks.yml"
+      - "barq-bench/**"
+      - "benchmarks/**"
+      - "barq-core/**"
+      - "README.md"
+      - "docs/src/reference/performance.md"
+      - "Cargo.toml"
+      - "Cargo.lock"
+
+jobs:
+  benchmark-smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run benchmark crate tests
+        run: cargo test -p barq-bench
+
+      - name: Run ingest benchmark smoke
+        run: cargo run -p barq-bench -- --format json ingest --seed 11 --count 128 --dimension 16
+
+      - name: Run search benchmark smoke
+        run: cargo run -p barq-bench -- --format json search --seed 11 --count 128 --dimension 16 --queries 16

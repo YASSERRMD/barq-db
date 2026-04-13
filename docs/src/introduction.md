@@ -5,7 +5,7 @@
 ## Key Features
 
 - **Blazing Fast Vector Search**: Built on HNSW and IVF indexes with SIMD optimizations for maximum throughput.
-- **Hybrid Retrieval**: Seamlessly blend vector similarity with BM25 keyword scores using weighted score fusion.
+- **Hybrid Retrieval**: Seamlessly blend vector similarity with BM25 keyword scores using Reciprocal Rank Fusion (RRF).
 - **Storage Tiering**: Automatically manage data lifecycle by moving cold segments to cheaper object storage (S3, GCS, Azure Blob).
 - **Multi-Tenancy**: Native support for tenant isolation, quotas, and role-based access control (RBAC).
 - **Cloud Native**: Designed for Kubernetes with a custom operator, stateless query nodes, and decoupled storage.

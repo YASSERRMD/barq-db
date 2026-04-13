@@ -5,9 +5,11 @@ Barq v2 includes a dedicated benchmark utility crate, `barq-bench`, for determin
 ## What It Covers
 
 - Deterministic dataset generation with a fixed seed
-- Ingest benchmark utilities with structured JSON/CSV output
-- Search benchmark utilities with deterministic percentile and QPS reporting
+- Ingest benchmark utilities backed by real collection inserts
+- Search benchmark utilities backed by live in-process collection searches
 - Reproducible shell scripts for 1M, 10M, and 50M benchmark scenarios
+- RSS sampling before and after benchmark execution
+- GitHub Actions benchmark smoke coverage via `.github/workflows/benchmarks.yml`
 
 ## Run The Benchmarks
 
@@ -23,14 +25,14 @@ Direct CLI runs:
 
 ```bash
 cargo run -p barq-bench -- --format json ingest --seed 11 --count 1000000 --dimension 128
-cargo run -p barq-bench -- --format json search --queries 10000 --simulated-latency-micros 250
+cargo run -p barq-bench -- --format json search --seed 11 --count 1000000 --dimension 128 --queries 10000
 ```
 
 ## Notes
 
 - These are benchmark utilities, not correctness tests.
-- Search benchmarks currently use deterministic simulated latency inputs rather than executing live index queries.
-- CLI memory reporting currently emits placeholder baseline/peak values rather than OS-level RSS sampling.
+- Search benchmarks execute live search calls against deterministic in-process collections.
+- Memory reporting samples RSS before and after benchmark execution.
 - Benchmark scripts are intended to be reproducible starting points for comparative runs across environments.
 
 ## Source Files
