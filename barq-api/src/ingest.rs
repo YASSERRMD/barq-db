@@ -1,9 +1,9 @@
 use barq_core::{CollectionSchema, Document, FieldType, PayloadValue, TenantId};
 use barq_storage::{Storage, StorageError};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::{
     oneshot, Mutex as AsyncMutex, Notify, OwnedSemaphorePermit, Semaphore, TryAcquireError,
 };
@@ -50,6 +50,17 @@ pub(crate) enum BackpressurePolicy {
     Drop,
 }
 
+/// Snapshot of ingestion metrics used for deterministic tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct IngestionMetricsSnapshot {
+    pub(crate) queue_depth: usize,
+    pub(crate) batches_total: u64,
+    pub(crate) successes_total: u64,
+    pub(crate) failures_total: u64,
+    pub(crate) last_lag_micros: u64,
+}
+
 /// Bounded FIFO queue used by the asynchronous ingestion pipeline.
 #[derive(Debug)]
 pub struct IngestionQueue<T> {
@@ -87,6 +98,7 @@ impl<T> IngestionQueue<T> {
     }
 
     /// Returns true when the queue contains no items.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
@@ -97,6 +109,7 @@ impl<T> IngestionQueue<T> {
     }
 
     /// Returns the configured queue capacity.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn capacity(&self) -> usize {
         self.capacity
     }
@@ -163,6 +176,54 @@ struct PendingInsert {
     permit: OwnedSemaphorePermit,
 }
 
+#[derive(Debug, Default)]
+struct IngestionMetrics {
+    queue_depth: AtomicUsize,
+    batches_total: AtomicU64,
+    successes_total: AtomicU64,
+    failures_total: AtomicU64,
+    last_lag_micros: AtomicU64,
+}
+
+impl IngestionMetrics {
+    fn update_queue_depth(&self, depth: usize) {
+        self.queue_depth.store(depth, Ordering::SeqCst);
+        metrics::gauge!("ingestion_queue_size").set(depth as f64);
+    }
+
+    fn record_batch(&self) {
+        self.batches_total.fetch_add(1, Ordering::SeqCst);
+        metrics::counter!("ingestion_batch_count_total").increment(1);
+    }
+
+    fn record_lag(&self, lag: Duration) {
+        let micros = lag.as_micros().min(u64::MAX as u128) as u64;
+        self.last_lag_micros.store(micros, Ordering::SeqCst);
+        metrics::gauge!("ingestion_lag_seconds").set(lag.as_secs_f64());
+    }
+
+    fn record_success(&self) {
+        self.successes_total.fetch_add(1, Ordering::SeqCst);
+        metrics::counter!("ingestion_requests_succeeded_total").increment(1);
+    }
+
+    fn record_failure(&self) {
+        self.failures_total.fetch_add(1, Ordering::SeqCst);
+        metrics::counter!("ingestion_requests_failed_total").increment(1);
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn snapshot(&self) -> IngestionMetricsSnapshot {
+        IngestionMetricsSnapshot {
+            queue_depth: self.queue_depth.load(Ordering::SeqCst),
+            batches_total: self.batches_total.load(Ordering::SeqCst),
+            successes_total: self.successes_total.load(Ordering::SeqCst),
+            failures_total: self.failures_total.load(Ordering::SeqCst),
+            last_lag_micros: self.last_lag_micros.load(Ordering::SeqCst),
+        }
+    }
+}
+
 /// Shared asynchronous ingestion service used by HTTP and gRPC writes.
 #[derive(Debug)]
 pub(crate) struct IngestionService {
@@ -173,7 +234,10 @@ pub(crate) struct IngestionService {
     queue_capacity: usize,
     backpressure_policy: BackpressurePolicy,
     pending_jobs: AtomicUsize,
+    shutdown_requested: AtomicBool,
     item_available: Notify,
+    drained: Notify,
+    metrics: IngestionMetrics,
     worker_handle: AsyncMutex<Option<tokio::task::JoinHandle<()>>>,
     #[cfg(test)]
     pause_before_dequeue: Mutex<Option<Arc<PauseBeforeDequeue>>>,
@@ -199,7 +263,10 @@ impl IngestionService {
             queue_capacity: config.queue_capacity,
             backpressure_policy: config.backpressure_policy,
             pending_jobs: AtomicUsize::new(0),
+            shutdown_requested: AtomicBool::new(false),
             item_available: Notify::new(),
+            drained: Notify::new(),
+            metrics: IngestionMetrics::default(),
             worker_handle: AsyncMutex::new(None),
             #[cfg(test)]
             pause_before_dequeue: Mutex::new(None),
@@ -214,6 +281,9 @@ impl IngestionService {
         self: &Arc<Self>,
         request: IngestionInsertRequest,
     ) -> Result<oneshot::Receiver<Result<(), StorageError>>, QueueAdmissionError> {
+        if self.shutdown_requested.load(Ordering::SeqCst) {
+            return Err(QueueAdmissionError::Closed);
+        }
         self.ensure_worker_started().await;
 
         let permit = match self.backpressure_policy {
@@ -259,6 +329,7 @@ impl IngestionService {
             queue
                 .enqueue(pending)
                 .expect("semaphore permit must reserve queue capacity");
+            self.metrics.update_queue_depth(queue.len());
         }
         self.item_available.notify_one();
         Ok(completion_rx)
@@ -276,10 +347,20 @@ impl IngestionService {
 
     async fn worker_loop(self: Arc<Self>) {
         loop {
+            if self.shutdown_requested.load(Ordering::SeqCst)
+                && self.pending_jobs.load(Ordering::SeqCst) == 0
+            {
+                break;
+            }
             let notified = self.item_available.notified();
             if let Some(batch) = self.take_batch().await {
                 self.apply_batch(batch).await;
                 continue;
+            }
+            if self.shutdown_requested.load(Ordering::SeqCst)
+                && self.pending_jobs.load(Ordering::SeqCst) == 0
+            {
+                break;
             }
             notified.await;
         }
@@ -310,6 +391,7 @@ impl IngestionService {
                 None => break,
             }
         }
+        self.metrics.update_queue_depth(queue.len());
         if batch.is_empty() {
             None
         } else {
@@ -323,6 +405,11 @@ impl IngestionService {
             .lock()
             .expect("observed batch sizes lock poisoned")
             .push(batch.len());
+
+        self.metrics.record_batch();
+        if let Some(oldest) = batch.first() {
+            self.metrics.record_lag(oldest.enqueued_at.elapsed());
+        }
 
         let mut storage = self.storage.lock().await;
         let mut completions = Vec::with_capacity(batch.len());
@@ -341,6 +428,10 @@ impl IngestionService {
                 pending.request.document,
                 pending.request.upsert,
             );
+            match &result {
+                Ok(()) => self.metrics.record_success(),
+                Err(_) => self.metrics.record_failure(),
+            }
             completions.push((pending.completion, result));
         }
 
@@ -348,7 +439,9 @@ impl IngestionService {
 
         for (completion, result) in completions {
             let _ = completion.send(result);
-            self.pending_jobs.fetch_sub(1, Ordering::SeqCst);
+            if self.pending_jobs.fetch_sub(1, Ordering::SeqCst) == 1 {
+                self.drained.notify_waiters();
+            }
         }
     }
 
@@ -357,6 +450,33 @@ impl IngestionService {
             .lock()
             .expect("ingestion queue lock poisoned")
             .len()
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn metrics_snapshot(&self) -> IngestionMetricsSnapshot {
+        self.metrics.snapshot()
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn drain(&self) {
+        while self.pending_jobs.load(Ordering::SeqCst) > 0 {
+            let notified = self.drained.notified();
+            if self.pending_jobs.load(Ordering::SeqCst) == 0 {
+                break;
+            }
+            notified.await;
+        }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn shutdown(self: &Arc<Self>) {
+        self.shutdown_requested.store(true, Ordering::SeqCst);
+        self.queue_slots.close();
+        self.item_available.notify_waiters();
+        self.drain().await;
+        if let Some(handle) = self.worker_handle.lock().await.take() {
+            let _ = handle.await;
+        }
     }
 
     #[cfg(test)]
@@ -462,11 +582,12 @@ impl PauseBeforeDequeue {
 mod tests {
     use super::{
         validate_insert_document, BackpressurePolicy, IngestionConfig, IngestionQueue,
+        IngestionMetricsSnapshot,
         DEFAULT_INGEST_BATCH_SIZE, DEFAULT_INGEST_QUEUE_CAPACITY,
     };
     use crate::{
-        insert_document, ApiAuth, ApiError, ApiRole, AppState, ClusterConfig, ClusterRouter,
-        DocumentIdInput, InsertDocumentRequest,
+        insert_document, search_collection, ApiAuth, ApiError, ApiRole, AppState, ClusterConfig,
+        ClusterRouter, DocumentIdInput, InsertDocumentRequest, SearchRequest,
     };
     use axum::{
         extract::{Path as AxumPath, State},
@@ -475,9 +596,10 @@ mod tests {
     };
     use barq_core::{CollectionSchema, DistanceMetric, FieldSchema, TenantId};
     use barq_core::{Document, FieldType};
-    use barq_storage::Storage;
+    use barq_storage::{Storage, StorageError};
     use proptest::prelude::*;
     use std::sync::Mutex;
+    use std::time::Instant;
     use tempfile::TempDir;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -542,6 +664,13 @@ mod tests {
             vector,
             payload: None,
             upsert: false,
+        }
+    }
+
+    fn spin_until_clock_moves() {
+        let start = Instant::now();
+        while start.elapsed().as_micros() == 0 {
+            std::hint::spin_loop();
         }
     }
 
@@ -659,6 +788,7 @@ mod tests {
             &[
                 ("BARQ_INGEST_BATCH_SIZE", None),
                 ("BARQ_INGEST_QUEUE_CAPACITY", None),
+                ("BARQ_INGEST_BACKPRESSURE_POLICY", None),
             ],
             || {
                 assert_eq!(
@@ -700,6 +830,7 @@ mod tests {
             &[
                 ("BARQ_INGEST_BATCH_SIZE", Some("0")),
                 ("BARQ_INGEST_QUEUE_CAPACITY", Some("not-a-number")),
+                ("BARQ_INGEST_BACKPRESSURE_POLICY", None),
             ],
             || {
                 assert_eq!(
@@ -1102,6 +1233,211 @@ mod tests {
             .get_document(&tenant, "docs", &barq_index::DocumentId::U64(2))
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn metrics_update_after_successful_batch() {
+        let (_dir, state, tenant) = build_state(4, 2);
+        let hook = state.ingestion.install_pause_before_dequeue();
+
+        let first_state = state.clone();
+        let first = tokio::spawn(async move {
+            insert_document(
+                AxumPath("docs".to_string()),
+                State(first_state),
+                auth_headers(),
+                Json(insert_request(1, vec![1.0, 0.0])),
+            )
+            .await
+        });
+
+        hook.wait_until_reached().await;
+
+        let second_state = state.clone();
+        let second = tokio::spawn(async move {
+            insert_document(
+                AxumPath("docs".to_string()),
+                State(second_state),
+                auth_headers(),
+                Json(insert_request(2, vec![0.0, 1.0])),
+            )
+            .await
+        });
+
+        while state.ingestion.queue_len() < 2 {
+            tokio::task::yield_now().await;
+        }
+
+        let queued = state.ingestion.metrics_snapshot();
+        assert_eq!(queued.queue_depth, 2);
+
+        spin_until_clock_moves();
+        hook.release();
+        assert_eq!(first.await.unwrap().unwrap(), StatusCode::CREATED);
+        assert_eq!(second.await.unwrap().unwrap(), StatusCode::CREATED);
+
+        let snapshot = state.ingestion.metrics_snapshot();
+        assert_eq!(
+            snapshot,
+            IngestionMetricsSnapshot {
+                queue_depth: 0,
+                batches_total: 1,
+                successes_total: 2,
+                failures_total: 0,
+                last_lag_micros: snapshot.last_lag_micros,
+            }
+        );
+        assert!(snapshot.last_lag_micros > 0);
+
+        let rendered = state.metrics.render();
+        assert!(rendered.contains("ingestion_queue_size"));
+        assert!(rendered.contains("ingestion_batch_count_total"));
+        assert!(rendered.contains("ingestion_lag_seconds"));
+
+        let storage = state.storage.lock().await;
+        for id in 1..=2 {
+            assert!(storage
+                .get_document(&tenant, "docs", &barq_index::DocumentId::U64(id))
+                .unwrap()
+                .is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn metrics_record_worker_failure() {
+        let (_dir, state, tenant) = build_state(4, 1);
+        let hook = state.ingestion.install_pause_before_dequeue();
+
+        let state_for_task = state.clone();
+        let insert = tokio::spawn(async move {
+            insert_document(
+                AxumPath("docs".to_string()),
+                State(state_for_task),
+                auth_headers(),
+                Json(insert_request(1, vec![1.0, 0.0])),
+            )
+            .await
+        });
+
+        hook.wait_until_reached().await;
+        {
+            let mut storage = state.storage.lock().await;
+            let _ = storage.seal_segment_for_tenant(&tenant, "docs").unwrap();
+        }
+        hook.release();
+
+        let err = insert.await.unwrap().unwrap_err();
+        assert!(matches!(
+            err,
+            ApiError::Storage(StorageError::SegmentNotWritable { .. })
+        ));
+
+        let snapshot = state.ingestion.metrics_snapshot();
+        assert_eq!(snapshot.batches_total, 1);
+        assert_eq!(snapshot.successes_total, 0);
+        assert_eq!(snapshot.failures_total, 1);
+    }
+
+    #[tokio::test]
+    async fn reads_continue_while_ingestion_is_backlogged() {
+        let (_dir, state, tenant) = build_state(4, 2);
+        {
+            let mut storage = state.storage.lock().await;
+            storage
+                .insert_for_tenant(
+                    &tenant,
+                    "docs",
+                    Document {
+                        id: barq_index::DocumentId::U64(99),
+                        vector: vec![1.0, 0.0],
+                        payload: None,
+                    },
+                    false,
+                )
+                .unwrap();
+        }
+
+        let hook = state.ingestion.install_pause_before_dequeue();
+        let state_for_task = state.clone();
+        let insert = tokio::spawn(async move {
+            insert_document(
+                AxumPath("docs".to_string()),
+                State(state_for_task),
+                auth_headers(),
+                Json(insert_request(1, vec![0.0, 1.0])),
+            )
+            .await
+        });
+
+        hook.wait_until_reached().await;
+
+        let response = search_collection(
+            AxumPath("docs".to_string()),
+            State(state.clone()),
+            auth_headers(),
+            Json(SearchRequest {
+                vector: vec![1.0, 0.0],
+                top_k: 1,
+                filter: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let results = response.0.results;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, barq_index::DocumentId::U64(99));
+
+        hook.release();
+        assert_eq!(insert.await.unwrap().unwrap(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_drain_and_closes_new_submissions() {
+        let (_dir, state, tenant) = build_state(4, 1);
+        let hook = state.ingestion.install_pause_before_dequeue();
+
+        let state_for_task = state.clone();
+        let insert = tokio::spawn(async move {
+            insert_document(
+                AxumPath("docs".to_string()),
+                State(state_for_task),
+                auth_headers(),
+                Json(insert_request(1, vec![1.0, 0.0])),
+            )
+            .await
+        });
+
+        hook.wait_until_reached().await;
+
+        let ingestion = state.ingestion.clone();
+        let shutdown = tokio::spawn(async move {
+            ingestion.shutdown().await;
+        });
+        tokio::task::yield_now().await;
+        assert!(!shutdown.is_finished());
+
+        hook.release();
+        assert_eq!(insert.await.unwrap().unwrap(), StatusCode::CREATED);
+        shutdown.await.unwrap();
+
+        let err = insert_document(
+            AxumPath("docs".to_string()),
+            State(state.clone()),
+            auth_headers(),
+            Json(insert_request(2, vec![0.0, 1.0])),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ApiError::Busy(message) if message.contains("unavailable")));
+
+        let snapshot = state.ingestion.metrics_snapshot();
+        assert_eq!(snapshot.queue_depth, 0);
+        let storage = state.storage.lock().await;
+        assert!(storage
+            .get_document(&tenant, "docs", &barq_index::DocumentId::U64(1))
+            .unwrap()
+            .is_some());
     }
 
     proptest! {
