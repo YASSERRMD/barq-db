@@ -16,3 +16,4 @@
 - [Reference](reference/README.md)
     - [API Specification](reference/api.md)
     - [SDKs](reference/sdks.md)
+    - [Performance Benchmarks](reference/performance.md)

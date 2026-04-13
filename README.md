@@ -18,6 +18,15 @@
 
 Barq is a **high-performance vector database** built in Rust, designed for semantic search, RAG applications, and AI-powered recommendations. It combines dense vector search with BM25 text retrieval in a single, unified API.
 
+## Barq v2
+
+Barq v2 is the current release line documented in this repository.
+
+- gRPC is the primary external contract via `proto/barq.proto`.
+- SDKs are aligned to that gRPC contract first, with HTTP kept as a compatibility surface.
+- Observability and admin capabilities now ship through the canonical API surface.
+- Benchmark tooling is available through `barq-bench` and documented under [Performance Benchmarks](./docs/src/reference/performance.md).
+
 ## Key Features
 
 - **Vector Search** - HNSW, IVF, and flat indexes with SIMD-optimized distance calculations
@@ -55,7 +64,7 @@ The API is available at `http://localhost:8080` (HTTP) and `localhost:50051` (gR
 
 ## SDK Quick Start
 
-Choose your language to get started:
+Choose your language to get started with Barq v2:
 
 | Language | Package | Documentation |
 |----------|---------|---------------|
@@ -258,7 +267,7 @@ cargo test
 - SDK improvements and async support
 - Additional language analyzers
 - Consensus-backed distributed clustering (future work)
-- Performance benchmarks (In Progress)
+- [Performance benchmarks](docs/src/reference/performance.md) - **Available**
 - [Storage Tiering (S3/GCS/Azure)](docs/src/guides/tiering.md) - **Completed**
 - [Kubernetes Operator](docs/src/deployment/operator.md) - **Completed**
 
@@ -269,6 +278,12 @@ Comprehensive documentation is available in the `docs/` directory. You can build
 ```bash
 mdbook serve docs
 ```
+
+Key reference pages:
+
+- [API Specification](./docs/src/reference/api.md)
+- [SDKs](./docs/src/reference/sdks.md)
+- [Performance Benchmarks](./docs/src/reference/performance.md)
 
 ---
 

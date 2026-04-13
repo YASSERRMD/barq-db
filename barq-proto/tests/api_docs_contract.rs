@@ -19,7 +19,21 @@ fn canonical_proto_is_documented_across_docs_and_sdks() {
     let cases: &[(&str, &[&str])] = &[
         (
             "README.md",
-            &["proto/barq.proto", "gRPC is the primary API surface"],
+            &[
+                "Barq v2",
+                "proto/barq.proto",
+                "gRPC is the primary API surface",
+                "Performance Benchmarks",
+            ],
+        ),
+        (
+            "docs/src/reference/performance.md",
+            &[
+                "Barq v2 Performance Benchmarks",
+                "barq-bench",
+                "./benchmarks/scripts/run_1m.sh",
+                "cargo run -p barq-bench",
+            ],
         ),
         (
             "docs/src/reference/api.md",
