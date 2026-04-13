@@ -21,10 +21,16 @@ fn canonical_proto_is_documented_across_docs_and_sdks() {
             "README.md",
             &[
                 "Barq v2",
+                "Phase 1",
+                "Phase 8",
                 "proto/barq.proto",
                 "gRPC is the primary API surface",
                 "Performance Benchmarks",
             ],
+        ),
+        (
+            "docs/src/introduction.md",
+            &["Barq v2 Main Delivery Phases", "Phase 1", "Phase 8", "proto/barq.proto"],
         ),
         (
             "docs/src/reference/performance.md",
