@@ -30,6 +30,7 @@ use utoipa_swagger_ui::SwaggerUi;
 pub use barq_admin::auth::{ApiAuth, ApiError, ApiPermission, ApiRole, ApiIdentity, TlsConfig};
 pub use barq_admin::{admin_routes, AdminState};
 pub mod grpc;
+mod ingest;
 pub mod openapi;
 
 #[derive(Clone)]
