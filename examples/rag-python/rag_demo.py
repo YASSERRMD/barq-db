@@ -37,7 +37,7 @@ def main():
         "It supports storage tiering to S3 and GCS to reduce costs.",
         "The query engine uses HNSW for fast vector search and BM25 for text search.",
         "Barq DB includes a Kubernetes Operator for easy deployment.",
-        "Hybrid search combines vector and keyword scores using Reciprocal Rank Fusion (RRF)."
+        "Hybrid search combines vector and keyword scores using weighted score fusion."
     ]
     
     # Ingest Data

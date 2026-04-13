@@ -1,6 +1,6 @@
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use barq_index::{DocumentId, DocumentIdError, SearchResult};
 
@@ -169,10 +169,23 @@ impl Bm25Index {
     }
 
     pub fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchResult>, TextIndexError> {
+        self.search_with_candidates(query, top_k, None)
+    }
+
+    /// Searches the index while optionally restricting scoring to a candidate set.
+    pub fn search_with_candidates(
+        &self,
+        query: &str,
+        top_k: usize,
+        candidates: Option<&HashSet<DocumentId>>,
+    ) -> Result<Vec<SearchResult>, TextIndexError> {
         if top_k == 0 {
             return Err(TextIndexError::InvalidTopK { top_k });
         }
         if self.documents.is_empty() {
+            return Ok(Vec::new());
+        }
+        if matches!(candidates, Some(set) if set.is_empty()) {
             return Ok(Vec::new());
         }
         let tokens = self.analyzer.tokenize(query);
@@ -189,6 +202,11 @@ impl Bm25Index {
                 let df = postings.len() as f32;
                 let idf = ((total_docs - df + 0.5) / (df + 0.5) + 1.0).ln();
                 for posting in postings {
+                    if let Some(allowed) = candidates {
+                        if !allowed.contains(&posting.doc_id) {
+                            continue;
+                        }
+                    }
                     if let Some(doc_terms) = self.documents.get(&posting.doc_id) {
                         let tf = posting.term_freq as f32;
                         let numerator = tf * (self.config.k1 + 1.0);
@@ -303,5 +321,36 @@ mod tests {
         let expected_score = idf * (tf * (config.k1 + 1.0) / (tf + config.k1));
         assert!((results[0].score - expected_score).abs() < 1e-5);
         assert_eq!(index.config(), config);
+    }
+
+    #[test]
+    fn candidate_search_matches_post_filter_baseline() {
+        let mut index = Bm25Index::new(Bm25Config::default());
+        index
+            .insert(
+                DocumentId::U64(1),
+                &["rust systems programming guide".to_string()],
+            )
+            .unwrap();
+        index
+            .insert(DocumentId::U64(2), &["rust cookbook".to_string()])
+            .unwrap();
+        index
+            .insert(DocumentId::U64(3), &["distributed systems in go".to_string()])
+            .unwrap();
+
+        let candidates = HashSet::from([DocumentId::U64(1), DocumentId::U64(3)]);
+        let baseline: Vec<_> = index
+            .search("rust systems", index.document_count())
+            .unwrap()
+            .into_iter()
+            .filter(|result| candidates.contains(&result.id))
+            .take(2)
+            .collect();
+
+        let pushdown = index
+            .search_with_candidates("rust systems", 2, Some(&candidates))
+            .unwrap();
+        assert_eq!(pushdown, baseline);
     }
 }

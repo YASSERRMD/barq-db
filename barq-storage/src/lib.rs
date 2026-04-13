@@ -1536,7 +1536,7 @@ impl Storage {
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.id.to_string().cmp(&b.id.to_string()))
+                .then_with(|| a.id.cmp(&b.id))
         });
         Ok(results)
     }
@@ -3042,6 +3042,47 @@ mod tests {
             .search("multi_sealed", &[11.0, 0.0, 0.0], 2, None)
             .unwrap();
         assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn search_across_segments_breaks_ties_by_document_id() {
+        let root = tempfile::tempdir().unwrap();
+        let tenant = TenantId::default();
+        let mut storage = Storage::open(root.path()).unwrap();
+        storage.create_collection(sample_schema("tie_segments")).unwrap();
+
+        storage
+            .insert(
+                "tie_segments",
+                Document {
+                    id: DocumentId::U64(10),
+                    vector: vec![1.0, 0.0, 0.0],
+                    payload: None,
+                },
+                false,
+            )
+            .unwrap();
+        storage
+            .flush_wal_to_segment(&tenant, "tie_segments")
+            .unwrap();
+        storage
+            .insert(
+                "tie_segments",
+                Document {
+                    id: DocumentId::U64(2),
+                    vector: vec![1.0, 0.0, 0.0],
+                    payload: None,
+                },
+                false,
+            )
+            .unwrap();
+
+        let results = storage
+            .search("tie_segments", &[1.0, 0.0, 0.0], 2, None)
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].id, DocumentId::U64(10));
+        assert_eq!(results[1].id, DocumentId::U64(2));
     }
 
     #[test]

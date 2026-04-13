@@ -21,7 +21,7 @@ Barq is a **high-performance vector database** built in Rust, designed for seman
 ## Key Features
 
 - **Vector Search** - HNSW, IVF, and flat indexes with SIMD-optimized distance calculations
-- **Hybrid Retrieval** - Combine vector similarity + BM25 keyword search with RRF fusion. Advanced text analysis for multiple languages, including Arabic with root extraction.
+- **Hybrid Retrieval** - Combine vector similarity + BM25 keyword search with weighted score fusion. Advanced text analysis for multiple languages, including Arabic with root extraction.
 - **Multi-Tenancy** - Namespace isolation, RBAC, and per-tenant quotas
 - **Cloud-Native** - Sharded architecture with routed replication
 - **Automated Operations** - Kubernetes operator for seamless deployment, scaling, and storage tiering (Hot/Warm/Cold)
@@ -163,7 +163,7 @@ Each document contains:
 |------|-------------|
 | **Vector** | Similarity search using embeddings |
 | **Text** | BM25 keyword search |
-| **Hybrid** | Combined vector + text with RRF fusion |
+| **Hybrid** | Combined vector + text with weighted score fusion |
 
 ---
 
