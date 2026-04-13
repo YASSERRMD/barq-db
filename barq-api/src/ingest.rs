@@ -1,7 +1,7 @@
 use barq_core::{CollectionSchema, Document, FieldType, PayloadValue, TenantId};
 use barq_metrics::{MetricDefinition, MetricKind};
 use barq_storage::{Storage, StorageError};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -183,6 +183,24 @@ impl std::fmt::Display for QueueAdmissionError {
 
 impl std::error::Error for QueueAdmissionError {}
 
+/// Lifecycle state for a tracked asynchronous insert request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrackedInsertState {
+    Queued,
+    Processing,
+    Succeeded,
+    Failed,
+}
+
+/// Snapshot returned for a tracked asynchronous insert request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct TrackedInsertStatus {
+    pub(crate) request_id: String,
+    pub(crate) state: TrackedInsertState,
+    pub(crate) error_message: Option<String>,
+}
+
 fn parse_env_usize(name: &str, default: usize) -> usize {
     std::env::var(name)
         .ok()
@@ -203,6 +221,7 @@ fn parse_backpressure_policy(name: &str) -> BackpressurePolicy {
 #[derive(Debug)]
 struct PendingInsert {
     request: IngestionInsertRequest,
+    request_id: Option<String>,
     enqueued_at: Instant,
     completion: oneshot::Sender<Result<(), StorageError>>,
     permit: OwnedSemaphorePermit,
@@ -261,10 +280,12 @@ impl IngestionMetrics {
 pub(crate) struct IngestionService {
     storage: Arc<AsyncMutex<Storage>>,
     queue: Mutex<IngestionQueue<PendingInsert>>,
+    tracked_inserts: Mutex<HashMap<String, TrackedInsertStatus>>,
     queue_slots: Arc<Semaphore>,
     batch_size: usize,
     queue_capacity: usize,
     backpressure_policy: BackpressurePolicy,
+    next_request_id: AtomicU64,
     pending_jobs: AtomicUsize,
     shutdown_requested: AtomicBool,
     item_available: Notify,
@@ -293,10 +314,12 @@ impl IngestionService {
         Arc::new(Self {
             storage,
             queue: Mutex::new(IngestionQueue::new(config.queue_capacity)),
+            tracked_inserts: Mutex::new(HashMap::new()),
             queue_slots: Arc::new(Semaphore::new(config.queue_capacity)),
             batch_size: config.batch_size,
             queue_capacity: config.queue_capacity,
             backpressure_policy: config.backpressure_policy,
+            next_request_id: AtomicU64::new(0),
             pending_jobs: AtomicUsize::new(0),
             shutdown_requested: AtomicBool::new(false),
             item_available: Notify::new(),
@@ -315,6 +338,35 @@ impl IngestionService {
     pub(crate) async fn submit(
         self: &Arc<Self>,
         request: IngestionInsertRequest,
+    ) -> Result<oneshot::Receiver<Result<(), StorageError>>, QueueAdmissionError> {
+        self.submit_internal(request, None).await
+    }
+
+    pub(crate) async fn submit_tracked(
+        self: &Arc<Self>,
+        request: IngestionInsertRequest,
+    ) -> Result<(String, oneshot::Receiver<Result<(), StorageError>>), QueueAdmissionError> {
+        let request_id = self.allocate_request_id();
+        self.update_tracked_status(&request_id, TrackedInsertState::Queued, None);
+        match self
+            .submit_internal(request, Some(request_id.clone()))
+            .await
+        {
+            Ok(completion) => Ok((request_id, completion)),
+            Err(error) => {
+                self.tracked_inserts
+                    .lock()
+                    .expect("tracked insert lock poisoned")
+                    .remove(&request_id);
+                Err(error)
+            }
+        }
+    }
+
+    async fn submit_internal(
+        self: &Arc<Self>,
+        request: IngestionInsertRequest,
+        request_id: Option<String>,
     ) -> Result<oneshot::Receiver<Result<(), StorageError>>, QueueAdmissionError> {
         if self.shutdown_requested.load(Ordering::SeqCst) {
             return Err(QueueAdmissionError::Closed);
@@ -355,6 +407,7 @@ impl IngestionService {
         let (completion_tx, completion_rx) = oneshot::channel();
         let pending = PendingInsert {
             request,
+            request_id,
             enqueued_at: Instant::now(),
             completion: completion_tx,
             permit,
@@ -370,6 +423,39 @@ impl IngestionService {
         }
         self.item_available.notify_one();
         Ok(completion_rx)
+    }
+
+    fn allocate_request_id(&self) -> String {
+        let next = self.next_request_id.fetch_add(1, Ordering::SeqCst) + 1;
+        format!("ingest-{next}")
+    }
+
+    fn update_tracked_status(
+        &self,
+        request_id: &str,
+        state: TrackedInsertState,
+        error_message: Option<String>,
+    ) {
+        self.tracked_inserts
+            .lock()
+            .expect("tracked insert lock poisoned")
+            .insert(
+                request_id.to_string(),
+                TrackedInsertStatus {
+                    request_id: request_id.to_string(),
+                    state,
+                    error_message,
+                },
+            );
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn tracked_insert_status(&self, request_id: &str) -> Option<TrackedInsertStatus> {
+        self.tracked_inserts
+            .lock()
+            .expect("tracked insert lock poisoned")
+            .get(request_id)
+            .cloned()
     }
 
     async fn ensure_worker_started(self: &Arc<Self>) {
@@ -452,24 +538,47 @@ impl IngestionService {
         let mut completions = Vec::with_capacity(batch.len());
 
         for pending in batch {
-            let _lag = pending.enqueued_at.elapsed();
+            let PendingInsert {
+                request,
+                request_id,
+                enqueued_at,
+                completion,
+                permit,
+            } = pending;
+
+            let _lag = enqueued_at.elapsed();
             #[cfg(test)]
             self.observed_document_ids
                 .lock()
                 .expect("observed document ids lock poisoned")
-                .push(pending.request.document.id.clone());
-            let _permit = pending.permit;
+                .push(request.document.id.clone());
+            if let Some(request_id) = request_id.as_ref() {
+                self.update_tracked_status(request_id, TrackedInsertState::Processing, None);
+            }
+            let _permit = permit;
             let result = storage.insert_for_tenant(
-                &pending.request.tenant,
-                &pending.request.collection,
-                pending.request.document,
-                pending.request.upsert,
+                &request.tenant,
+                &request.collection,
+                request.document,
+                request.upsert,
             );
             match &result {
                 Ok(()) => self.metrics.record_success(),
                 Err(_) => self.metrics.record_failure(),
             }
-            completions.push((pending.completion, result));
+            if let Some(request_id) = request_id.as_ref() {
+                match &result {
+                    Ok(()) => {
+                        self.update_tracked_status(request_id, TrackedInsertState::Succeeded, None)
+                    }
+                    Err(error) => self.update_tracked_status(
+                        request_id,
+                        TrackedInsertState::Failed,
+                        Some(error.to_string()),
+                    ),
+                }
+            }
+            completions.push((completion, result));
         }
 
         drop(storage);

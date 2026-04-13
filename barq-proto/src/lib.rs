@@ -5,8 +5,8 @@ pub mod barq {
 #[cfg(test)]
 mod tests {
     use super::barq::{
-        Consistency, InsertOptions, InsertRequest, InsertResponse, SearchOptions, SearchRequest,
-        StatusRequest, StatusResponse,
+        Consistency, InsertAsyncResponse, InsertOptions, InsertRequest, InsertResponse,
+        SearchOptions, SearchRequest, StatusRequest, StatusResponse,
     };
 
     #[test]
@@ -29,6 +29,13 @@ mod tests {
 
         let response = InsertResponse { success: true };
         assert!(response.success);
+
+        let async_response = InsertAsyncResponse {
+            accepted: true,
+            request_id: "ingest-1".to_string(),
+        };
+        assert!(async_response.accepted);
+        assert_eq!(async_response.request_id, "ingest-1");
     }
 
     #[test]
@@ -75,5 +82,16 @@ mod tests {
         };
         assert_eq!(search_options.consistency, Consistency::Unspecified as i32);
         assert!(!search_options.allow_fallback);
+    }
+
+    #[test]
+    fn async_insert_response_exposes_request_handle() {
+        let response = InsertAsyncResponse {
+            accepted: true,
+            request_id: "ingest-42".to_string(),
+        };
+
+        assert!(response.accepted);
+        assert_eq!(response.request_id, "ingest-42");
     }
 }

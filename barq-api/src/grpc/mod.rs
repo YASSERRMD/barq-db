@@ -9,9 +9,10 @@ use barq_core::{
 use barq_proto::barq::barq_server::Barq;
 use barq_proto::barq::{
     BatchSearchRequest, BatchSearchResponse, Consistency, CreateCollectionRequest,
-    CreateCollectionResponse, HealthRequest, HealthResponse, InsertDocumentRequest,
-    InsertDocumentResponse, InsertOptions, InsertRequest, InsertResponse, QueryResults,
-    SearchOptions, SearchRequest, SearchResponse, SearchResult, StatusRequest, StatusResponse,
+    CreateCollectionResponse, HealthRequest, HealthResponse, InsertAsyncResponse,
+    InsertDocumentRequest, InsertDocumentResponse, InsertOptions, InsertRequest, InsertResponse,
+    QueryResults, SearchOptions, SearchRequest, SearchResponse, SearchResult, StatusRequest,
+    StatusResponse,
 };
 use barq_storage::StorageError;
 use tonic::metadata::MetadataMap;
@@ -107,6 +108,52 @@ impl GrpcService {
         Ok(InsertResponse { success: true })
     }
 
+    fn parse_insert_document(
+        collection: String,
+        id: String,
+        vector: Vec<f32>,
+        payload_json: String,
+    ) -> Result<(String, Document), Status> {
+        Self::require_non_empty(&collection, "collection")?;
+        Self::require_non_empty(&id, "id")?;
+        if vector.is_empty() {
+            return Err(Status::invalid_argument("vector must not be empty"));
+        }
+
+        let document = Document {
+            id: Self::parse_document_id(&id),
+            vector,
+            payload: Self::parse_insert_payload(&payload_json)?,
+        };
+        Ok((collection, document))
+    }
+
+    async fn insert_async_internal(
+        &self,
+        tenant: TenantId,
+        collection: String,
+        id: String,
+        vector: Vec<f32>,
+        payload_json: String,
+    ) -> Result<InsertAsyncResponse, Status> {
+        let (collection, document) =
+            Self::parse_insert_document(collection, id, vector, payload_json)?;
+
+        self.state
+            .ensure_primary_for_document(&tenant, &document.id)
+            .map_err(api_error_to_status)?;
+        let request_id = self
+            .state
+            .enqueue_insert_for_tenant_async(&tenant, &collection, document, false)
+            .await
+            .map_err(api_error_to_status)?;
+
+        Ok(InsertAsyncResponse {
+            accepted: true,
+            request_id,
+        })
+    }
+
     async fn search_internal(
         &self,
         tenant: TenantId,
@@ -176,7 +223,9 @@ fn apply_search_consistency(
     options: Option<&SearchOptions>,
 ) -> Result<(), ApiError> {
     match search_consistency(options)? {
-        SearchConsistency::Default | SearchConsistency::Any => state.ensure_local_for_tenant(tenant),
+        SearchConsistency::Default | SearchConsistency::Any => {
+            state.ensure_local_for_tenant(tenant)
+        }
         SearchConsistency::Primary => {
             state.ensure_read_target_for_tenant(tenant, ReadPreference::Primary)
         }
@@ -192,7 +241,10 @@ fn search_consistency(options: Option<&SearchOptions>) -> Result<SearchConsisten
     };
 
     let consistency = Consistency::try_from(options.consistency).map_err(|_| {
-        ApiError::BadRequest(format!("invalid consistency value: {}", options.consistency))
+        ApiError::BadRequest(format!(
+            "invalid consistency value: {}",
+            options.consistency
+        ))
     })?;
 
     Ok(match consistency {
@@ -330,6 +382,23 @@ impl Barq for GrpcService {
         Ok(Response::new(response))
     }
 
+    async fn insert_async(
+        &self,
+        request: Request<InsertRequest>,
+    ) -> Result<Response<InsertAsyncResponse>, Status> {
+        let tenant = self.authenticate(request.metadata(), ApiPermission::Write)?;
+        let response = self
+            .insert_async_internal(
+                tenant,
+                request.get_ref().collection.clone(),
+                request.get_ref().id.clone(),
+                request.get_ref().vector.clone(),
+                request.get_ref().payload_json.clone(),
+            )
+            .await?;
+        Ok(Response::new(response))
+    }
+
     async fn create_collection(
         &self,
         request: Request<CreateCollectionRequest>,
@@ -377,7 +446,14 @@ impl Barq for GrpcService {
         let tenant = self.authenticate(request.metadata(), ApiPermission::Write)?;
         let req = request.into_inner();
         let response = self
-            .insert_internal(tenant, req.collection, req.id, req.vector, req.payload_json, true)
+            .insert_internal(
+                tenant,
+                req.collection,
+                req.id,
+                req.vector,
+                req.payload_json,
+                true,
+            )
             .await?;
         Ok(Response::new(InsertDocumentResponse {
             success: response.success,
@@ -450,10 +526,27 @@ impl Barq for GrpcService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ApiAuth, ClusterConfig, ClusterRouter};
+    use crate::ingest::TrackedInsertState;
+    use crate::{ApiAuth, ApiRole, ClusterConfig, ClusterRouter};
     use barq_cluster::{NodeConfig, NodeId, ShardId, ShardPlacement};
+    use barq_sdk_rust::{
+        BarqClient as PublicBarqClient, InsertOptions as PublicInsertOptions,
+        SearchConsistency as PublicSearchConsistency, SearchOptions as PublicSearchOptions,
+    };
     use std::collections::HashMap;
+    use std::ffi::OsStr;
+    use std::path::{Path, PathBuf};
+    use std::process::Stdio;
+    use std::sync::{Mutex, OnceLock};
+    use tempfile::tempdir;
+    use tokio::process::{Child, Command};
+    use tonic::transport::Server;
     use tonic::Code;
+
+    fn sdk_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn grpc_service() -> (tempfile::TempDir, AppState, GrpcService) {
         let dir = tempfile::tempdir().unwrap();
@@ -527,9 +620,77 @@ mod tests {
             )]),
         };
 
-        let state = AppState::new(storage, ApiAuth::new(), ClusterRouter::from_config(config).unwrap());
+        let state = AppState::new(
+            storage,
+            ApiAuth::new(),
+            ClusterRouter::from_config(config).unwrap(),
+        );
         let service = GrpcService::new(state.clone());
         (dir, state, service)
+    }
+
+    async fn start_grpc_server(
+        service: GrpcService,
+    ) -> (
+        std::net::SocketAddr,
+        tokio::task::JoinHandle<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+
+        let handle = tokio::spawn(async move {
+            Server::builder()
+                .add_service(barq_proto::barq::barq_server::BarqServer::new(service))
+                .serve_with_incoming_shutdown(
+                    tokio_stream::wrappers::TcpListenerStream::new(listener),
+                    async {
+                        rx.await.ok();
+                    },
+                )
+                .await
+                .unwrap();
+        });
+
+        (local_addr, handle, tx)
+    }
+
+    async fn spawn_command<I, S>(
+        workdir: &Path,
+        envs: &[(&str, &str)],
+        program: &str,
+        args: I,
+    ) -> Child
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut command = Command::new(program);
+        command
+            .current_dir(workdir)
+            .args(args)
+            .envs(envs.iter().copied())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command.spawn().unwrap_or_else(|error| {
+            panic!("failed to start {program}: {error}");
+        })
+    }
+
+    async fn wait_for_success(label: &str, child: Child) {
+        let output = child.wait_with_output().await.unwrap_or_else(|error| {
+            panic!("{label} failed to wait: {error}");
+        });
+
+        if !output.status.success() {
+            panic!(
+                "{label} failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
     }
 
     async fn create_collection(service: &GrpcService, name: &str) {
@@ -683,6 +844,90 @@ mod tests {
             )
             .unwrap();
         assert!(document.is_some());
+    }
+
+    #[tokio::test]
+    async fn insert_async_returns_request_id_without_waiting_for_commit() {
+        let (_dir, state, service) = grpc_service();
+        create_collection(&service, "docs").await;
+        let hook = state.ingestion.install_pause_before_dequeue();
+
+        let response = service
+            .insert_async(Request::new(InsertRequest {
+                collection: "docs".to_string(),
+                id: "doc-handle".to_string(),
+                vector: vec![1.0, 0.0],
+                payload_json: "{}".to_string(),
+                options: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(response.accepted);
+        assert!(response.request_id.starts_with("ingest-"));
+
+        hook.wait_until_reached().await;
+        assert_eq!(state.ingestion.queue_len(), 1);
+        let tracked = state
+            .ingestion
+            .tracked_insert_status(&response.request_id)
+            .expect("tracked insert should exist");
+        assert_eq!(tracked.state, TrackedInsertState::Queued);
+
+        hook.release();
+        state.ingestion.drain().await;
+    }
+
+    #[tokio::test]
+    async fn insert_async_background_worker_persists_document() {
+        let (_dir, state, service) = grpc_service();
+        create_collection(&service, "docs").await;
+        let hook = state.ingestion.install_pause_before_dequeue();
+
+        let response = service
+            .insert_async(Request::new(InsertRequest {
+                collection: "docs".to_string(),
+                id: "doc-async-worker".to_string(),
+                vector: vec![1.0, 0.0],
+                payload_json: "{}".to_string(),
+                options: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        hook.wait_until_reached().await;
+        let document = state
+            .storage
+            .lock()
+            .await
+            .get_document(
+                &TenantId::default(),
+                "docs",
+                &DocumentId::Str("doc-async-worker".to_string()),
+            )
+            .unwrap();
+        assert!(document.is_none());
+
+        hook.release();
+        state.ingestion.drain().await;
+
+        let document = state
+            .storage
+            .lock()
+            .await
+            .get_document(
+                &TenantId::default(),
+                "docs",
+                &DocumentId::Str("doc-async-worker".to_string()),
+            )
+            .unwrap();
+        assert!(document.is_some());
+        let tracked = state
+            .ingestion
+            .tracked_insert_status(&response.request_id)
+            .expect("tracked insert should exist");
+        assert_eq!(tracked.state, TrackedInsertState::Succeeded);
     }
 
     #[tokio::test]

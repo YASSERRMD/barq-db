@@ -274,6 +274,40 @@ impl AppState {
         Ok(())
     }
 
+    async fn enqueue_insert_for_tenant_async(
+        &self,
+        tenant: &TenantId,
+        collection: &str,
+        document: Document,
+        upsert: bool,
+    ) -> Result<String, ApiError> {
+        self.validate_insert_for_tenant(tenant, collection, &document)
+            .await?;
+
+        let (request_id, _completion) = self
+            .ingestion
+            .submit_tracked(IngestionInsertRequest {
+                tenant: tenant.clone(),
+                collection: collection.to_string(),
+                document,
+                upsert,
+            })
+            .await
+            .map_err(|err| match err {
+                QueueAdmissionError::Full { capacity } => {
+                    ApiError::Busy(format!("ingestion queue is full (capacity {capacity})"))
+                }
+                QueueAdmissionError::Dropped { capacity } => ApiError::Busy(format!(
+                    "ingestion queue dropped the write because policy=drop and capacity {capacity} is exhausted"
+                )),
+                QueueAdmissionError::Closed => {
+                    ApiError::Busy("ingestion worker is unavailable".to_string())
+                }
+            })?;
+
+        Ok(request_id)
+    }
+
     fn ensure_primary_for_tenant(&self, tenant: &TenantId) -> Result<(), ApiError> {
         self.map_cluster_local_result(self.cluster.ensure_primary(tenant.as_str()))
     }
