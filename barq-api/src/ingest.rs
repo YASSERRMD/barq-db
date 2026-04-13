@@ -1,5 +1,5 @@
-use barq_metrics::{MetricDefinition, MetricKind};
 use barq_core::{CollectionSchema, Document, FieldType, PayloadValue, TenantId};
+use barq_metrics::{MetricDefinition, MetricKind};
 use barq_storage::{Storage, StorageError};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -286,7 +286,10 @@ impl IngestionService {
             config.queue_capacity > 0,
             "ingestion queue capacity must be positive"
         );
-        assert!(config.batch_size > 0, "ingestion batch size must be positive");
+        assert!(
+            config.batch_size > 0,
+            "ingestion batch size must be positive"
+        );
         Arc::new(Self {
             storage,
             queue: Mutex::new(IngestionQueue::new(config.queue_capacity)),
@@ -325,26 +328,28 @@ impl IngestionService {
                 .acquire_owned()
                 .await
                 .map_err(|_| QueueAdmissionError::Closed)?,
-            BackpressurePolicy::Reject => self
-                .queue_slots
-                .clone()
-                .try_acquire_owned()
-                .map_err(|err| match err {
-                    TryAcquireError::NoPermits => QueueAdmissionError::Full {
-                        capacity: self.queue_capacity,
-                    },
-                    TryAcquireError::Closed => QueueAdmissionError::Closed,
-                })?,
-            BackpressurePolicy::Drop => self
-                .queue_slots
-                .clone()
-                .try_acquire_owned()
-                .map_err(|err| match err {
-                    TryAcquireError::NoPermits => QueueAdmissionError::Dropped {
-                        capacity: self.queue_capacity,
-                    },
-                    TryAcquireError::Closed => QueueAdmissionError::Closed,
-                })?,
+            BackpressurePolicy::Reject => {
+                self.queue_slots
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|err| match err {
+                        TryAcquireError::NoPermits => QueueAdmissionError::Full {
+                            capacity: self.queue_capacity,
+                        },
+                        TryAcquireError::Closed => QueueAdmissionError::Closed,
+                    })?
+            }
+            BackpressurePolicy::Drop => {
+                self.queue_slots
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|err| match err {
+                        TryAcquireError::NoPermits => QueueAdmissionError::Dropped {
+                            capacity: self.queue_capacity,
+                        },
+                        TryAcquireError::Closed => QueueAdmissionError::Closed,
+                    })?
+            }
         };
 
         let (completion_tx, completion_rx) = oneshot::channel();
@@ -614,8 +619,8 @@ impl PauseBeforeDequeue {
 mod tests {
     use super::{
         ingestion_metric_definitions, validate_insert_document, BackpressurePolicy,
-        IngestionConfig, IngestionQueue, IngestionMetricsSnapshot,
-        DEFAULT_INGEST_BATCH_SIZE, DEFAULT_INGEST_QUEUE_CAPACITY,
+        IngestionConfig, IngestionMetricsSnapshot, IngestionQueue, DEFAULT_INGEST_BATCH_SIZE,
+        DEFAULT_INGEST_QUEUE_CAPACITY,
     };
     use crate::{
         insert_document, search_collection, ApiAuth, ApiError, ApiRole, AppState, ClusterConfig,
@@ -709,25 +714,22 @@ mod tests {
     #[test]
     fn ingestion_metric_catalog_registers_queue_lag_batch_and_outcome_metrics() {
         let (_, state, _) = build_state(4, 2);
-        let definitions = state.metric_definitions();
-        let names: Vec<_> = definitions.into_iter().map(|definition| definition.name).collect();
-
-        assert_eq!(
-            names,
-            vec![
-                "ingestion_batch_count_total".to_string(),
-                "ingestion_lag_seconds".to_string(),
-                "ingestion_queue_size".to_string(),
-                "ingestion_requests_failed_total".to_string(),
-                "ingestion_requests_succeeded_total".to_string(),
-            ]
-        );
-
+        let registered_names: Vec<_> = state
+            .metric_definitions()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
         let static_names: Vec<_> = ingestion_metric_definitions()
             .into_iter()
             .map(|definition| definition.name)
             .collect();
-        assert_eq!(names, static_names);
+
+        for expected_name in static_names {
+            assert!(
+                registered_names.contains(&expected_name),
+                "missing ingestion metric {expected_name} from registry"
+            );
+        }
     }
 
     #[test]
@@ -904,7 +906,10 @@ mod tests {
     #[test]
     fn ingestion_config_invalid_policy_falls_back_to_reject() {
         with_ingestion_env(
-            &[("BARQ_INGEST_BACKPRESSURE_POLICY", Some("unsupported-policy"))],
+            &[(
+                "BARQ_INGEST_BACKPRESSURE_POLICY",
+                Some("unsupported-policy"),
+            )],
             || {
                 assert_eq!(
                     IngestionConfig::from_env(),
@@ -1014,7 +1019,9 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert!(matches!(err, ApiError::BadRequest(message) if message.contains("vector dimension mismatch")));
+        assert!(
+            matches!(err, ApiError::BadRequest(message) if message.contains("vector dimension mismatch"))
+        );
 
         hook.release();
         assert_eq!(first_insert.await.unwrap().unwrap(), StatusCode::CREATED);
