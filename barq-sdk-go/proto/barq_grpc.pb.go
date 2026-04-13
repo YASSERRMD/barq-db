@@ -4,7 +4,7 @@
 // - protoc             v6.33.2
 // source: barq.proto
 
-package barq
+package proto
 
 import (
 	context "context"

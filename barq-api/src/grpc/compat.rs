@@ -1,8 +1,6 @@
 use crate::{
-    CreateCollectionRequest as RestCreateCollectionRequest,
-    DocumentIdInput,
-    InsertDocumentRequest as RestInsertDocumentRequest,
-    SearchRequest as RestSearchRequest,
+    CreateCollectionRequest as RestCreateCollectionRequest, DocumentIdInput,
+    InsertDocumentRequest as RestInsertDocumentRequest, SearchRequest as RestSearchRequest,
     SearchResponse as RestSearchResponse,
 };
 use barq_core::PayloadValue;
@@ -16,9 +14,7 @@ use barq_proto::barq::{
 pub struct RestGrpcAdapter;
 
 impl RestGrpcAdapter {
-    pub fn create_collection(
-        payload: RestCreateCollectionRequest,
-    ) -> GrpcCreateCollectionRequest {
+    pub fn create_collection(payload: RestCreateCollectionRequest) -> GrpcCreateCollectionRequest {
         GrpcCreateCollectionRequest {
             name: payload.name,
             dimension: payload.dimension as u32,
@@ -39,6 +35,7 @@ impl RestGrpcAdapter {
                 .map(payload_json)
                 .transpose()?
                 .unwrap_or_default(),
+            options: None,
         })
     }
 
@@ -54,6 +51,7 @@ impl RestGrpcAdapter {
             collection,
             vector: payload.vector,
             top_k: payload.top_k as u32,
+            options: None,
         })
     }
 
@@ -91,15 +89,14 @@ fn payload_json(payload: PayloadValue) -> Result<String, serde_json::Error> {
 }
 
 fn parse_document_id(id: &str) -> DocumentId {
-    id.parse().unwrap_or_else(|_| DocumentId::Str(id.to_string()))
+    id.parse()
+        .unwrap_or_else(|_| DocumentId::Str(id.to_string()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::RestGrpcAdapter;
-    use crate::{
-        CreateCollectionRequest, DocumentIdInput, InsertDocumentRequest, SearchRequest,
-    };
+    use crate::{CreateCollectionRequest, DocumentIdInput, InsertDocumentRequest, SearchRequest};
     use barq_core::PayloadValue;
     use barq_index::{DistanceMetric, DocumentId, Filter};
     use barq_proto::barq::{SearchResponse, SearchResult};
@@ -124,7 +121,10 @@ mod tests {
     #[test]
     fn rest_insert_maps_to_grpc_request() {
         let mut payload = HashMap::new();
-        payload.insert("kind".to_string(), PayloadValue::String("compat".to_string()));
+        payload.insert(
+            "kind".to_string(),
+            PayloadValue::String("compat".to_string()),
+        );
 
         let request = RestGrpcAdapter::insert(
             "docs".to_string(),

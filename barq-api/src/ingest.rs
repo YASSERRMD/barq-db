@@ -517,7 +517,7 @@ impl IngestionService {
     }
 
     #[cfg(test)]
-    fn install_pause_before_dequeue(&self) -> Arc<PauseBeforeDequeue> {
+    pub(crate) fn install_pause_before_dequeue(&self) -> Arc<PauseBeforeDequeue> {
         let hook = Arc::new(PauseBeforeDequeue::default());
         *self
             .pause_before_dequeue
@@ -594,23 +594,23 @@ pub(crate) fn validate_insert_document(
 
 #[cfg(test)]
 #[derive(Debug, Default)]
-struct PauseBeforeDequeue {
+pub(crate) struct PauseBeforeDequeue {
     reached: Notify,
     release: Notify,
 }
 
 #[cfg(test)]
 impl PauseBeforeDequeue {
-    async fn pause(&self) {
+    pub(crate) async fn pause(&self) {
         self.reached.notify_one();
         self.release.notified().await;
     }
 
-    async fn wait_until_reached(&self) {
+    pub(crate) async fn wait_until_reached(&self) {
         self.reached.notified().await;
     }
 
-    fn release(&self) {
+    pub(crate) fn release(&self) {
         self.release.notify_one();
     }
 }

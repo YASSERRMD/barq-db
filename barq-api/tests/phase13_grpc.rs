@@ -119,6 +119,7 @@ async fn test_grpc_create_insert_search() {
         collection: "grpc_test".to_string(),
         vector: vec![1.0, 0.0],
         top_k: 1,
+        options: None,
     };
     let response = client.search(search_req).await.expect("search failed");
     let results = response.into_inner().results;
@@ -161,6 +162,7 @@ async fn test_grpc_canonical_end_to_end() {
             id: "doc-canonical".to_string(),
             vector: vec![0.0, 1.0],
             payload_json: "{\"source\":\"canonical\"}".to_string(),
+            options: None,
         })
         .await
         .expect("canonical insert failed");
@@ -170,6 +172,7 @@ async fn test_grpc_canonical_end_to_end() {
             collection: "grpc_canonical".to_string(),
             vector: vec![0.0, 1.0],
             top_k: 1,
+            options: None,
         })
         .await
         .expect("canonical search failed")

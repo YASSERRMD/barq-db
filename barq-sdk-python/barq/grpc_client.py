@@ -40,15 +40,19 @@ class GrpcClient:
         collection: str,
         id: Any,
         vector: List[float],
-        payload: Optional[Dict] = None
+        payload: Optional[Dict] = None,
+        options: Optional[Dict[str, Any]] = None,
     ):
         payload_json = json.dumps(payload) if payload else "{}"
         req = barq_pb2.InsertRequest(
             collection=collection,
             id=str(id),
             vector=vector,
-            payload_json=payload_json
+            payload_json=payload_json,
         )
+        insert_options = self._insert_options(options)
+        if insert_options is not None:
+            req.options.CopyFrom(insert_options)
         self.stub.Insert(req, metadata=self.metadata)
 
     def insert_document(
@@ -56,21 +60,26 @@ class GrpcClient:
         collection: str,
         id: Any,
         vector: List[float],
-        payload: Optional[Dict] = None
+        payload: Optional[Dict] = None,
+        options: Optional[Dict[str, Any]] = None,
     ):
-        self.insert(collection, id, vector, payload)
+        self.insert(collection, id, vector, payload, options=options)
 
     def search(
         self,
         collection: str,
         vector: List[float],
-        top_k: int = 10
+        top_k: int = 10,
+        options: Optional[Dict[str, Any]] = None,
     ) -> List[Dict]:
         req = barq_pb2.SearchRequest(
             collection=collection,
             vector=vector,
-            top_k=top_k
+            top_k=top_k,
         )
+        search_options = self._search_options(options)
+        if search_options is not None:
+            req.options.CopyFrom(search_options)
         response = self.stub.Search(req, metadata=self.metadata)
         
         results = []
@@ -86,6 +95,37 @@ class GrpcClient:
                 "payload": payload
             })
         return results
+
+    def _insert_options(self, options: Optional[Dict[str, Any]]):
+        if not options or "wait_for_commit" not in options:
+            return None
+        return barq_pb2.InsertOptions(
+            wait_for_commit=bool(options["wait_for_commit"])
+        )
+
+    def _search_options(self, options: Optional[Dict[str, Any]]):
+        if not options:
+            return None
+
+        has_consistency = "consistency" in options
+        has_allow_fallback = "allow_fallback" in options
+        if not has_consistency and not has_allow_fallback:
+            return None
+
+        consistency = barq_pb2.CONSISTENCY_UNSPECIFIED
+        if has_consistency:
+            value = str(options["consistency"]).lower()
+            consistency = {
+                "primary": barq_pb2.CONSISTENCY_PRIMARY,
+                "followers": barq_pb2.CONSISTENCY_FOLLOWERS,
+                "any": barq_pb2.CONSISTENCY_ANY,
+            }.get(value, barq_pb2.CONSISTENCY_UNSPECIFIED)
+
+        allow_fallback = bool(options.get("allow_fallback", True))
+        return barq_pb2.SearchOptions(
+            consistency=consistency,
+            allow_fallback=allow_fallback,
+        )
 
     def close(self) -> None:
         self.channel.close()

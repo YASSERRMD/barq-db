@@ -18,6 +18,14 @@ export interface SearchResult {
     score: number;
     payload?: any;
 }
+export interface InsertOptions {
+    waitForCommit?: boolean;
+}
+export type SearchConsistency = "primary" | "followers" | "any";
+export interface SearchOptions {
+    consistency?: SearchConsistency;
+    allowFallback?: boolean;
+}
 export declare class BarqClient {
     private config;
     private grpcCompat?;
@@ -32,8 +40,8 @@ export declare class Collection {
     private client;
     private name;
     constructor(client: BarqClient, name: string);
-    insert(id: string | number, vector: number[], payload?: any): Promise<void>;
-    search(vector?: number[], query?: string, topK?: number, filter?: any): Promise<SearchResult[]>;
+    insert(id: string | number, vector: number[], payload?: any, options?: InsertOptions): Promise<void>;
+    search(vector?: number[], query?: string, topK?: number, filter?: any, options?: SearchOptions): Promise<SearchResult[]>;
 }
 export declare class GrpcClient {
     private client;
@@ -42,7 +50,7 @@ export declare class GrpcClient {
     status(): Promise<boolean>;
     health(): Promise<boolean>;
     createCollection(name: string, dimension: number, metric?: string): Promise<void>;
-    insert(collection: string, id: string | number, vector: number[], payload?: any): Promise<void>;
-    insertDocument(collection: string, id: string | number, vector: number[], payload?: any): Promise<void>;
-    search(collection: string, vector: number[], topK?: number): Promise<SearchResult[]>;
+    insert(collection: string, id: string | number, vector: number[], payload?: any, options?: InsertOptions): Promise<void>;
+    insertDocument(collection: string, id: string | number, vector: number[], payload?: any, options?: InsertOptions): Promise<void>;
+    search(collection: string, vector: number[], topK?: number, options?: SearchOptions): Promise<SearchResult[]>;
 }
