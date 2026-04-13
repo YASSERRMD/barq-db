@@ -83,26 +83,9 @@ Ingestion, indexing, and querying are treated as coordinated stages of a single 
 
 ## Architecture
 
-```
-
-Client Layer (SDKs / REST / gRPC)
-│
-▼
-Query Planner / Execution
-│
-▼
-Segment Layer (Growing / Sealed / Compacted)
-│
-▼
-Index Layer (HNSW / IVF / BM25)
-│
-▼
-Storage Engine (WAL / Snapshots / mmap)
-│
-▼
-Cluster Layer (Sharding / Routing / Replication)
-
-````
+<p align="center">
+  <img src="./assets/barq-v2-architecture.jpg" alt="Barq-DB v2 architecture" width="900"/>
+</p>
 
 ---
 
@@ -241,5 +224,3 @@ However, it still requires continued validation under real-world workloads, part
 ## License
 
 MIT License
-
-

@@ -29,6 +29,7 @@ fn canonical_proto_is_documented_across_docs_and_sdks() {
                 "This release does not implement full consensus",
                 "proto/barq.proto",
                 "Benchmarking",
+                "barq-v2-architecture.jpg",
             ],
         ),
         (
