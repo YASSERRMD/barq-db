@@ -533,16 +533,34 @@ impl Storage {
         collection: &str,
         metadata: &SegmentMetadata,
     ) -> Result<(), StorageError> {
+        self.schedule_collection_index_build(
+            tenant,
+            collection,
+            None,
+            metadata.file_name.clone(),
+            metadata.state,
+        )
+    }
+
+    fn schedule_collection_index_build(
+        &mut self,
+        tenant: &TenantId,
+        collection: &str,
+        index: Option<IndexType>,
+        file_name: String,
+        segment_state: SegmentState,
+    ) -> Result<(), StorageError> {
         let snapshot = self
             .catalog
             .collection(tenant, collection)?
-            .index_build_snapshot(None);
+            .index_build_snapshot(index);
         let generation = self.collection_index_generation(tenant, collection);
         self.transition_collection_index_state(tenant, collection, IndexState::Building)?;
-        self.persist_segment_index_metadata(
+        self.persist_segment_index_metadata_for_file(
             tenant,
             collection,
-            metadata,
+            &file_name,
+            segment_state,
             IndexState::Building,
             false,
         )?;
@@ -551,8 +569,8 @@ impl Storage {
             .send(IndexBuildRequest {
                 tenant: tenant.clone(),
                 collection: collection.to_string(),
-                file_name: metadata.file_name.clone(),
-                segment_state: metadata.state,
+                file_name,
+                segment_state,
                 generation,
                 snapshot,
             })
@@ -643,27 +661,6 @@ impl Storage {
         Ok(())
     }
 
-    fn persist_segment_index_metadata(
-        &self,
-        tenant: &TenantId,
-        collection: &str,
-        metadata: &SegmentMetadata,
-        index_state: IndexState,
-        index_built: bool,
-    ) -> Result<(), StorageError> {
-        if metadata.file_name.is_empty() {
-            return Ok(());
-        }
-        self.persist_segment_index_metadata_for_file(
-            tenant,
-            collection,
-            &metadata.file_name,
-            metadata.state,
-            index_state,
-            index_built,
-        )
-    }
-
     fn persist_segment_index_metadata_for_file(
         &self,
         tenant: &TenantId,
@@ -673,6 +670,9 @@ impl Storage {
         index_state: IndexState,
         index_built: bool,
     ) -> Result<(), StorageError> {
+        if file_name.is_empty() {
+            return Ok(());
+        }
         let meta_path = self
             .segments_dir(tenant, collection)
             .join(format!("{}.meta.json", file_name));
@@ -1547,13 +1547,14 @@ impl Storage {
         self.apply_completed_index_builds()?;
         self.ensure_tenant_state(tenant);
         self.enforce_qps(tenant)?;
-        {
-            let coll = self.catalog.collection_mut(tenant, collection)?;
-            coll.rebuild_index(index)?;
-            let schema = coll.schema().clone();
-            self.persist_schema(tenant, &schema)?;
-        }
-        Ok(())
+        let segment_state = self.collection_segment_state(tenant, collection);
+        self.schedule_collection_index_build(
+            tenant,
+            collection,
+            index,
+            String::new(),
+            segment_state,
+        )
     }
 
     pub fn collection_schema(&self, name: &str) -> Result<&CollectionSchema, StorageError> {
@@ -2017,6 +2018,7 @@ mod tests {
         storage
             .rebuild_index("items", Some(IndexType::Hnsw(HnswParams::default())))
             .unwrap();
+        storage.wait_for_pending_index_builds().unwrap();
 
         let (_, _, index_type) = storage
             .collection_schema("items")
@@ -2024,6 +2026,72 @@ mod tests {
             .vector_config()
             .unwrap();
         assert!(matches!(index_type, IndexType::Hnsw(_)));
+    }
+
+    #[test]
+    fn explicit_reindex_transitions_ready_to_building_to_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut storage = Storage::open(dir.path()).unwrap();
+        storage.create_collection(sample_schema("items")).unwrap();
+        storage.insert("items", sample_document(1), false).unwrap();
+
+        storage.rebuild_index("items", Some(IndexType::Flat)).unwrap();
+        storage.wait_for_pending_index_builds().unwrap();
+        assert_eq!(
+            storage.collection_index_state(&TenantId::default(), "items"),
+            IndexState::Ready
+        );
+
+        let hook = storage.install_pause_before_index_build();
+        storage
+            .rebuild_index("items", Some(IndexType::Hnsw(HnswParams::default())))
+            .unwrap();
+        hook.wait_until_reached();
+        assert_eq!(
+            storage.collection_index_state(&TenantId::default(), "items"),
+            IndexState::Building
+        );
+
+        hook.release();
+        storage.wait_for_pending_index_builds().unwrap();
+        assert_eq!(
+            storage.collection_index_state(&TenantId::default(), "items"),
+            IndexState::Ready
+        );
+
+        let (_, _, index_type) = storage
+            .collection_schema("items")
+            .unwrap()
+            .vector_config()
+            .unwrap();
+        assert!(matches!(index_type, IndexType::Hnsw(_)));
+    }
+
+    #[test]
+    fn explicit_reindex_preserves_search_correctness() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut storage = Storage::open(dir.path()).unwrap();
+        storage.create_collection(sample_schema("items")).unwrap();
+        storage.insert("items", sample_document(1), false).unwrap();
+        storage
+            .insert(
+                "items",
+                Document {
+                    id: DocumentId::U64(2),
+                    vector: vec![0.0, 1.0, 0.0],
+                    payload: None,
+                },
+                false,
+            )
+            .unwrap();
+
+        let baseline = storage.search("items", &[0.0, 1.0, 0.0], 2, None).unwrap();
+
+        storage.rebuild_index("items", Some(IndexType::Flat)).unwrap();
+        storage.wait_for_pending_index_builds().unwrap();
+
+        let rebuilt = storage.search("items", &[0.0, 1.0, 0.0], 2, None).unwrap();
+        assert_eq!(rebuilt, baseline);
     }
 
     #[test]

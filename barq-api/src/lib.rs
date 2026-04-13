@@ -827,18 +827,8 @@ async fn rebuild_collection_index(
         storage.collection_schema_for_tenant(&tenant, &name)?;
     }
 
-    let storage = state.storage.clone();
-    let requested_index = payload.index.clone();
-    let tenant_for_spawn = tenant.clone();
-    let name_for_spawn = name.clone();
-    tokio::spawn(async move {
-        let mut storage = storage.lock().await;
-        if let Err(err) =
-            storage.rebuild_index_for_tenant(&tenant_for_spawn, &name_for_spawn, requested_index)
-        {
-            eprintln!("failed to rebuild index for {}: {}", name_for_spawn, err);
-        }
-    });
+    let mut storage = state.storage.lock().await;
+    storage.rebuild_index_for_tenant(&tenant, &name, payload.index.clone())?;
 
     audit_log("rebuild-index", &identity, &format!("collection={}", name));
     Ok(StatusCode::ACCEPTED)

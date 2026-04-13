@@ -68,14 +68,10 @@ async fn admin_index_rebuild(
     Json(req): Json<AdminIndexRebuildRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     state.auth.authenticate(&headers, ApiPermission::Admin, None)?;
-    
+
     let mut storage = state.storage.lock().await;
-    let coll = storage
-        .catalog_mut()
-        .collection_mut(&req.tenant, &req.collection)
-        .map_err(|e| ApiError::Storage(barq_storage::StorageError::Catalog(e)))?;
-    coll.rebuild_index(req.index_type).map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    
+    storage.rebuild_index_for_tenant(&req.tenant, &req.collection, req.index_type)?;
+
     Ok(Json(serde_json::json!({ "status": "rebuild_initiated" })))
 }
 
