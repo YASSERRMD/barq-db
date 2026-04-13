@@ -9,6 +9,7 @@ Barq v2 includes a dedicated benchmark utility crate, `barq-bench`, for determin
 - Search benchmark utilities backed by live in-process collection searches
 - Reproducible shell scripts for 1M, 10M, and 50M benchmark scenarios
 - RSS sampling before and after benchmark execution
+- GitHub Actions benchmark smoke coverage via `.github/workflows/benchmarks.yml`
 
 ## Run The Benchmarks
 

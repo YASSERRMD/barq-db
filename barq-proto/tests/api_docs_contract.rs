@@ -31,6 +31,7 @@ fn canonical_proto_is_documented_across_docs_and_sdks() {
                 "Raft leader election",
                 "proto/barq.proto",
                 "Benchmarking",
+                ".github/workflows/benchmarks.yml",
                 "barq-v2-architecture.jpg",
             ],
         ),
@@ -45,6 +46,7 @@ fn canonical_proto_is_documented_across_docs_and_sdks() {
                 "barq-bench",
                 "./benchmarks/scripts/run_1m.sh",
                 "cargo run -p barq-bench",
+                ".github/workflows/benchmarks.yml",
             ],
         ),
         (

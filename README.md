@@ -122,10 +122,13 @@ Barq-DB v2 includes built-in benchmarking tools.
 Designed to evaluate:
 
 - Ingestion throughput  
-- Query latency (p50 / p95 / p99)  
+- Query latency (p50 / p95 / p99) from live in-process searches  
 - Memory usage under load  
+- RSS before and after a benchmark run  
 
 Supports dataset simulations at scale (1M, 10M, and higher).
+
+Benchmark smoke coverage is checked in CI through [`.github/workflows/benchmarks.yml`](./.github/workflows/benchmarks.yml).
 
 ---
 

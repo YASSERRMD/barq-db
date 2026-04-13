@@ -2,6 +2,8 @@
 
 These scripts run **benchmark utilities**, not correctness tests.
 
+CI smoke coverage for the benchmark harness lives in `.github/workflows/benchmarks.yml`.
+
 ## Reproducible benchmark runs
 
 ```bash
