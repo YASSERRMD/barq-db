@@ -39,3 +39,4 @@ cloud-all = ["s3", "gcs", "azure"]
 
 [dev-dependencies]
 tempfile = "3"
+proptest = "1"
