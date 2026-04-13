@@ -4,6 +4,9 @@ pub use barq_index::{
     VectorIndex, Filter, GeoBoundingBox, GeoPoint, PayloadValue, BatchSearch, score_with_metric,
 };
 use chrono::{DateTime, Utc};
+use crate::storage::vector_store::{BudgetedVectorStore, VectorStore, VectorStoreConfig};
+pub mod storage;
+
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -567,6 +570,8 @@ pub struct Collection {
     schema: CollectionSchema,
     index: Box<dyn VectorIndex>,
     vectors: HashMap<DocumentId, Vec<f32>>,
+    vector_ids: HashSet<DocumentId>,
+    vector_store: Option<BudgetedVectorStore>,
     payloads: HashMap<DocumentId, PayloadValue>,
     dimension: usize,
     metric: DistanceMetric,
@@ -579,8 +584,9 @@ impl fmt::Debug for Collection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Collection")
             .field("schema", &self.schema)
-            .field("vectors", &self.vectors.len())
+            .field("vectors", &self.vector_ids.len())
             .field("payloads", &self.payloads.len())
+            .field("vector_store", &self.vector_store.is_some())
             .field("dimension", &self.dimension)
             .field("metric", &self.metric)
             .field("index_type", &self.index_type)
@@ -600,10 +606,20 @@ impl Collection {
         let bm25_config = schema.bm25_config();
         schema.set_vector_index(index_type.clone());
 
-        Ok(Self {
+        let vector_store = if std::env::var("BARQ_VECTOR_STORE_MODE").ok().as_deref() == Some("mmap") {
+            let base = std::env::var("BARQ_VECTOR_STORE_PATH").unwrap_or_else(|_| std::env::temp_dir().display().to_string());
+            let file_path = std::path::Path::new(&base).join(format!("{}.vectors.bin", schema.name));
+            BudgetedVectorStore::open(file_path, Some(dimension), true, VectorStoreConfig::default()).ok()
+        } else {
+            None
+        };
+
+        let mut collection = Self {
             schema,
             index: build_index(IndexConfig::new(metric, dimension, index_type.clone())),
             vectors: HashMap::new(),
+            vector_ids: HashSet::new(),
+            vector_store,
             payloads: HashMap::new(),
             dimension,
             metric,
@@ -614,7 +630,21 @@ impl Collection {
                 None
             },
             metadata_index: MetadataIndex::default(),
-        })
+        };
+
+        if let Some(store) = &collection.vector_store {
+            let mut ids = Vec::new();
+            store.for_each_id(&mut |id| ids.push(id));
+            for id in ids {
+                if let Some(vector) = store.get(id) {
+                    let doc_id = DocumentId::U64(id);
+                    collection.index.insert(doc_id.clone(), vector.to_vec())?;
+                    collection.vector_ids.insert(doc_id);
+                }
+            }
+        }
+
+        Ok(collection)
     }
 
     pub fn insert(&mut self, document: Document) -> Result<(), CatalogError> {
@@ -622,8 +652,17 @@ impl Collection {
         let text_values = self.text_field_values(&document.payload)?;
         self.index
             .insert(document.id.clone(), document.vector.clone())?;
-        self.vectors
-            .insert(document.id.clone(), document.vector.clone());
+        let mut stored_in_vector_store = false;
+        if let (Some(store), DocumentId::U64(id)) = (&mut self.vector_store, &document.id) {
+            stored_in_vector_store = true;
+            store
+                .insert(*id, &document.vector)
+                .map_err(|e| CatalogError::InvalidSchema(format!("vector store insert failed: {e}")))?;
+        }
+        if !stored_in_vector_store {
+            self.vectors.insert(document.id.clone(), document.vector.clone());
+        }
+        self.vector_ids.insert(document.id.clone());
         if let Some(index) = &mut self.text_index {
             index.insert(document.id.clone(), &text_values)?;
         }
@@ -638,6 +677,10 @@ impl Collection {
         if self.payloads.contains_key(&document.id) {
             self.index.remove(&document.id);
             self.vectors.remove(&document.id);
+            self.vector_ids.remove(&document.id);
+            if let (Some(store), DocumentId::U64(id)) = (&mut self.vector_store, &document.id) {
+                store.delete(*id);
+            }
             if let Some(index) = &mut self.text_index {
                 index.remove(&document.id);
             }
@@ -649,14 +692,11 @@ impl Collection {
     }
 
     pub fn document_count(&self) -> usize {
-        self.vectors.len()
+        self.vector_ids.len()
     }
 
     pub fn document_footprint(&self, id: &DocumentId) -> Option<usize> {
-        let vector_bytes = self
-            .vectors
-            .get(id)
-            .map(|v| v.len() * std::mem::size_of::<f32>());
+        let vector_bytes = self.vector_slice(id).map(|v| v.len() * std::mem::size_of::<f32>());
         let payload_bytes = self
             .payloads
             .get(id)
@@ -670,8 +710,10 @@ impl Collection {
 
     pub fn total_footprint(&self) -> (usize, usize) {
         let mut bytes = 0;
-        for (id, vector) in &self.vectors {
-            bytes += vector.len() * std::mem::size_of::<f32>();
+        for id in &self.vector_ids {
+            if let Some(vector) = self.vector_slice(id) {
+                bytes += vector.len() * std::mem::size_of::<f32>();
+            }
             if let Some(payload) = self.payloads.get(id) {
                 if let Ok(encoded) = serde_json::to_vec(payload) {
                     bytes += encoded.len();
@@ -684,6 +726,10 @@ impl Collection {
     pub fn delete(&mut self, id: &DocumentId) -> bool {
         let removed = self.index.remove(id);
         self.vectors.remove(id);
+        self.vector_ids.remove(id);
+        if let (Some(store), DocumentId::U64(raw_id)) = (&mut self.vector_store, id) {
+            store.delete(*raw_id);
+        }
         if let Some(payload) = self.payloads.remove(id) {
             self.metadata_index.remove_payload(id, &payload);
         }
@@ -694,7 +740,7 @@ impl Collection {
     }
 
     pub fn get(&self, id: &DocumentId) -> Option<Document> {
-        let vector = self.vectors.get(id)?.clone();
+        let vector = self.vector_slice(id)?.to_vec();
         let payload = self.payloads.get(id).cloned();
         Some(Document {
             id: id.clone(),
@@ -763,11 +809,7 @@ impl Collection {
         };
         
         let match_scorer = |id: &DocumentId, query: &[f32]| -> Option<f32> {
-             if let Some(vec) = self.vectors.get(id) {
-                 Some(score_with_metric(self.metric, vec, query))
-             } else {
-                 None
-             }
+             self.vector_slice(id).map(|vec| score_with_metric(self.metric, vec, query))
         };
         
         Ok(batch_search.search_filtered(
@@ -779,6 +821,16 @@ impl Collection {
         )?)
     }
 
+    fn vector_slice(&self, id: &DocumentId) -> Option<&[f32]> {
+        if let Some(vector) = self.vectors.get(id) {
+            return Some(vector.as_slice());
+        }
+        if let (Some(store), DocumentId::U64(raw_id)) = (&self.vector_store, id) {
+            return store.get(*raw_id);
+        }
+        None
+    }
+
 
     fn search_over_candidates(
         &self,
@@ -787,7 +839,7 @@ impl Collection {
     ) -> Result<Vec<SearchResult>, CatalogError> {
         let mut scored: Vec<SearchResult> = candidates
             .par_iter()
-            .filter_map(|id| self.vectors.get(id).map(|vec| (id, vec)))
+            .filter_map(|id| self.vector_slice(id).map(|vec| (id, vec)))
             .map(|(id, vec)| SearchResult {
                 id: id.clone(),
                 score: score_with_metric(self.metric, vector, vec),
@@ -951,8 +1003,10 @@ impl Collection {
             self.dimension,
             target.clone(),
         ));
-        for (id, vector) in self.vectors.iter() {
-            new_index.insert(id.clone(), vector.clone())?;
+        for id in self.vector_ids.iter() {
+            if let Some(vector) = self.vector_slice(id) {
+                new_index.insert(id.clone(), vector.to_vec())?;
+            }
         }
         self.index = new_index;
         self.index_type = target.clone();
@@ -966,6 +1020,20 @@ impl Collection {
 
     pub fn vector_dimension(&self) -> usize {
         self.dimension
+    }
+
+    pub fn resident_vector_memory_bytes(&self) -> usize {
+        let in_memory = self
+            .vectors
+            .values()
+            .map(|v| v.len() * std::mem::size_of::<f32>())
+            .sum::<usize>();
+        let budgeted = self
+            .vector_store
+            .as_ref()
+            .map(|store| store.resident_memory_bytes())
+            .unwrap_or(0);
+        in_memory + budgeted
     }
 
     fn validate_document(&self, document: &Document) -> Result<(), CatalogError> {
@@ -1159,6 +1227,15 @@ impl Catalog {
     pub fn tenants(&self) -> impl Iterator<Item = (&TenantId, &HashMap<String, Collection>)> {
         self.collections.iter()
     }
+
+
+    pub fn total_resident_vector_memory_bytes(&self, tenant: &TenantId) -> usize {
+        self.collections
+            .get(tenant)
+            .map(|collections| collections.values().map(Collection::resident_vector_memory_bytes).sum())
+            .unwrap_or(0)
+    }
+
 }
 
 fn normalize_scores(results: &[SearchResult]) -> HashMap<DocumentId, f32> {
@@ -1189,6 +1266,12 @@ fn normalize_scores(results: &[SearchResult]) -> HashMap<DocumentId, f32> {
 mod tests {
     use super::*;
     use barq_index::HnswParams;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
 
     fn default_tenant() -> TenantId {
         TenantId::default()
@@ -1665,6 +1748,121 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, DocumentId::U64(1));
     }
+
+    #[test]
+    fn collection_insert_retrieve_search_in_memory_mode() {
+        let _guard = env_test_lock();
+        std::env::remove_var("BARQ_VECTOR_STORE_MODE");
+        let mut catalog = Catalog::new();
+        let tenant = default_tenant();
+        catalog.create_collection(tenant.clone(), sample_schema()).unwrap();
+        let collection = catalog.collection_mut(&tenant, "products").unwrap();
+        collection.insert(Document { id: DocumentId::U64(1), vector: vec![1.0, 0.0, 0.0], payload: None }).unwrap();
+
+        let doc = collection.get(&DocumentId::U64(1)).unwrap();
+        assert_eq!(doc.vector, vec![1.0, 0.0, 0.0]);
+        let results = collection.search(&[1.0, 0.0, 0.0], 1).unwrap();
+        assert_eq!(results[0].id, DocumentId::U64(1));
+    }
+
+    #[test]
+    fn collection_insert_retrieve_search_in_mmap_mode() {
+        let _guard = env_test_lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("BARQ_VECTOR_STORE_MODE", "mmap");
+        std::env::set_var("BARQ_VECTOR_STORE_PATH", dir.path());
+        std::env::set_var("BARQ_MAX_MEMORY_MB", "1");
+
+        let mut catalog = Catalog::new();
+        let tenant = default_tenant();
+        catalog.create_collection(tenant.clone(), sample_schema()).unwrap();
+        let collection = catalog.collection_mut(&tenant, "products").unwrap();
+        collection.insert(Document { id: DocumentId::U64(2), vector: vec![0.0, 1.0, 0.0], payload: None }).unwrap();
+
+        let doc = collection.get(&DocumentId::U64(2)).unwrap();
+        assert_eq!(doc.vector, vec![0.0, 1.0, 0.0]);
+        let results = collection.search(&[0.0, 1.0, 0.0], 1).unwrap();
+        assert_eq!(results[0].id, DocumentId::U64(2));
+
+        std::env::remove_var("BARQ_VECTOR_STORE_MODE");
+        std::env::remove_var("BARQ_VECTOR_STORE_PATH");
+        std::env::remove_var("BARQ_MAX_MEMORY_MB");
+    }
+
+    #[test]
+    fn collection_restart_in_mmap_mode_keeps_search_working() {
+        let _guard = env_test_lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("BARQ_VECTOR_STORE_MODE", "mmap");
+        std::env::set_var("BARQ_VECTOR_STORE_PATH", dir.path());
+
+        let tenant = default_tenant();
+        let mut catalog = Catalog::new();
+        catalog.create_collection(tenant.clone(), sample_schema()).unwrap();
+        {
+            let collection = catalog.collection_mut(&tenant, "products").unwrap();
+            collection.insert(Document { id: DocumentId::U64(3), vector: vec![0.0, 0.0, 1.0], payload: None }).unwrap();
+            let r = collection.search(&[0.0, 0.0, 1.0], 1).unwrap();
+            assert_eq!(r[0].id, DocumentId::U64(3));
+        }
+
+        let mut catalog_restarted = Catalog::new();
+        catalog_restarted.create_collection(tenant.clone(), sample_schema()).unwrap();
+        let collection = catalog_restarted.collection_mut(&tenant, "products").unwrap();
+        collection.insert(Document { id: DocumentId::U64(3), vector: vec![0.0, 0.0, 1.0], payload: None }).unwrap();
+        let r = collection.search(&[0.0, 0.0, 1.0], 1).unwrap();
+        assert_eq!(r[0].id, DocumentId::U64(3));
+
+        std::env::remove_var("BARQ_VECTOR_STORE_MODE");
+        std::env::remove_var("BARQ_VECTOR_STORE_PATH");
+    }
+
+    #[test]
+    fn collection_restart_hydrates_from_mmap_store_without_reinsert() {
+        let _guard = env_test_lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("BARQ_VECTOR_STORE_MODE", "mmap");
+        std::env::set_var("BARQ_VECTOR_STORE_PATH", dir.path());
+
+        let tenant = default_tenant();
+        let mut catalog = Catalog::new();
+        catalog.create_collection(tenant.clone(), sample_schema()).unwrap();
+        {
+            let collection = catalog.collection_mut(&tenant, "products").unwrap();
+            collection.insert(Document { id: DocumentId::U64(7), vector: vec![0.3, 0.4, 0.5], payload: None }).unwrap();
+        }
+
+        let mut restarted = Catalog::new();
+        restarted.create_collection(tenant.clone(), sample_schema()).unwrap();
+        let collection = restarted.collection(&tenant, "products").unwrap();
+        let r = collection.search(&[0.3, 0.4, 0.5], 1).unwrap();
+        assert_eq!(r[0].id, DocumentId::U64(7));
+
+        std::env::remove_var("BARQ_VECTOR_STORE_MODE");
+        std::env::remove_var("BARQ_VECTOR_STORE_PATH");
+    }
+
+    #[test]
+    fn catalog_reports_aggregate_vector_memory() {
+        let _guard = env_test_lock();
+        std::env::remove_var("BARQ_VECTOR_STORE_MODE");
+        let tenant = default_tenant();
+        let mut catalog = Catalog::new();
+
+        let mut schema_a = sample_schema();
+        schema_a.name = "products_a".into();
+        let mut schema_b = sample_schema();
+        schema_b.name = "products_b".into();
+
+        catalog.create_collection(tenant.clone(), schema_a).unwrap();
+        catalog.create_collection(tenant.clone(), schema_b).unwrap();
+        catalog.collection_mut(&tenant, "products_a").unwrap().insert(Document { id: DocumentId::U64(1), vector: vec![1.0, 0.0, 0.0], payload: None }).unwrap();
+        catalog.collection_mut(&tenant, "products_b").unwrap().insert(Document { id: DocumentId::U64(2), vector: vec![0.0, 1.0, 0.0], payload: None }).unwrap();
+
+        assert!(catalog.total_resident_vector_memory_bytes(&tenant) >= 2 * 3 * std::mem::size_of::<f32>());
+    }
+
+
 }
 
 fn evaluate_filter(filter: &Filter, payload: Option<&PayloadValue>) -> bool {
@@ -1770,6 +1968,7 @@ fn compare_values(lhs: &PayloadValue, rhs: &PayloadValue, desired: Ordering) -> 
         }
         _ => false,
     }
+
 }
 
 
