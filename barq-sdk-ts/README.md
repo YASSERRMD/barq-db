@@ -19,6 +19,13 @@ yarn add barq-sdk-ts
 pnpm add barq-sdk-ts
 ```
 
+## API Contract
+
+`proto/barq.proto` in the repository root is the canonical Barq API contract.
+
+- `GrpcClient` follows that gRPC surface directly.
+- `BarqClient` remains available for compatibility with the current HTTP endpoints.
+
 ---
 
 ## Quick Start
@@ -49,7 +56,7 @@ results.forEach(r => console.log(`${r.id}: ${r.score}`));
 
 ---
 
-## HTTP Client
+## Compatibility HTTP Client
 
 ### Initialization
 
@@ -181,23 +188,21 @@ const results = await collection.search(
 
 ## gRPC Client
 
-For high-throughput applications:
+Use the canonical gRPC contract for the primary SDK surface:
 
 ```typescript
 import { GrpcClient } from 'barq-sdk-ts';
-import * as path from 'path';
 
-const protoPath = path.join(__dirname, 'proto/barq.proto');
-const client = new GrpcClient('localhost:50051', protoPath);
+const client = new GrpcClient('localhost:50051');
 
-// Health check
-const isHealthy = await client.health();
+// Status check
+const isHealthy = await client.status();
 
 // Create collection
 await client.createCollection('vectors', 384, 'L2');
 
 // Insert document
-await client.insertDocument('vectors', 'doc-001', [0.1, ...], { label: 'example' });
+await client.insert('vectors', 'doc-001', [0.1, ...], { label: 'example' });
 
 // Search
 const results = await client.search('vectors', [0.1, ...], 10);
@@ -250,8 +255,10 @@ interface SearchResult {
 
 | Method | Parameters | Returns | Description |
 |--------|------------|---------|-------------|
+| `status()` | - | `Promise<boolean>` | Canonical status RPC |
 | `health()` | - | `Promise<boolean>` | Check health |
 | `createCollection()` | `name`, `dimension`, `metric` | `Promise<void>` | Create collection |
+| `insert()` | `collection`, `id`, `vector`, `payload` | `Promise<void>` | Canonical insert RPC |
 | `insertDocument()` | `collection`, `id`, `vector`, `payload` | `Promise<void>` | Insert |
 | `search()` | `collection`, `vector`, `topK` | `Promise<SearchResult[]>` | Search |
 

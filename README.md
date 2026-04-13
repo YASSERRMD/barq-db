@@ -43,6 +43,14 @@ cargo run --bin barq-server
 
 The API is available at `http://localhost:8080` (HTTP) and `localhost:50051` (gRPC).
 
+## Canonical API Contract
+
+`proto/barq.proto` is the source of truth for Barq's external API contract.
+
+- gRPC is the primary API surface for new SDK work.
+- The canonical RPCs in SDK phase 1 are `Status`, `CreateCollection`, `Insert`, and `Search`.
+- HTTP/REST endpoints remain available as a compatibility surface while SDKs complete the migration.
+
 ---
 
 ## SDK Quick Start
@@ -173,7 +181,7 @@ Each document contains:
 ┌─────────────────────────────────────────────────────┐
 │                    Barq DB                          │
 ├─────────────────────────────────────────────────────┤
-│  REST API (Axum)  │  gRPC API  │  Admin CLI        │
+│ Compatibility REST │ Canonical gRPC │ Admin CLI     │
 ├───────────────────┴────────────┴────────────────────┤
 │                Query Engine                         │
 │  ┌─────────┐  ┌─────────┐  ┌─────────────────────┐ │
@@ -195,7 +203,7 @@ Each document contains:
 | `barq-bm25` | Text search engine, analyzers |
 | `barq-storage` | WAL, snapshots, persistence |
 | `barq-cluster` | Sharding, routing, replication helpers |
-| `barq-api` | HTTP/gRPC APIs, auth, validation |
+| `barq-api` | Compatibility HTTP + canonical gRPC APIs, auth, validation |
 
 ---
 

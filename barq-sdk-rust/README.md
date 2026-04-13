@@ -21,6 +21,13 @@ barq-sdk-rust = { path = "../barq-sdk-rust" }
 # barq-sdk-rust = "0.1"
 ```
 
+## API Contract
+
+`proto/barq.proto` in the repository root is the canonical Barq API contract.
+
+- `BarqGrpcClient` maps to that gRPC surface directly.
+- `BarqClient` remains available for compatibility with the current HTTP endpoints.
+
 ---
 
 ## Quick Start
@@ -74,7 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ---
 
-## HTTP Client
+## Compatibility HTTP Client
 
 ### Initialization
 
@@ -258,15 +265,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Connect
     let mut client = BarqGrpcClient::connect("http://localhost:50051".into()).await?;
 
-    // Health check
-    let ok = client.health().await?;
+    // Status check
+    let ok = client.status().await?;
     println!("Healthy: {}", ok);
 
     // Create collection
     client.create_collection("vectors", 384, DistanceMetric::L2).await?;
 
     // Insert document
-    client.insert_document(
+    client.insert(
         "vectors",
         "doc-001",
         vec![0.1; 384],
@@ -332,8 +339,10 @@ pub enum BarqError {
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | `connect` | `(dst) -> Result<Self>` | Connect to server |
+| `status` | `(&mut self) -> Result<bool>` | Canonical status RPC |
 | `health` | `(&mut self) -> Result<bool>` | Health check |
 | `create_collection` | `(&mut self, name, dimension, metric) -> Result<()>` | Create collection |
+| `insert` | `(&mut self, collection, id, vector, payload) -> Result<()>` | Canonical insert RPC |
 | `insert_document` | `(&mut self, collection, id, vector, payload) -> Result<()>` | Insert |
 | `search` | `(&mut self, collection, vector, top_k) -> Result<Vec<Value>>` | Search |
 
