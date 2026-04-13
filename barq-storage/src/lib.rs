@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -47,6 +48,9 @@ pub enum StorageError {
 
     #[error("tenant {tenant} quota exceeded: {reason}")]
     QuotaExceeded { tenant: TenantId, reason: String },
+
+    #[error("segment for collection {collection} is not writable: {state:?}")]
+    SegmentNotWritable { collection: String, state: SegmentState },
 }
 
 impl From<ObjectStoreError> for StorageError {
@@ -120,11 +124,65 @@ pub struct SegmentMetadata {
     pub file_name: String,
     pub created_at: DateTime<Utc>,
     pub entries: usize,
+    #[serde(default)]
+    pub state: SegmentState,
 }
 
-#[derive(Default)]
+/// Persisted metadata for a sealed or compacted segment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SegmentIndexMetadata {
+    pub file_name: String,
+    pub state: SegmentState,
+    pub index_built: bool,
+    pub indexed_at: DateTime<Utc>,
+}
+
+/// Lifecycle state for immutable segment files.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum SegmentState {
+    /// Segment is still accepting writes.
+    #[default]
+    Growing,
+    /// Segment is frozen and can only be read.
+    Sealed,
+    /// Segment has been compacted into another segment.
+    Compacted,
+}
+
+impl SegmentState {
+    /// Returns true when transitioning from `self` to `next` is permitted.
+    pub fn can_transition_to(self, next: SegmentState) -> bool {
+        match (self, next) {
+            (SegmentState::Growing, SegmentState::Sealed)
+            | (SegmentState::Sealed, SegmentState::Compacted) => true,
+            (current, target) => current == target,
+        }
+    }
+
+    /// Validates a state transition and returns the target state on success.
+    pub fn transition_to(self, next: SegmentState) -> Result<SegmentState, StorageError> {
+        if self.can_transition_to(next) {
+            Ok(next)
+        } else {
+            Err(StorageError::ObjectStore(format!(
+                "invalid segment state transition: {self:?} -> {next:?}"
+            )))
+        }
+    }
+}
+
 pub struct StorageOptions {
     pub tiering_manager: Option<Arc<TieringManager>>,
+    pub auto_seal_threshold: usize,
+}
+
+impl Default for StorageOptions {
+    fn default() -> Self {
+        Self {
+            tiering_manager: None,
+            auto_seal_threshold: usize::MAX,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -135,9 +193,27 @@ pub struct Storage {
     tenant_quotas: HashMap<TenantId, TenantQuota>,
     tenant_usage: HashMap<TenantId, TenantUsage>,
     tiering_manager: Option<Arc<TieringManager>>,
+    collection_segment_states: HashMap<(TenantId, String), SegmentState>,
+    collection_write_counts: HashMap<(TenantId, String), usize>,
+    auto_seal_threshold: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CollectionLifecycleState {
+    segment_state: SegmentState,
 }
 
 impl Storage {
+    fn next_segment_suffix() -> u128 {
+        static SEGMENT_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let seq = SEGMENT_COUNTER.fetch_add(1, Ordering::Relaxed) as u128;
+        nanos.saturating_mul(1_000).saturating_add(seq)
+    }
+
     pub fn open(root: impl AsRef<Path>) -> Result<Self, StorageError> {
         Self::open_with_options(root, StorageOptions::default())
     }
@@ -154,6 +230,9 @@ impl Storage {
             tenant_quotas: HashMap::new(),
             tenant_usage: HashMap::new(),
             tiering_manager: None,
+            collection_segment_states: HashMap::new(),
+            collection_write_counts: HashMap::new(),
+            auto_seal_threshold: options.auto_seal_threshold,
         };
         
         if let Some(tm) = options.tiering_manager {
@@ -227,6 +306,95 @@ impl Storage {
     fn ensure_tenant_state(&mut self, tenant: &TenantId) {
         self.tenant_quotas.entry(tenant.clone()).or_default();
         self.tenant_usage.entry(tenant.clone()).or_default();
+    }
+
+    fn collection_segment_state(&self, tenant: &TenantId, collection: &str) -> SegmentState {
+        self.collection_segment_states
+            .get(&(tenant.clone(), collection.to_string()))
+            .copied()
+            .unwrap_or(SegmentState::Growing)
+    }
+
+    fn set_collection_segment_state(
+        &mut self,
+        tenant: &TenantId,
+        collection: &str,
+        state: SegmentState,
+    ) -> Result<(), StorageError> {
+        self.collection_segment_states
+            .insert((tenant.clone(), collection.to_string()), state);
+        self.persist_collection_segment_state(tenant, collection, state)
+    }
+
+    fn record_collection_write(
+        &mut self,
+        tenant: &TenantId,
+        collection: &str,
+    ) -> Result<(), StorageError> {
+        let key = (tenant.clone(), collection.to_string());
+        let writes = self.collection_write_counts.entry(key).or_default();
+        *writes += 1;
+        if *writes >= self.auto_seal_threshold {
+            self.seal_current_segment_for_tenant(tenant, collection, true)?;
+        }
+        Ok(())
+    }
+
+    fn seal_current_segment_for_tenant(
+        &mut self,
+        tenant: &TenantId,
+        collection: &str,
+        create_new_growing: bool,
+    ) -> Result<SegmentMetadata, StorageError> {
+        let current = self.collection_segment_state(tenant, collection);
+        current.transition_to(SegmentState::Sealed)?;
+        self.set_collection_segment_state(tenant, collection, SegmentState::Sealed)?;
+        let metadata = self.flush_wal_to_segment(tenant, collection)?;
+        let index_built = self.build_index_for_sealed_segment(tenant, collection);
+        self.persist_segment_index_metadata(tenant, collection, &metadata, index_built)?;
+        self.collection_write_counts
+            .insert((tenant.clone(), collection.to_string()), 0);
+        if create_new_growing {
+            self.set_collection_segment_state(tenant, collection, SegmentState::Growing)?;
+        }
+        Ok(metadata)
+    }
+
+    fn build_index_for_sealed_segment(&mut self, tenant: &TenantId, collection: &str) -> bool {
+        if std::env::var("BARQ_FAIL_INDEX_BUILD").ok().as_deref() == Some("1") {
+            return false;
+        }
+        self.catalog
+            .collection_mut(tenant, collection)
+            .and_then(|coll| coll.rebuild_index(None))
+            .is_ok()
+    }
+
+    fn persist_segment_index_metadata(
+        &self,
+        tenant: &TenantId,
+        collection: &str,
+        metadata: &SegmentMetadata,
+        index_built: bool,
+    ) -> Result<(), StorageError> {
+        if metadata.file_name.is_empty() {
+            return Ok(());
+        }
+        let meta_path = self
+            .segments_dir(tenant, collection)
+            .join(format!("{}.meta.json", metadata.file_name));
+        let mut file = File::create(meta_path)?;
+        serde_json::to_writer_pretty(
+            &mut file,
+            &SegmentIndexMetadata {
+                file_name: metadata.file_name.clone(),
+                state: metadata.state,
+                index_built,
+                indexed_at: Utc::now(),
+            },
+        )?;
+        file.flush()?;
+        Ok(())
     }
 
     fn enforce_qps(&mut self, tenant: &TenantId) -> Result<(), StorageError> {
@@ -558,12 +726,13 @@ impl Storage {
                 file_name: String::new(),
                 created_at: Utc::now(),
                 entries: 0,
+                state: SegmentState::Growing,
             });
         }
 
         let segments_dir = self.segments_dir(tenant, collection);
         fs::create_dir_all(&segments_dir)?;
-        let file_name = format!("segment_{}.jsonl", Utc::now().format("%Y%m%d%H%M%S%3f"));
+        let file_name = format!("segment_{}.jsonl", Self::next_segment_suffix());
         let segment_path = segments_dir.join(&file_name);
         let mut segment_file = File::create(&segment_path)?;
         let wal_file = File::open(&wal_path)?;
@@ -596,6 +765,7 @@ impl Storage {
             file_name,
             created_at: Utc::now(),
             entries,
+            state: SegmentState::Sealed,
         })
     }
 
@@ -616,6 +786,7 @@ impl Storage {
                 file_name: String::new(),
                 created_at: Utc::now(),
                 entries: 0,
+                state: SegmentState::Growing,
             });
         }
 
@@ -641,10 +812,7 @@ impl Storage {
         }
 
         let segments_dir = self.segments_dir(tenant, collection);
-        let file_name = format!(
-            "segment_compacted_{}.jsonl",
-            Utc::now().format("%Y%m%d%H%M%S%3f")
-        );
+        let file_name = format!("segment_compacted_{}.jsonl", Self::next_segment_suffix());
         let compacted_path = segments_dir.join(&file_name);
         fs::create_dir_all(&segments_dir)?;
         let mut compacted_file = File::create(&compacted_path)?;
@@ -682,6 +850,7 @@ impl Storage {
             file_name,
             created_at: Utc::now(),
             entries,
+            state: SegmentState::Compacted,
         })
     }
 
@@ -705,6 +874,80 @@ impl Storage {
         Ok(handle)
     }
 
+    /// Runs one background compaction pass for collections with at least `min_segments` segments.
+    pub fn run_background_compaction_once(
+        &self,
+        tenant: TenantId,
+        min_segments: usize,
+    ) -> thread::JoinHandle<Result<Vec<String>, StorageError>> {
+        let root = self.root.clone();
+        thread::spawn(move || {
+            let mut storage = Storage::open(root)?;
+            let collections_dir = storage.collections_root(&tenant);
+            let mut compacted = Vec::new();
+            if !collections_dir.exists() {
+                return Ok(compacted);
+            }
+            for entry in fs::read_dir(collections_dir)? {
+                let entry = entry?;
+                if !entry.file_type()?.is_dir() {
+                    continue;
+                }
+                let collection = entry.file_name().to_string_lossy().to_string();
+                let segments = storage.segment_files(&tenant, &collection)?;
+                if segments.len() < min_segments {
+                    continue;
+                }
+                if std::env::var("BARQ_FAIL_COMPACTION").ok().as_deref() == Some("1") {
+                    return Err(StorageError::ObjectStore(
+                        "simulated background compaction failure".to_string(),
+                    ));
+                }
+                storage.compact_segments(&tenant, &collection)?;
+                compacted.push(collection);
+            }
+            Ok(compacted)
+        })
+    }
+
+    /// Runs a continuous background compaction worker until `stop_flag` is set.
+    ///
+    /// The worker performs one pass every `interval` and compacts collections with at least
+    /// `min_segments` immutable segments.
+    pub fn run_background_compaction_loop(
+        &self,
+        tenant: TenantId,
+        min_segments: usize,
+        interval: Duration,
+        stop_flag: Arc<AtomicBool>,
+    ) -> thread::JoinHandle<Result<Vec<String>, StorageError>> {
+        let root = self.root.clone();
+        thread::spawn(move || {
+            let mut all_compacted = Vec::new();
+            while !stop_flag.load(Ordering::Relaxed) {
+                let mut storage = Storage::open(&root)?;
+                let collections_dir = storage.collections_root(&tenant);
+                if collections_dir.exists() {
+                    for entry in fs::read_dir(collections_dir)? {
+                        let entry = entry?;
+                        if !entry.file_type()?.is_dir() {
+                            continue;
+                        }
+                        let collection = entry.file_name().to_string_lossy().to_string();
+                        let segments = storage.segment_files(&tenant, &collection)?;
+                        if segments.len() < min_segments {
+                            continue;
+                        }
+                        storage.compact_segments(&tenant, &collection)?;
+                        all_compacted.push(collection);
+                    }
+                }
+                thread::sleep(interval);
+            }
+            Ok(all_compacted)
+        })
+    }
+
     pub fn create_collection(&mut self, schema: CollectionSchema) -> Result<(), StorageError> {
         self.create_collection_for_tenant(self.default_tenant.clone(), schema)
     }
@@ -725,6 +968,9 @@ impl Storage {
         self.catalog
             .create_collection(tenant.clone(), schema.clone())?;
         self.persist_schema(&tenant, &schema)?;
+        self.set_collection_segment_state(&tenant, &schema.name, SegmentState::Growing)?;
+        self.collection_write_counts
+            .insert((tenant.clone(), schema.name.clone()), 0);
         self.adjust_usage(&tenant, 1, 0, 0);
         Ok(())
     }
@@ -772,6 +1018,13 @@ impl Storage {
     ) -> Result<(), StorageError> {
         self.ensure_tenant_state(tenant);
         self.enforce_qps(tenant)?;
+        let segment_state = self.collection_segment_state(tenant, collection);
+        if segment_state != SegmentState::Growing {
+            return Err(StorageError::SegmentNotWritable {
+                collection: collection.to_string(),
+                state: segment_state,
+            });
+        }
         let previous_size = self.document_size_bytes(tenant, collection, &document.id);
         let is_new = previous_size == 0;
         let projected_docs = if is_new { 1 } else { 0 };
@@ -793,7 +1046,8 @@ impl Storage {
             WalEntry {
                 op: WalOp::Insert(document),
             },
-        )
+        )?;
+        self.record_collection_write(tenant, collection)
     }
 
     pub fn delete(&mut self, collection: &str, id: DocumentId) -> Result<bool, StorageError> {
@@ -808,6 +1062,13 @@ impl Storage {
     ) -> Result<bool, StorageError> {
         self.ensure_tenant_state(tenant);
         self.enforce_qps(tenant)?;
+        let segment_state = self.collection_segment_state(tenant, collection);
+        if segment_state != SegmentState::Growing {
+            return Err(StorageError::SegmentNotWritable {
+                collection: collection.to_string(),
+                state: segment_state,
+            });
+        }
         let existing_bytes = self.document_size_bytes(tenant, collection, &id);
         let removed = {
             let coll = self.catalog.collection_mut(tenant, collection)?;
@@ -822,8 +1083,21 @@ impl Storage {
                     op: WalOp::Delete(id),
                 },
             )?;
+            self.record_collection_write(tenant, collection)?;
         }
         Ok(removed)
+    }
+
+    pub fn segment_state_for_tenant(&self, tenant: &TenantId, collection: &str) -> SegmentState {
+        self.collection_segment_state(tenant, collection)
+    }
+
+    pub fn seal_segment_for_tenant(
+        &mut self,
+        tenant: &TenantId,
+        collection: &str,
+    ) -> Result<SegmentMetadata, StorageError> {
+        self.seal_current_segment_for_tenant(tenant, collection, false)
     }
 
     pub fn search(
@@ -847,7 +1121,14 @@ impl Storage {
     ) -> Result<Vec<barq_index::SearchResult>, StorageError> {
         self.enforce_qps(tenant)?;
         let coll = self.catalog.collection(tenant, collection)?;
-        Ok(coll.search_with_filter(query, top_k, filter)?)
+        let mut results = coll.search_with_filter(query, top_k, filter)?;
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.id.to_string().cmp(&b.id.to_string()))
+        });
+        Ok(results)
     }
 
     pub fn search_text(
@@ -1036,6 +1317,13 @@ impl Storage {
                     schema.tenant_id = tenant.clone();
                 }
                 self.catalog.create_collection(tenant.clone(), schema)?;
+                let persisted_state = self
+                    .load_collection_segment_state(&tenant, &name)?
+                    .unwrap_or(SegmentState::Growing);
+                self.collection_segment_states
+                    .insert((tenant.clone(), name.clone()), persisted_state);
+                self.collection_write_counts
+                    .insert((tenant.clone(), name.clone()), 0);
                 self.replay_segments(&tenant, &name)?;
                 self.replay_wal(&tenant, &name)?;
             }
@@ -1128,6 +1416,44 @@ impl Storage {
         self.collections_root(tenant).join(name)
     }
 
+    fn collection_lifecycle_state_path(&self, tenant: &TenantId, name: &str) -> PathBuf {
+        self.collection_dir(tenant, name).join("lifecycle_state.json")
+    }
+
+    fn persist_collection_segment_state(
+        &self,
+        tenant: &TenantId,
+        collection: &str,
+        state: SegmentState,
+    ) -> Result<(), StorageError> {
+        let collection_dir = self.collection_dir(tenant, collection);
+        fs::create_dir_all(&collection_dir)?;
+        let state_path = self.collection_lifecycle_state_path(tenant, collection);
+        let mut file = File::create(state_path)?;
+        serde_json::to_writer_pretty(
+            &mut file,
+            &CollectionLifecycleState {
+                segment_state: state,
+            },
+        )?;
+        file.flush()?;
+        Ok(())
+    }
+
+    fn load_collection_segment_state(
+        &self,
+        tenant: &TenantId,
+        collection: &str,
+    ) -> Result<Option<SegmentState>, StorageError> {
+        let state_path = self.collection_lifecycle_state_path(tenant, collection);
+        if !state_path.exists() {
+            return Ok(None);
+        }
+        let file = File::open(state_path)?;
+        let state: CollectionLifecycleState = serde_json::from_reader(file)?;
+        Ok(Some(state.segment_state))
+    }
+
     fn wal_path(&self, tenant: &TenantId, name: &str) -> PathBuf {
         self.collection_dir(tenant, name).join("wal.jsonl")
     }
@@ -1143,7 +1469,14 @@ impl Storage {
         if dir.exists() {
              for entry in fs::read_dir(&dir)? {
                 let entry = entry?;
-                if entry.file_type()?.is_file() {
+                if entry.file_type()?.is_file()
+                    && entry
+                        .path()
+                        .file_name()
+                        .and_then(|f| f.to_str())
+                        .map(|name| name.ends_with(".jsonl"))
+                        .unwrap_or(false)
+                {
                     files.insert(entry.path());
                 }
              }
@@ -1155,8 +1488,10 @@ impl Storage {
                 let search_prefix = if prefix.ends_with('/') { prefix.clone() } else { format!("{}/", prefix) };
                 let remote_keys = tm.list_keys_with_prefix(&search_prefix);
                 for key in remote_keys {
-                     let abs_path = self.root.join(key);
-                     files.insert(abs_path);
+                    if key.ends_with(".jsonl") {
+                        let abs_path = self.root.join(key);
+                        files.insert(abs_path);
+                    }
                 }
             }
         }
@@ -1193,6 +1528,7 @@ mod tests {
     use super::*;
     use barq_core::{FieldSchema, FieldType, PayloadValue};
     use barq_index::{DistanceMetric, DocumentId, HnswParams, IndexType};
+    use proptest::prelude::*;
     use std::path::Path;
 
     fn sample_schema(name: &str) -> CollectionSchema {
@@ -1217,6 +1553,14 @@ mod tests {
             id: DocumentId::U64(id),
             vector: vec![1.0, 0.0, 0.0],
             payload: Some(PayloadValue::String("doc".into())),
+        }
+    }
+
+    fn sample_large_document(id: u64, payload_size: usize) -> Document {
+        Document {
+            id: DocumentId::U64(id),
+            vector: vec![1.0, 0.0, 0.0],
+            payload: Some(PayloadValue::String("x".repeat(payload_size))),
         }
     }
 
@@ -1527,5 +1871,504 @@ mod tests {
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, DocumentId::U64(199));
+    }
+
+    #[test]
+    fn segment_state_defaults_to_growing() {
+        let metadata = SegmentMetadata {
+            file_name: "segment_1.jsonl".to_string(),
+            created_at: Utc::now(),
+            entries: 0,
+            state: SegmentState::default(),
+        };
+        assert_eq!(metadata.state, SegmentState::Growing);
+    }
+
+    #[test]
+    fn segment_state_rejects_invalid_transitions() {
+        assert!(SegmentState::Growing
+            .transition_to(SegmentState::Compacted)
+            .is_err());
+        assert!(SegmentState::Compacted
+            .transition_to(SegmentState::Sealed)
+            .is_err());
+        assert!(SegmentState::Sealed
+            .transition_to(SegmentState::Growing)
+            .is_err());
+    }
+
+    #[test]
+    fn segment_state_serializes_and_deserializes() {
+        let encoded = serde_json::to_string(&SegmentMetadata {
+            file_name: "segment_2.jsonl".to_string(),
+            created_at: Utc::now(),
+            entries: 11,
+            state: SegmentState::Sealed,
+        })
+        .expect("serialization should work");
+        let decoded: SegmentMetadata =
+            serde_json::from_str(&encoded).expect("deserialization should work");
+        assert_eq!(decoded.state, SegmentState::Sealed);
+    }
+
+    #[test]
+    fn growing_segment_accepts_writes_and_reads() {
+        let root = tempfile::tempdir().unwrap();
+        let mut storage = Storage::open(root.path()).unwrap();
+        storage.create_collection(sample_schema("grow")).unwrap();
+        assert_eq!(
+            storage.segment_state_for_tenant(&TenantId::default(), "grow"),
+            SegmentState::Growing
+        );
+
+        storage
+            .insert("grow", sample_document(1), false)
+            .expect("write should be accepted for growing segment");
+
+        let results = storage.search("grow", &[1.0, 0.0, 0.0], 1, None).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, DocumentId::U64(1));
+    }
+
+    #[test]
+    fn growing_segment_delete_update_and_duplicates_behave() {
+        let root = tempfile::tempdir().unwrap();
+        let mut storage = Storage::open(root.path()).unwrap();
+        storage.create_collection(sample_schema("grow2")).unwrap();
+
+        storage.insert("grow2", sample_document(5), false).unwrap();
+        storage
+            .insert("grow2", sample_document(5), false)
+            .expect("duplicate id insert should be accepted with current semantics");
+
+        storage.insert("grow2", sample_document(5), true).unwrap();
+        let deleted = storage.delete("grow2", DocumentId::U64(5)).unwrap();
+        assert!(deleted, "existing document should be deleted");
+        let _ = storage.delete("grow2", DocumentId::U64(5)).unwrap();
+        let results = storage.search("grow2", &[5.0, 0.0, 0.0], 1, None).unwrap();
+        assert!(results.is_empty(), "document should not remain after deletes");
+    }
+
+    #[test]
+    fn segment_auto_seals_when_threshold_reached() {
+        let root = tempfile::tempdir().unwrap();
+        let mut storage = Storage::open_with_options(
+            root.path(),
+            StorageOptions {
+                auto_seal_threshold: 2,
+                ..StorageOptions::default()
+            },
+        )
+        .unwrap();
+        storage.create_collection(sample_schema("seal_auto")).unwrap();
+        storage.insert("seal_auto", sample_document(1), false).unwrap();
+        assert_eq!(
+            storage.segment_state_for_tenant(&TenantId::default(), "seal_auto"),
+            SegmentState::Growing
+        );
+        storage.insert("seal_auto", sample_document(2), false).unwrap();
+        assert_eq!(
+            storage.segment_state_for_tenant(&TenantId::default(), "seal_auto"),
+            SegmentState::Growing,
+            "auto seal rotates back to a new growing segment"
+        );
+    }
+
+    #[test]
+    fn segment_can_be_manually_sealed_and_becomes_read_only() {
+        let root = tempfile::tempdir().unwrap();
+        let mut storage = Storage::open(root.path()).unwrap();
+        storage.create_collection(sample_schema("seal_manual")).unwrap();
+        storage
+            .insert("seal_manual", sample_document(3), false)
+            .unwrap();
+        storage
+            .seal_segment_for_tenant(&TenantId::default(), "seal_manual")
+            .unwrap();
+        assert_eq!(
+            storage.segment_state_for_tenant(&TenantId::default(), "seal_manual"),
+            SegmentState::Sealed
+        );
+
+        let write_err = storage.insert("seal_manual", sample_document(4), false);
+        assert!(matches!(
+            write_err,
+            Err(StorageError::SegmentNotWritable { .. })
+        ));
+
+        let results = storage.search("seal_manual", &[3.0, 0.0, 0.0], 1, None).unwrap();
+        assert_eq!(results.len(), 1, "reads still work after sealing");
+    }
+
+    #[test]
+    fn sealing_builds_index_and_persists_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let mut storage = Storage::open(root.path()).unwrap();
+        storage.create_collection(sample_schema("indexed")).unwrap();
+        storage.insert("indexed", sample_document(8), false).unwrap();
+        let sealed = storage
+            .seal_segment_for_tenant(&TenantId::default(), "indexed")
+            .unwrap();
+        assert_eq!(sealed.state, SegmentState::Sealed);
+
+        let metadata_path = root
+            .path()
+            .join("tenants/default/collections/indexed/segments")
+            .join(format!("{}.meta.json", sealed.file_name));
+        assert!(metadata_path.exists(), "sealed metadata should be persisted");
+        let data = std::fs::read_to_string(metadata_path).unwrap();
+        let parsed: SegmentIndexMetadata = serde_json::from_str(&data).unwrap();
+        assert!(parsed.index_built, "sealing should trigger index build");
+    }
+
+    #[test]
+    fn index_build_failure_falls_back_without_breaking_search() {
+        let root = tempfile::tempdir().unwrap();
+        let mut storage = Storage::open(root.path()).unwrap();
+        storage.create_collection(sample_schema("indexed_fallback")).unwrap();
+        storage
+            .insert("indexed_fallback", sample_document(10), false)
+            .unwrap();
+        std::env::set_var("BARQ_FAIL_INDEX_BUILD", "1");
+        let sealed = storage
+            .seal_segment_for_tenant(&TenantId::default(), "indexed_fallback")
+            .unwrap();
+        std::env::remove_var("BARQ_FAIL_INDEX_BUILD");
+
+        let metadata_path = root
+            .path()
+            .join("tenants/default/collections/indexed_fallback/segments")
+            .join(format!("{}.meta.json", sealed.file_name));
+        let parsed: SegmentIndexMetadata =
+            serde_json::from_str(&std::fs::read_to_string(metadata_path).unwrap()).unwrap();
+        assert!(!parsed.index_built);
+
+        let results = storage
+            .search("indexed_fallback", &[10.0, 0.0, 0.0], 1, None)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, DocumentId::U64(10));
+    }
+
+    #[test]
+    fn compaction_drops_tombstones_and_keeps_live_documents() {
+        let root = tempfile::tempdir().unwrap();
+        let tenant = TenantId::default();
+        let mut storage = Storage::open(root.path()).unwrap();
+        storage.create_collection(sample_schema("compact_live")).unwrap();
+
+        storage.insert("compact_live", sample_document(1), false).unwrap();
+        storage.insert("compact_live", sample_document(2), false).unwrap();
+        storage.flush_wal_to_segment(&tenant, "compact_live").unwrap();
+        storage.delete("compact_live", DocumentId::U64(1)).unwrap();
+        storage.flush_wal_to_segment(&tenant, "compact_live").unwrap();
+
+        storage.compact_segments(&tenant, "compact_live").unwrap();
+        let missing = storage
+            .get_document(&tenant, "compact_live", &DocumentId::U64(1))
+            .unwrap();
+        let live = storage.search("compact_live", &[2.0, 0.0, 0.0], 1, None).unwrap();
+        assert!(missing.is_none(), "deleted documents must not reappear");
+        assert_eq!(live.len(), 1, "live documents must survive compaction");
+    }
+
+    #[test]
+    fn compaction_handles_empty_segments_collection() {
+        let root = tempfile::tempdir().unwrap();
+        let tenant = TenantId::default();
+        let mut storage = Storage::open(root.path()).unwrap();
+        storage.create_collection(sample_schema("compact_empty")).unwrap();
+        let metadata = storage.compact_segments(&tenant, "compact_empty").unwrap();
+        assert_eq!(metadata.entries, 0);
+        assert!(metadata.file_name.is_empty());
+    }
+
+    #[test]
+    fn search_spans_growing_and_sealed_segments_deterministically() {
+        let root = tempfile::tempdir().unwrap();
+        let tenant = TenantId::default();
+        let mut storage = Storage::open(root.path()).unwrap();
+        storage.create_collection(sample_schema("multi_seg")).unwrap();
+
+        storage.insert("multi_seg", sample_document(1), false).unwrap();
+        storage.insert("multi_seg", sample_document(2), false).unwrap();
+        storage.flush_wal_to_segment(&tenant, "multi_seg").unwrap();
+        storage.insert("multi_seg", sample_document(3), false).unwrap(); // growing
+
+        let first = storage.search("multi_seg", &[2.5, 0.0, 0.0], 3, None).unwrap();
+        let second = storage.search("multi_seg", &[2.5, 0.0, 0.0], 3, None).unwrap();
+        assert_eq!(first.len(), 3);
+        assert_eq!(first, second, "merged top-k ordering must be deterministic");
+    }
+
+    #[test]
+    fn search_spans_multiple_sealed_segments() {
+        let root = tempfile::tempdir().unwrap();
+        let tenant = TenantId::default();
+        let mut storage = Storage::open(root.path()).unwrap();
+        storage.create_collection(sample_schema("multi_sealed")).unwrap();
+
+        storage.insert("multi_sealed", sample_document(10), false).unwrap();
+        storage.flush_wal_to_segment(&tenant, "multi_sealed").unwrap();
+        storage.insert("multi_sealed", sample_document(11), false).unwrap();
+        storage.flush_wal_to_segment(&tenant, "multi_sealed").unwrap();
+
+        let results = storage.search("multi_sealed", &[11.0, 0.0, 0.0], 2, None).unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn background_worker_compacts_eligible_segments() {
+        let root = tempfile::tempdir().unwrap();
+        let tenant = TenantId::default();
+        let mut storage = Storage::open(root.path()).unwrap();
+        storage.create_collection(sample_schema("bg_compact")).unwrap();
+        storage.insert("bg_compact", sample_document(1), false).unwrap();
+        storage.flush_wal_to_segment(&tenant, "bg_compact").unwrap();
+        std::thread::sleep(Duration::from_millis(2));
+        storage.insert("bg_compact", sample_document(2), false).unwrap();
+        storage.flush_wal_to_segment(&tenant, "bg_compact").unwrap();
+
+        let compacted = storage
+            .run_background_compaction_once(tenant.clone(), 2)
+            .join()
+            .unwrap()
+            .unwrap();
+        assert_eq!(compacted, vec!["bg_compact".to_string()]);
+    }
+
+    #[test]
+    fn background_worker_skips_ineligible_segments() {
+        let root = tempfile::tempdir().unwrap();
+        let tenant = TenantId::default();
+        let mut storage = Storage::open(root.path()).unwrap();
+        storage.create_collection(sample_schema("bg_skip")).unwrap();
+        storage.insert("bg_skip", sample_document(1), false).unwrap();
+        storage.flush_wal_to_segment(&tenant, "bg_skip").unwrap();
+
+        let compacted = storage
+            .run_background_compaction_once(tenant, 2)
+            .join()
+            .unwrap()
+            .unwrap();
+        assert!(compacted.is_empty());
+    }
+
+    #[test]
+    fn concurrent_reads_during_background_compaction_remain_correct() {
+        let root = tempfile::tempdir().unwrap();
+        let tenant = TenantId::default();
+        let mut storage = Storage::open(root.path()).unwrap();
+        storage.create_collection(sample_schema("bg_concurrent")).unwrap();
+        for id in 1..=4 {
+            storage.insert("bg_concurrent", sample_document(id), false).unwrap();
+            storage.flush_wal_to_segment(&tenant, "bg_concurrent").unwrap();
+        }
+
+        let path = root.path().to_path_buf();
+        let reader = std::thread::spawn(move || {
+            let mut reader_storage = Storage::open(&path).unwrap();
+            let res = reader_storage
+                .search("bg_concurrent", &[4.0, 0.0, 0.0], 1, None)
+                .unwrap();
+            assert!(!res.is_empty(), "reads should succeed during compaction");
+        });
+
+        storage
+            .run_background_compaction_once(tenant, 2)
+            .join()
+            .unwrap()
+            .unwrap();
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn background_compaction_failure_keeps_original_segments() {
+        let root = tempfile::tempdir().unwrap();
+        let tenant = TenantId::default();
+        let mut storage = Storage::open(root.path()).unwrap();
+        storage.create_collection(sample_schema("bg_fail")).unwrap();
+        storage.insert("bg_fail", sample_document(1), false).unwrap();
+        storage.flush_wal_to_segment(&tenant, "bg_fail").unwrap();
+        std::thread::sleep(Duration::from_millis(2));
+        storage.insert("bg_fail", sample_document(2), false).unwrap();
+        storage.flush_wal_to_segment(&tenant, "bg_fail").unwrap();
+
+        let before = storage.segment_files(&tenant, "bg_fail").unwrap().len();
+        assert!(before >= 2, "test requires at least two segments");
+        std::env::set_var("BARQ_FAIL_COMPACTION", "1");
+        let outcome = storage
+            .run_background_compaction_once(tenant.clone(), 2)
+            .join()
+            .unwrap();
+        std::env::remove_var("BARQ_FAIL_COMPACTION");
+        assert!(outcome.is_err());
+        let after = storage.segment_files(&tenant, "bg_fail").unwrap().len();
+        assert_eq!(before, after, "failed compaction should not delete originals");
+    }
+
+    #[test]
+    fn background_compaction_loop_compacts_until_stopped() {
+        let root = tempfile::tempdir().unwrap();
+        let tenant = TenantId::default();
+        let mut storage = Storage::open(root.path()).unwrap();
+        storage.create_collection(sample_schema("bg_loop")).unwrap();
+        storage.insert("bg_loop", sample_document(1), false).unwrap();
+        storage.flush_wal_to_segment(&tenant, "bg_loop").unwrap();
+        storage.insert("bg_loop", sample_document(2), false).unwrap();
+        storage.flush_wal_to_segment(&tenant, "bg_loop").unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = storage.run_background_compaction_loop(
+            tenant.clone(),
+            2,
+            Duration::from_millis(10),
+            stop.clone(),
+        );
+        std::thread::sleep(Duration::from_millis(40));
+        stop.store(true, Ordering::Relaxed);
+        let compacted = handle.join().unwrap().unwrap();
+        assert!(
+            compacted.iter().any(|name| name == "bg_loop"),
+            "loop worker should compact eligible collection"
+        );
+    }
+
+    #[test]
+    fn background_compaction_loop_skips_ineligible_collections() {
+        let root = tempfile::tempdir().unwrap();
+        let tenant = TenantId::default();
+        let mut storage = Storage::open(root.path()).unwrap();
+        storage.create_collection(sample_schema("bg_loop_skip")).unwrap();
+        storage
+            .insert("bg_loop_skip", sample_document(1), false)
+            .unwrap();
+        storage.flush_wal_to_segment(&tenant, "bg_loop_skip").unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = storage.run_background_compaction_loop(
+            tenant,
+            2,
+            Duration::from_millis(10),
+            stop.clone(),
+        );
+        std::thread::sleep(Duration::from_millis(30));
+        stop.store(true, Ordering::Relaxed);
+        let compacted = handle.join().unwrap().unwrap();
+        assert!(
+            !compacted.iter().any(|name| name == "bg_loop_skip"),
+            "loop worker should skip collections under threshold"
+        );
+    }
+
+    #[test]
+    fn lifecycle_state_replays_across_restart_after_mixed_transitions() {
+        let root = tempfile::tempdir().unwrap();
+        let tenant = TenantId::default();
+        {
+            let mut storage = Storage::open_with_options(
+                root.path(),
+                StorageOptions {
+                    auto_seal_threshold: 2,
+                    ..StorageOptions::default()
+                },
+            )
+            .unwrap();
+            storage.create_collection(sample_schema("mixed")).unwrap();
+            storage.insert("mixed", sample_document(1), false).unwrap();
+            storage.insert("mixed", sample_document(2), false).unwrap(); // auto seal + rotate
+            storage.insert("mixed", sample_document(3), false).unwrap();
+            storage.seal_segment_for_tenant(&tenant, "mixed").unwrap();
+            let compacted = storage.compact_segments(&tenant, "mixed").unwrap();
+            assert_eq!(compacted.state, SegmentState::Compacted);
+        }
+
+        let mut reopened = Storage::open(root.path()).unwrap();
+        assert_eq!(
+            reopened.segment_state_for_tenant(&tenant, "mixed"),
+            SegmentState::Sealed
+        );
+        let write = reopened.insert("mixed", sample_document(99), false);
+        assert!(matches!(write, Err(StorageError::SegmentNotWritable { .. })));
+
+        let results = reopened.search("mixed", &[3.0, 0.0, 0.0], 3, None).unwrap();
+        assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn memory_limit_enforced_across_lifecycle_rotations() {
+        let root = tempfile::tempdir().unwrap();
+        let tenant = TenantId::default();
+        let mut storage = Storage::open_with_options(
+            root.path(),
+            StorageOptions {
+                auto_seal_threshold: 1,
+                ..StorageOptions::default()
+            },
+        )
+        .unwrap();
+        storage.create_collection(sample_schema("mem_limit")).unwrap();
+        storage.set_tenant_quota(
+            tenant.clone(),
+            TenantQuota {
+                max_memory_bytes: Some(1_500),
+                ..TenantQuota::default()
+            },
+        );
+
+        storage
+            .insert("mem_limit", sample_large_document(1, 900), false)
+            .unwrap();
+        assert_eq!(
+            storage.segment_state_for_tenant(&tenant, "mem_limit"),
+            SegmentState::Growing,
+            "auto-seal should rotate back to growing"
+        );
+
+        let second = storage.insert("mem_limit", sample_large_document(2, 900), false);
+        assert!(matches!(second, Err(StorageError::QuotaExceeded { .. })));
+    }
+
+    proptest! {
+        #[test]
+        fn compaction_property_latest_write_wins(ops in proptest::collection::vec((1u8..16u8, any::<bool>()), 1..64)) {
+            let root = tempfile::tempdir().unwrap();
+            let tenant = TenantId::default();
+            let mut storage = Storage::open(root.path()).unwrap();
+            storage.create_collection(sample_schema("prop_compact")).unwrap();
+
+            for (idx, (doc_id, is_insert)) in ops.iter().copied().enumerate() {
+                if is_insert {
+                    storage.insert("prop_compact", sample_document(doc_id as u64), true).unwrap();
+                } else {
+                    let _ = storage.delete("prop_compact", DocumentId::U64(doc_id as u64)).unwrap();
+                }
+
+                if idx % 5 == 0 {
+                    storage.flush_wal_to_segment(&tenant, "prop_compact").unwrap();
+                }
+            }
+            storage.flush_wal_to_segment(&tenant, "prop_compact").unwrap();
+            let expected: Vec<(u8, bool)> = (1u8..16u8)
+                .map(|doc_id| {
+                    let present = storage
+                        .get_document(&tenant, "prop_compact", &DocumentId::U64(doc_id as u64))
+                        .unwrap()
+                        .is_some();
+                    (doc_id, present)
+                })
+                .collect();
+            storage.compact_segments(&tenant, "prop_compact").unwrap();
+
+            drop(storage);
+            let reopened = Storage::open(root.path()).unwrap();
+            for (doc_id, present) in expected {
+                let found = reopened
+                    .get_document(&tenant, "prop_compact", &DocumentId::U64(doc_id as u64))
+                    .unwrap()
+                    .is_some();
+                prop_assert_eq!(found, present);
+            }
+        }
     }
 }

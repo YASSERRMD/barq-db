@@ -89,6 +89,7 @@ fn test_tiering_integration_flush_and_replay() {
         dir.path(),
         barq_storage::StorageOptions {
              tiering_manager: Some(tm.clone()),
+             ..barq_storage::StorageOptions::default()
         }
     ).unwrap();
 }
