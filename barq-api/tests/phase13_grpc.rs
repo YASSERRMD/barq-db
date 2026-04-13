@@ -3,7 +3,8 @@ use barq_api::{ApiAuth, AppState, ClusterConfig, ClusterRouter};
 use barq_proto::barq::barq_client::BarqClient;
 use barq_proto::barq::barq_server::BarqServer;
 use barq_proto::barq::{
-    CreateCollectionRequest, HealthRequest, InsertDocumentRequest, SearchRequest, StatusRequest,
+    CreateCollectionRequest, HealthRequest, InsertDocumentRequest, InsertRequest, SearchRequest,
+    StatusRequest,
 };
 use barq_storage::Storage;
 use std::net::SocketAddr;
@@ -125,6 +126,58 @@ async fn test_grpc_create_insert_search() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].id, "doc1");
     // Verify score roughly 1.0 (Cosine similarity of identical vectors)
+    assert!((results[0].score - 1.0).abs() < 0.0001);
+
+    tx.send(()).unwrap();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_grpc_canonical_end_to_end() {
+    let (addr, handle, tx) = start_test_grpc_server().await;
+
+    let dst = format!("http://{}", addr);
+    let mut client = BarqClient::connect(dst).await.expect("failed to connect");
+
+    let status = client
+        .status(StatusRequest {})
+        .await
+        .expect("status failed")
+        .into_inner();
+    assert!(status.ok);
+
+    client
+        .create_collection(CreateCollectionRequest {
+            name: "grpc_canonical".to_string(),
+            dimension: 2,
+            metric: "Cosine".to_string(),
+        })
+        .await
+        .expect("create collection failed");
+
+    client
+        .insert(InsertRequest {
+            collection: "grpc_canonical".to_string(),
+            id: "doc-canonical".to_string(),
+            vector: vec![0.0, 1.0],
+            payload_json: "{\"source\":\"canonical\"}".to_string(),
+        })
+        .await
+        .expect("canonical insert failed");
+
+    let results = client
+        .search(SearchRequest {
+            collection: "grpc_canonical".to_string(),
+            vector: vec![0.0, 1.0],
+            top_k: 1,
+        })
+        .await
+        .expect("canonical search failed")
+        .into_inner()
+        .results;
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].id, "doc-canonical");
     assert!((results[0].score - 1.0).abs() < 0.0001);
 
     tx.send(()).unwrap();
