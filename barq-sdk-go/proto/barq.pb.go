@@ -128,6 +128,266 @@ func (Consistency) EnumDescriptor() ([]byte, []int) {
 	return file_barq_proto_rawDescGZIP(), []int{1}
 }
 
+type MetricKind int32
+
+const (
+	MetricKind_METRIC_KIND_UNSPECIFIED MetricKind = 0
+	MetricKind_METRIC_KIND_COUNTER     MetricKind = 1
+	MetricKind_METRIC_KIND_GAUGE       MetricKind = 2
+	MetricKind_METRIC_KIND_HISTOGRAM   MetricKind = 3
+)
+
+// Enum value maps for MetricKind.
+var (
+	MetricKind_name = map[int32]string{
+		0: "METRIC_KIND_UNSPECIFIED",
+		1: "METRIC_KIND_COUNTER",
+		2: "METRIC_KIND_GAUGE",
+		3: "METRIC_KIND_HISTOGRAM",
+	}
+	MetricKind_value = map[string]int32{
+		"METRIC_KIND_UNSPECIFIED": 0,
+		"METRIC_KIND_COUNTER":     1,
+		"METRIC_KIND_GAUGE":       2,
+		"METRIC_KIND_HISTOGRAM":   3,
+	}
+)
+
+func (x MetricKind) Enum() *MetricKind {
+	p := new(MetricKind)
+	*p = x
+	return p
+}
+
+func (x MetricKind) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (MetricKind) Descriptor() protoreflect.EnumDescriptor {
+	return file_barq_proto_enumTypes[2].Descriptor()
+}
+
+func (MetricKind) Type() protoreflect.EnumType {
+	return &file_barq_proto_enumTypes[2]
+}
+
+func (x MetricKind) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use MetricKind.Descriptor instead.
+func (MetricKind) EnumDescriptor() ([]byte, []int) {
+	return file_barq_proto_rawDescGZIP(), []int{2}
+}
+
+type SegmentState int32
+
+const (
+	SegmentState_SEGMENT_STATE_UNSPECIFIED SegmentState = 0
+	SegmentState_SEGMENT_STATE_GROWING     SegmentState = 1
+	SegmentState_SEGMENT_STATE_SEALED      SegmentState = 2
+	SegmentState_SEGMENT_STATE_COMPACTED   SegmentState = 3
+)
+
+// Enum value maps for SegmentState.
+var (
+	SegmentState_name = map[int32]string{
+		0: "SEGMENT_STATE_UNSPECIFIED",
+		1: "SEGMENT_STATE_GROWING",
+		2: "SEGMENT_STATE_SEALED",
+		3: "SEGMENT_STATE_COMPACTED",
+	}
+	SegmentState_value = map[string]int32{
+		"SEGMENT_STATE_UNSPECIFIED": 0,
+		"SEGMENT_STATE_GROWING":     1,
+		"SEGMENT_STATE_SEALED":      2,
+		"SEGMENT_STATE_COMPACTED":   3,
+	}
+)
+
+func (x SegmentState) Enum() *SegmentState {
+	p := new(SegmentState)
+	*p = x
+	return p
+}
+
+func (x SegmentState) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (SegmentState) Descriptor() protoreflect.EnumDescriptor {
+	return file_barq_proto_enumTypes[3].Descriptor()
+}
+
+func (SegmentState) Type() protoreflect.EnumType {
+	return &file_barq_proto_enumTypes[3]
+}
+
+func (x SegmentState) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use SegmentState.Descriptor instead.
+func (SegmentState) EnumDescriptor() ([]byte, []int) {
+	return file_barq_proto_rawDescGZIP(), []int{3}
+}
+
+type ClusterMode int32
+
+const (
+	ClusterMode_CLUSTER_MODE_UNSPECIFIED        ClusterMode = 0
+	ClusterMode_CLUSTER_MODE_SINGLE_NODE        ClusterMode = 1
+	ClusterMode_CLUSTER_MODE_ROUTED_REPLICATION ClusterMode = 2
+	ClusterMode_CLUSTER_MODE_CONSENSUS_BACKED   ClusterMode = 3
+)
+
+// Enum value maps for ClusterMode.
+var (
+	ClusterMode_name = map[int32]string{
+		0: "CLUSTER_MODE_UNSPECIFIED",
+		1: "CLUSTER_MODE_SINGLE_NODE",
+		2: "CLUSTER_MODE_ROUTED_REPLICATION",
+		3: "CLUSTER_MODE_CONSENSUS_BACKED",
+	}
+	ClusterMode_value = map[string]int32{
+		"CLUSTER_MODE_UNSPECIFIED":        0,
+		"CLUSTER_MODE_SINGLE_NODE":        1,
+		"CLUSTER_MODE_ROUTED_REPLICATION": 2,
+		"CLUSTER_MODE_CONSENSUS_BACKED":   3,
+	}
+)
+
+func (x ClusterMode) Enum() *ClusterMode {
+	p := new(ClusterMode)
+	*p = x
+	return p
+}
+
+func (x ClusterMode) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ClusterMode) Descriptor() protoreflect.EnumDescriptor {
+	return file_barq_proto_enumTypes[4].Descriptor()
+}
+
+func (ClusterMode) Type() protoreflect.EnumType {
+	return &file_barq_proto_enumTypes[4]
+}
+
+func (x ClusterMode) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ClusterMode.Descriptor instead.
+func (ClusterMode) EnumDescriptor() ([]byte, []int) {
+	return file_barq_proto_rawDescGZIP(), []int{4}
+}
+
+type WriteDurability int32
+
+const (
+	WriteDurability_WRITE_DURABILITY_UNSPECIFIED      WriteDurability = 0
+	WriteDurability_WRITE_DURABILITY_NODE_LOCAL       WriteDurability = 1
+	WriteDurability_WRITE_DURABILITY_PRIMARY_ONLY     WriteDurability = 2
+	WriteDurability_WRITE_DURABILITY_CONSENSUS_QUORUM WriteDurability = 3
+)
+
+// Enum value maps for WriteDurability.
+var (
+	WriteDurability_name = map[int32]string{
+		0: "WRITE_DURABILITY_UNSPECIFIED",
+		1: "WRITE_DURABILITY_NODE_LOCAL",
+		2: "WRITE_DURABILITY_PRIMARY_ONLY",
+		3: "WRITE_DURABILITY_CONSENSUS_QUORUM",
+	}
+	WriteDurability_value = map[string]int32{
+		"WRITE_DURABILITY_UNSPECIFIED":      0,
+		"WRITE_DURABILITY_NODE_LOCAL":       1,
+		"WRITE_DURABILITY_PRIMARY_ONLY":     2,
+		"WRITE_DURABILITY_CONSENSUS_QUORUM": 3,
+	}
+)
+
+func (x WriteDurability) Enum() *WriteDurability {
+	p := new(WriteDurability)
+	*p = x
+	return p
+}
+
+func (x WriteDurability) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (WriteDurability) Descriptor() protoreflect.EnumDescriptor {
+	return file_barq_proto_enumTypes[5].Descriptor()
+}
+
+func (WriteDurability) Type() protoreflect.EnumType {
+	return &file_barq_proto_enumTypes[5]
+}
+
+func (x WriteDurability) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use WriteDurability.Descriptor instead.
+func (WriteDurability) EnumDescriptor() ([]byte, []int) {
+	return file_barq_proto_rawDescGZIP(), []int{5}
+}
+
+type IndexState int32
+
+const (
+	IndexState_INDEX_STATE_UNSPECIFIED IndexState = 0
+	IndexState_INDEX_STATE_BUILDING    IndexState = 1
+	IndexState_INDEX_STATE_READY       IndexState = 2
+	IndexState_INDEX_STATE_STALE       IndexState = 3
+)
+
+// Enum value maps for IndexState.
+var (
+	IndexState_name = map[int32]string{
+		0: "INDEX_STATE_UNSPECIFIED",
+		1: "INDEX_STATE_BUILDING",
+		2: "INDEX_STATE_READY",
+		3: "INDEX_STATE_STALE",
+	}
+	IndexState_value = map[string]int32{
+		"INDEX_STATE_UNSPECIFIED": 0,
+		"INDEX_STATE_BUILDING":    1,
+		"INDEX_STATE_READY":       2,
+		"INDEX_STATE_STALE":       3,
+	}
+)
+
+func (x IndexState) Enum() *IndexState {
+	p := new(IndexState)
+	*p = x
+	return p
+}
+
+func (x IndexState) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (IndexState) Descriptor() protoreflect.EnumDescriptor {
+	return file_barq_proto_enumTypes[6].Descriptor()
+}
+
+func (IndexState) Type() protoreflect.EnumType {
+	return &file_barq_proto_enumTypes[6]
+}
+
+func (x IndexState) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use IndexState.Descriptor instead.
+func (IndexState) EnumDescriptor() ([]byte, []int) {
+	return file_barq_proto_rawDescGZIP(), []int{6}
+}
+
 type StatusRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -1064,6 +1324,930 @@ func (x *SearchResponse) GetResults() []*SearchResult {
 	return nil
 }
 
+type GetMetricsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetMetricsRequest) Reset() {
+	*x = GetMetricsRequest{}
+	mi := &file_barq_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetMetricsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetMetricsRequest) ProtoMessage() {}
+
+func (x *GetMetricsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_barq_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetMetricsRequest.ProtoReflect.Descriptor instead.
+func (*GetMetricsRequest) Descriptor() ([]byte, []int) {
+	return file_barq_proto_rawDescGZIP(), []int{18}
+}
+
+type MetricDefinition struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Kind          MetricKind             `protobuf:"varint,2,opt,name=kind,proto3,enum=barq.MetricKind" json:"kind,omitempty"`
+	Description   string                 `protobuf:"bytes,3,opt,name=description,proto3" json:"description,omitempty"`
+	Unit          string                 `protobuf:"bytes,4,opt,name=unit,proto3" json:"unit,omitempty"`
+	Labels        []string               `protobuf:"bytes,5,rep,name=labels,proto3" json:"labels,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MetricDefinition) Reset() {
+	*x = MetricDefinition{}
+	mi := &file_barq_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MetricDefinition) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MetricDefinition) ProtoMessage() {}
+
+func (x *MetricDefinition) ProtoReflect() protoreflect.Message {
+	mi := &file_barq_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MetricDefinition.ProtoReflect.Descriptor instead.
+func (*MetricDefinition) Descriptor() ([]byte, []int) {
+	return file_barq_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *MetricDefinition) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *MetricDefinition) GetKind() MetricKind {
+	if x != nil {
+		return x.Kind
+	}
+	return MetricKind_METRIC_KIND_UNSPECIFIED
+}
+
+func (x *MetricDefinition) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+func (x *MetricDefinition) GetUnit() string {
+	if x != nil {
+		return x.Unit
+	}
+	return ""
+}
+
+func (x *MetricDefinition) GetLabels() []string {
+	if x != nil {
+		return x.Labels
+	}
+	return nil
+}
+
+type TenantMemorySample struct {
+	state                     protoimpl.MessageState `protogen:"open.v1"`
+	Tenant                    string                 `protobuf:"bytes,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
+	ResidentVectorMemoryBytes uint64                 `protobuf:"varint,2,opt,name=resident_vector_memory_bytes,json=residentVectorMemoryBytes,proto3" json:"resident_vector_memory_bytes,omitempty"`
+	unknownFields             protoimpl.UnknownFields
+	sizeCache                 protoimpl.SizeCache
+}
+
+func (x *TenantMemorySample) Reset() {
+	*x = TenantMemorySample{}
+	mi := &file_barq_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TenantMemorySample) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TenantMemorySample) ProtoMessage() {}
+
+func (x *TenantMemorySample) ProtoReflect() protoreflect.Message {
+	mi := &file_barq_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TenantMemorySample.ProtoReflect.Descriptor instead.
+func (*TenantMemorySample) Descriptor() ([]byte, []int) {
+	return file_barq_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *TenantMemorySample) GetTenant() string {
+	if x != nil {
+		return x.Tenant
+	}
+	return ""
+}
+
+func (x *TenantMemorySample) GetResidentVectorMemoryBytes() uint64 {
+	if x != nil {
+		return x.ResidentVectorMemoryBytes
+	}
+	return 0
+}
+
+type CollectionMemorySample struct {
+	state                     protoimpl.MessageState `protogen:"open.v1"`
+	Tenant                    string                 `protobuf:"bytes,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
+	Collection                string                 `protobuf:"bytes,2,opt,name=collection,proto3" json:"collection,omitempty"`
+	ResidentVectorMemoryBytes uint64                 `protobuf:"varint,3,opt,name=resident_vector_memory_bytes,json=residentVectorMemoryBytes,proto3" json:"resident_vector_memory_bytes,omitempty"`
+	unknownFields             protoimpl.UnknownFields
+	sizeCache                 protoimpl.SizeCache
+}
+
+func (x *CollectionMemorySample) Reset() {
+	*x = CollectionMemorySample{}
+	mi := &file_barq_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CollectionMemorySample) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CollectionMemorySample) ProtoMessage() {}
+
+func (x *CollectionMemorySample) ProtoReflect() protoreflect.Message {
+	mi := &file_barq_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CollectionMemorySample.ProtoReflect.Descriptor instead.
+func (*CollectionMemorySample) Descriptor() ([]byte, []int) {
+	return file_barq_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *CollectionMemorySample) GetTenant() string {
+	if x != nil {
+		return x.Tenant
+	}
+	return ""
+}
+
+func (x *CollectionMemorySample) GetCollection() string {
+	if x != nil {
+		return x.Collection
+	}
+	return ""
+}
+
+func (x *CollectionMemorySample) GetResidentVectorMemoryBytes() uint64 {
+	if x != nil {
+		return x.ResidentVectorMemoryBytes
+	}
+	return 0
+}
+
+type CollectionWalSample struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Tenant        string                 `protobuf:"bytes,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
+	Collection    string                 `protobuf:"bytes,2,opt,name=collection,proto3" json:"collection,omitempty"`
+	Entries       uint64                 `protobuf:"varint,3,opt,name=entries,proto3" json:"entries,omitempty"`
+	Bytes         uint64                 `protobuf:"varint,4,opt,name=bytes,proto3" json:"bytes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CollectionWalSample) Reset() {
+	*x = CollectionWalSample{}
+	mi := &file_barq_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CollectionWalSample) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CollectionWalSample) ProtoMessage() {}
+
+func (x *CollectionWalSample) ProtoReflect() protoreflect.Message {
+	mi := &file_barq_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CollectionWalSample.ProtoReflect.Descriptor instead.
+func (*CollectionWalSample) Descriptor() ([]byte, []int) {
+	return file_barq_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *CollectionWalSample) GetTenant() string {
+	if x != nil {
+		return x.Tenant
+	}
+	return ""
+}
+
+func (x *CollectionWalSample) GetCollection() string {
+	if x != nil {
+		return x.Collection
+	}
+	return ""
+}
+
+func (x *CollectionWalSample) GetEntries() uint64 {
+	if x != nil {
+		return x.Entries
+	}
+	return 0
+}
+
+func (x *CollectionWalSample) GetBytes() uint64 {
+	if x != nil {
+		return x.Bytes
+	}
+	return 0
+}
+
+type CollectionSegmentFileSample struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Tenant        string                 `protobuf:"bytes,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
+	Collection    string                 `protobuf:"bytes,2,opt,name=collection,proto3" json:"collection,omitempty"`
+	State         SegmentState           `protobuf:"varint,3,opt,name=state,proto3,enum=barq.SegmentState" json:"state,omitempty"`
+	Count         uint64                 `protobuf:"varint,4,opt,name=count,proto3" json:"count,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CollectionSegmentFileSample) Reset() {
+	*x = CollectionSegmentFileSample{}
+	mi := &file_barq_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CollectionSegmentFileSample) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CollectionSegmentFileSample) ProtoMessage() {}
+
+func (x *CollectionSegmentFileSample) ProtoReflect() protoreflect.Message {
+	mi := &file_barq_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CollectionSegmentFileSample.ProtoReflect.Descriptor instead.
+func (*CollectionSegmentFileSample) Descriptor() ([]byte, []int) {
+	return file_barq_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *CollectionSegmentFileSample) GetTenant() string {
+	if x != nil {
+		return x.Tenant
+	}
+	return ""
+}
+
+func (x *CollectionSegmentFileSample) GetCollection() string {
+	if x != nil {
+		return x.Collection
+	}
+	return ""
+}
+
+func (x *CollectionSegmentFileSample) GetState() SegmentState {
+	if x != nil {
+		return x.State
+	}
+	return SegmentState_SEGMENT_STATE_UNSPECIFIED
+}
+
+func (x *CollectionSegmentFileSample) GetCount() uint64 {
+	if x != nil {
+		return x.Count
+	}
+	return 0
+}
+
+type CollectionSegmentStateSample struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Tenant        string                 `protobuf:"bytes,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
+	Collection    string                 `protobuf:"bytes,2,opt,name=collection,proto3" json:"collection,omitempty"`
+	State         SegmentState           `protobuf:"varint,3,opt,name=state,proto3,enum=barq.SegmentState" json:"state,omitempty"`
+	Active        bool                   `protobuf:"varint,4,opt,name=active,proto3" json:"active,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CollectionSegmentStateSample) Reset() {
+	*x = CollectionSegmentStateSample{}
+	mi := &file_barq_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CollectionSegmentStateSample) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CollectionSegmentStateSample) ProtoMessage() {}
+
+func (x *CollectionSegmentStateSample) ProtoReflect() protoreflect.Message {
+	mi := &file_barq_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CollectionSegmentStateSample.ProtoReflect.Descriptor instead.
+func (*CollectionSegmentStateSample) Descriptor() ([]byte, []int) {
+	return file_barq_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *CollectionSegmentStateSample) GetTenant() string {
+	if x != nil {
+		return x.Tenant
+	}
+	return ""
+}
+
+func (x *CollectionSegmentStateSample) GetCollection() string {
+	if x != nil {
+		return x.Collection
+	}
+	return ""
+}
+
+func (x *CollectionSegmentStateSample) GetState() SegmentState {
+	if x != nil {
+		return x.State
+	}
+	return SegmentState_SEGMENT_STATE_UNSPECIFIED
+}
+
+func (x *CollectionSegmentStateSample) GetActive() bool {
+	if x != nil {
+		return x.Active
+	}
+	return false
+}
+
+type StorageMetrics struct {
+	state                          protoimpl.MessageState          `protogen:"open.v1"`
+	RefreshCount                   uint64                          `protobuf:"varint,1,opt,name=refresh_count,json=refreshCount,proto3" json:"refresh_count,omitempty"`
+	TotalResidentVectorMemoryBytes uint64                          `protobuf:"varint,2,opt,name=total_resident_vector_memory_bytes,json=totalResidentVectorMemoryBytes,proto3" json:"total_resident_vector_memory_bytes,omitempty"`
+	WalAppendsTotal                uint64                          `protobuf:"varint,3,opt,name=wal_appends_total,json=walAppendsTotal,proto3" json:"wal_appends_total,omitempty"`
+	WalBytesWrittenTotal           uint64                          `protobuf:"varint,4,opt,name=wal_bytes_written_total,json=walBytesWrittenTotal,proto3" json:"wal_bytes_written_total,omitempty"`
+	CompactionsTotal               uint64                          `protobuf:"varint,5,opt,name=compactions_total,json=compactionsTotal,proto3" json:"compactions_total,omitempty"`
+	TenantMemoryBytes              []*TenantMemorySample           `protobuf:"bytes,6,rep,name=tenant_memory_bytes,json=tenantMemoryBytes,proto3" json:"tenant_memory_bytes,omitempty"`
+	CollectionMemoryBytes          []*CollectionMemorySample       `protobuf:"bytes,7,rep,name=collection_memory_bytes,json=collectionMemoryBytes,proto3" json:"collection_memory_bytes,omitempty"`
+	CollectionWal                  []*CollectionWalSample          `protobuf:"bytes,8,rep,name=collection_wal,json=collectionWal,proto3" json:"collection_wal,omitempty"`
+	CollectionSegmentFiles         []*CollectionSegmentFileSample  `protobuf:"bytes,9,rep,name=collection_segment_files,json=collectionSegmentFiles,proto3" json:"collection_segment_files,omitempty"`
+	CollectionSegmentStates        []*CollectionSegmentStateSample `protobuf:"bytes,10,rep,name=collection_segment_states,json=collectionSegmentStates,proto3" json:"collection_segment_states,omitempty"`
+	unknownFields                  protoimpl.UnknownFields
+	sizeCache                      protoimpl.SizeCache
+}
+
+func (x *StorageMetrics) Reset() {
+	*x = StorageMetrics{}
+	mi := &file_barq_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StorageMetrics) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StorageMetrics) ProtoMessage() {}
+
+func (x *StorageMetrics) ProtoReflect() protoreflect.Message {
+	mi := &file_barq_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StorageMetrics.ProtoReflect.Descriptor instead.
+func (*StorageMetrics) Descriptor() ([]byte, []int) {
+	return file_barq_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *StorageMetrics) GetRefreshCount() uint64 {
+	if x != nil {
+		return x.RefreshCount
+	}
+	return 0
+}
+
+func (x *StorageMetrics) GetTotalResidentVectorMemoryBytes() uint64 {
+	if x != nil {
+		return x.TotalResidentVectorMemoryBytes
+	}
+	return 0
+}
+
+func (x *StorageMetrics) GetWalAppendsTotal() uint64 {
+	if x != nil {
+		return x.WalAppendsTotal
+	}
+	return 0
+}
+
+func (x *StorageMetrics) GetWalBytesWrittenTotal() uint64 {
+	if x != nil {
+		return x.WalBytesWrittenTotal
+	}
+	return 0
+}
+
+func (x *StorageMetrics) GetCompactionsTotal() uint64 {
+	if x != nil {
+		return x.CompactionsTotal
+	}
+	return 0
+}
+
+func (x *StorageMetrics) GetTenantMemoryBytes() []*TenantMemorySample {
+	if x != nil {
+		return x.TenantMemoryBytes
+	}
+	return nil
+}
+
+func (x *StorageMetrics) GetCollectionMemoryBytes() []*CollectionMemorySample {
+	if x != nil {
+		return x.CollectionMemoryBytes
+	}
+	return nil
+}
+
+func (x *StorageMetrics) GetCollectionWal() []*CollectionWalSample {
+	if x != nil {
+		return x.CollectionWal
+	}
+	return nil
+}
+
+func (x *StorageMetrics) GetCollectionSegmentFiles() []*CollectionSegmentFileSample {
+	if x != nil {
+		return x.CollectionSegmentFiles
+	}
+	return nil
+}
+
+func (x *StorageMetrics) GetCollectionSegmentStates() []*CollectionSegmentStateSample {
+	if x != nil {
+		return x.CollectionSegmentStates
+	}
+	return nil
+}
+
+type GetMetricsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Definitions   []*MetricDefinition    `protobuf:"bytes,1,rep,name=definitions,proto3" json:"definitions,omitempty"`
+	Storage       *StorageMetrics        `protobuf:"bytes,2,opt,name=storage,proto3" json:"storage,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetMetricsResponse) Reset() {
+	*x = GetMetricsResponse{}
+	mi := &file_barq_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetMetricsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetMetricsResponse) ProtoMessage() {}
+
+func (x *GetMetricsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_barq_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetMetricsResponse.ProtoReflect.Descriptor instead.
+func (*GetMetricsResponse) Descriptor() ([]byte, []int) {
+	return file_barq_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *GetMetricsResponse) GetDefinitions() []*MetricDefinition {
+	if x != nil {
+		return x.Definitions
+	}
+	return nil
+}
+
+func (x *GetMetricsResponse) GetStorage() *StorageMetrics {
+	if x != nil {
+		return x.Storage
+	}
+	return nil
+}
+
+type GetClusterStatusRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetClusterStatusRequest) Reset() {
+	*x = GetClusterStatusRequest{}
+	mi := &file_barq_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetClusterStatusRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetClusterStatusRequest) ProtoMessage() {}
+
+func (x *GetClusterStatusRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_barq_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetClusterStatusRequest.ProtoReflect.Descriptor instead.
+func (*GetClusterStatusRequest) Descriptor() ([]byte, []int) {
+	return file_barq_proto_rawDescGZIP(), []int{27}
+}
+
+type GetClusterStatusResponse struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	NodeId          string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	Mode            ClusterMode            `protobuf:"varint,2,opt,name=mode,proto3,enum=barq.ClusterMode" json:"mode,omitempty"`
+	WriteDurability WriteDurability        `protobuf:"varint,3,opt,name=write_durability,json=writeDurability,proto3,enum=barq.WriteDurability" json:"write_durability,omitempty"`
+	ShardCount      uint32                 `protobuf:"varint,4,opt,name=shard_count,json=shardCount,proto3" json:"shard_count,omitempty"`
+	NodeCount       uint64                 `protobuf:"varint,5,opt,name=node_count,json=nodeCount,proto3" json:"node_count,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *GetClusterStatusResponse) Reset() {
+	*x = GetClusterStatusResponse{}
+	mi := &file_barq_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetClusterStatusResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetClusterStatusResponse) ProtoMessage() {}
+
+func (x *GetClusterStatusResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_barq_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetClusterStatusResponse.ProtoReflect.Descriptor instead.
+func (*GetClusterStatusResponse) Descriptor() ([]byte, []int) {
+	return file_barq_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *GetClusterStatusResponse) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *GetClusterStatusResponse) GetMode() ClusterMode {
+	if x != nil {
+		return x.Mode
+	}
+	return ClusterMode_CLUSTER_MODE_UNSPECIFIED
+}
+
+func (x *GetClusterStatusResponse) GetWriteDurability() WriteDurability {
+	if x != nil {
+		return x.WriteDurability
+	}
+	return WriteDurability_WRITE_DURABILITY_UNSPECIFIED
+}
+
+func (x *GetClusterStatusResponse) GetShardCount() uint32 {
+	if x != nil {
+		return x.ShardCount
+	}
+	return 0
+}
+
+func (x *GetClusterStatusResponse) GetNodeCount() uint64 {
+	if x != nil {
+		return x.NodeCount
+	}
+	return 0
+}
+
+type GetSegmentInfoRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Collection    string                 `protobuf:"bytes,1,opt,name=collection,proto3" json:"collection,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetSegmentInfoRequest) Reset() {
+	*x = GetSegmentInfoRequest{}
+	mi := &file_barq_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetSegmentInfoRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetSegmentInfoRequest) ProtoMessage() {}
+
+func (x *GetSegmentInfoRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_barq_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetSegmentInfoRequest.ProtoReflect.Descriptor instead.
+func (*GetSegmentInfoRequest) Descriptor() ([]byte, []int) {
+	return file_barq_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *GetSegmentInfoRequest) GetCollection() string {
+	if x != nil {
+		return x.Collection
+	}
+	return ""
+}
+
+type SegmentCount struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	State         SegmentState           `protobuf:"varint,1,opt,name=state,proto3,enum=barq.SegmentState" json:"state,omitempty"`
+	Count         uint64                 `protobuf:"varint,2,opt,name=count,proto3" json:"count,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SegmentCount) Reset() {
+	*x = SegmentCount{}
+	mi := &file_barq_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SegmentCount) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SegmentCount) ProtoMessage() {}
+
+func (x *SegmentCount) ProtoReflect() protoreflect.Message {
+	mi := &file_barq_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SegmentCount.ProtoReflect.Descriptor instead.
+func (*SegmentCount) Descriptor() ([]byte, []int) {
+	return file_barq_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *SegmentCount) GetState() SegmentState {
+	if x != nil {
+		return x.State
+	}
+	return SegmentState_SEGMENT_STATE_UNSPECIFIED
+}
+
+func (x *SegmentCount) GetCount() uint64 {
+	if x != nil {
+		return x.Count
+	}
+	return 0
+}
+
+type CollectionSegmentInfo struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Tenant        string                 `protobuf:"bytes,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
+	Collection    string                 `protobuf:"bytes,2,opt,name=collection,proto3" json:"collection,omitempty"`
+	CurrentState  SegmentState           `protobuf:"varint,3,opt,name=current_state,json=currentState,proto3,enum=barq.SegmentState" json:"current_state,omitempty"`
+	IndexState    IndexState             `protobuf:"varint,4,opt,name=index_state,json=indexState,proto3,enum=barq.IndexState" json:"index_state,omitempty"`
+	SegmentCounts []*SegmentCount        `protobuf:"bytes,5,rep,name=segment_counts,json=segmentCounts,proto3" json:"segment_counts,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CollectionSegmentInfo) Reset() {
+	*x = CollectionSegmentInfo{}
+	mi := &file_barq_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CollectionSegmentInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CollectionSegmentInfo) ProtoMessage() {}
+
+func (x *CollectionSegmentInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_barq_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CollectionSegmentInfo.ProtoReflect.Descriptor instead.
+func (*CollectionSegmentInfo) Descriptor() ([]byte, []int) {
+	return file_barq_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *CollectionSegmentInfo) GetTenant() string {
+	if x != nil {
+		return x.Tenant
+	}
+	return ""
+}
+
+func (x *CollectionSegmentInfo) GetCollection() string {
+	if x != nil {
+		return x.Collection
+	}
+	return ""
+}
+
+func (x *CollectionSegmentInfo) GetCurrentState() SegmentState {
+	if x != nil {
+		return x.CurrentState
+	}
+	return SegmentState_SEGMENT_STATE_UNSPECIFIED
+}
+
+func (x *CollectionSegmentInfo) GetIndexState() IndexState {
+	if x != nil {
+		return x.IndexState
+	}
+	return IndexState_INDEX_STATE_UNSPECIFIED
+}
+
+func (x *CollectionSegmentInfo) GetSegmentCounts() []*SegmentCount {
+	if x != nil {
+		return x.SegmentCounts
+	}
+	return nil
+}
+
+type GetSegmentInfoResponse struct {
+	state         protoimpl.MessageState   `protogen:"open.v1"`
+	Collections   []*CollectionSegmentInfo `protobuf:"bytes,1,rep,name=collections,proto3" json:"collections,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetSegmentInfoResponse) Reset() {
+	*x = GetSegmentInfoResponse{}
+	mi := &file_barq_proto_msgTypes[32]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetSegmentInfoResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetSegmentInfoResponse) ProtoMessage() {}
+
+func (x *GetSegmentInfoResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_barq_proto_msgTypes[32]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetSegmentInfoResponse.ProtoReflect.Descriptor instead.
+func (*GetSegmentInfoResponse) Descriptor() ([]byte, []int) {
+	return file_barq_proto_rawDescGZIP(), []int{32}
+}
+
+func (x *GetSegmentInfoResponse) GetCollections() []*CollectionSegmentInfo {
+	if x != nil {
+		return x.Collections
+	}
+	return nil
+}
+
 type SearchQuery struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Vector        []float32              `protobuf:"fixed32,1,rep,packed,name=vector,proto3" json:"vector,omitempty"`
@@ -1074,7 +2258,7 @@ type SearchQuery struct {
 
 func (x *SearchQuery) Reset() {
 	*x = SearchQuery{}
-	mi := &file_barq_proto_msgTypes[18]
+	mi := &file_barq_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1086,7 +2270,7 @@ func (x *SearchQuery) String() string {
 func (*SearchQuery) ProtoMessage() {}
 
 func (x *SearchQuery) ProtoReflect() protoreflect.Message {
-	mi := &file_barq_proto_msgTypes[18]
+	mi := &file_barq_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1099,7 +2283,7 @@ func (x *SearchQuery) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchQuery.ProtoReflect.Descriptor instead.
 func (*SearchQuery) Descriptor() ([]byte, []int) {
-	return file_barq_proto_rawDescGZIP(), []int{18}
+	return file_barq_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *SearchQuery) GetVector() []float32 {
@@ -1127,7 +2311,7 @@ type BatchSearchRequest struct {
 
 func (x *BatchSearchRequest) Reset() {
 	*x = BatchSearchRequest{}
-	mi := &file_barq_proto_msgTypes[19]
+	mi := &file_barq_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1139,7 +2323,7 @@ func (x *BatchSearchRequest) String() string {
 func (*BatchSearchRequest) ProtoMessage() {}
 
 func (x *BatchSearchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_barq_proto_msgTypes[19]
+	mi := &file_barq_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1152,7 +2336,7 @@ func (x *BatchSearchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BatchSearchRequest.ProtoReflect.Descriptor instead.
 func (*BatchSearchRequest) Descriptor() ([]byte, []int) {
-	return file_barq_proto_rawDescGZIP(), []int{19}
+	return file_barq_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *BatchSearchRequest) GetCollection() string {
@@ -1185,7 +2369,7 @@ type QueryResults struct {
 
 func (x *QueryResults) Reset() {
 	*x = QueryResults{}
-	mi := &file_barq_proto_msgTypes[20]
+	mi := &file_barq_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1197,7 +2381,7 @@ func (x *QueryResults) String() string {
 func (*QueryResults) ProtoMessage() {}
 
 func (x *QueryResults) ProtoReflect() protoreflect.Message {
-	mi := &file_barq_proto_msgTypes[20]
+	mi := &file_barq_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1210,7 +2394,7 @@ func (x *QueryResults) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryResults.ProtoReflect.Descriptor instead.
 func (*QueryResults) Descriptor() ([]byte, []int) {
-	return file_barq_proto_rawDescGZIP(), []int{20}
+	return file_barq_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *QueryResults) GetHits() []*SearchResult {
@@ -1229,7 +2413,7 @@ type BatchSearchResponse struct {
 
 func (x *BatchSearchResponse) Reset() {
 	*x = BatchSearchResponse{}
-	mi := &file_barq_proto_msgTypes[21]
+	mi := &file_barq_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1241,7 +2425,7 @@ func (x *BatchSearchResponse) String() string {
 func (*BatchSearchResponse) ProtoMessage() {}
 
 func (x *BatchSearchResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_barq_proto_msgTypes[21]
+	mi := &file_barq_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1254,7 +2438,7 @@ func (x *BatchSearchResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BatchSearchResponse.ProtoReflect.Descriptor instead.
 func (*BatchSearchResponse) Descriptor() ([]byte, []int) {
-	return file_barq_proto_rawDescGZIP(), []int{21}
+	return file_barq_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *BatchSearchResponse) GetResults() []*QueryResults {
@@ -1332,7 +2516,86 @@ const file_barq_proto_rawDesc = "" +
 	"\x05score\x18\x02 \x01(\x02R\x05score\x12!\n" +
 	"\fpayload_json\x18\x03 \x01(\tR\vpayloadJson\">\n" +
 	"\x0eSearchResponse\x12,\n" +
-	"\aresults\x18\x01 \x03(\v2\x12.barq.SearchResultR\aresults\"F\n" +
+	"\aresults\x18\x01 \x03(\v2\x12.barq.SearchResultR\aresults\"\x13\n" +
+	"\x11GetMetricsRequest\"\x9a\x01\n" +
+	"\x10MetricDefinition\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12$\n" +
+	"\x04kind\x18\x02 \x01(\x0e2\x10.barq.MetricKindR\x04kind\x12 \n" +
+	"\vdescription\x18\x03 \x01(\tR\vdescription\x12\x12\n" +
+	"\x04unit\x18\x04 \x01(\tR\x04unit\x12\x16\n" +
+	"\x06labels\x18\x05 \x03(\tR\x06labels\"m\n" +
+	"\x12TenantMemorySample\x12\x16\n" +
+	"\x06tenant\x18\x01 \x01(\tR\x06tenant\x12?\n" +
+	"\x1cresident_vector_memory_bytes\x18\x02 \x01(\x04R\x19residentVectorMemoryBytes\"\x91\x01\n" +
+	"\x16CollectionMemorySample\x12\x16\n" +
+	"\x06tenant\x18\x01 \x01(\tR\x06tenant\x12\x1e\n" +
+	"\n" +
+	"collection\x18\x02 \x01(\tR\n" +
+	"collection\x12?\n" +
+	"\x1cresident_vector_memory_bytes\x18\x03 \x01(\x04R\x19residentVectorMemoryBytes\"}\n" +
+	"\x13CollectionWalSample\x12\x16\n" +
+	"\x06tenant\x18\x01 \x01(\tR\x06tenant\x12\x1e\n" +
+	"\n" +
+	"collection\x18\x02 \x01(\tR\n" +
+	"collection\x12\x18\n" +
+	"\aentries\x18\x03 \x01(\x04R\aentries\x12\x14\n" +
+	"\x05bytes\x18\x04 \x01(\x04R\x05bytes\"\x95\x01\n" +
+	"\x1bCollectionSegmentFileSample\x12\x16\n" +
+	"\x06tenant\x18\x01 \x01(\tR\x06tenant\x12\x1e\n" +
+	"\n" +
+	"collection\x18\x02 \x01(\tR\n" +
+	"collection\x12(\n" +
+	"\x05state\x18\x03 \x01(\x0e2\x12.barq.SegmentStateR\x05state\x12\x14\n" +
+	"\x05count\x18\x04 \x01(\x04R\x05count\"\x98\x01\n" +
+	"\x1cCollectionSegmentStateSample\x12\x16\n" +
+	"\x06tenant\x18\x01 \x01(\tR\x06tenant\x12\x1e\n" +
+	"\n" +
+	"collection\x18\x02 \x01(\tR\n" +
+	"collection\x12(\n" +
+	"\x05state\x18\x03 \x01(\x0e2\x12.barq.SegmentStateR\x05state\x12\x16\n" +
+	"\x06active\x18\x04 \x01(\bR\x06active\"\xb0\x05\n" +
+	"\x0eStorageMetrics\x12#\n" +
+	"\rrefresh_count\x18\x01 \x01(\x04R\frefreshCount\x12J\n" +
+	"\"total_resident_vector_memory_bytes\x18\x02 \x01(\x04R\x1etotalResidentVectorMemoryBytes\x12*\n" +
+	"\x11wal_appends_total\x18\x03 \x01(\x04R\x0fwalAppendsTotal\x125\n" +
+	"\x17wal_bytes_written_total\x18\x04 \x01(\x04R\x14walBytesWrittenTotal\x12+\n" +
+	"\x11compactions_total\x18\x05 \x01(\x04R\x10compactionsTotal\x12H\n" +
+	"\x13tenant_memory_bytes\x18\x06 \x03(\v2\x18.barq.TenantMemorySampleR\x11tenantMemoryBytes\x12T\n" +
+	"\x17collection_memory_bytes\x18\a \x03(\v2\x1c.barq.CollectionMemorySampleR\x15collectionMemoryBytes\x12@\n" +
+	"\x0ecollection_wal\x18\b \x03(\v2\x19.barq.CollectionWalSampleR\rcollectionWal\x12[\n" +
+	"\x18collection_segment_files\x18\t \x03(\v2!.barq.CollectionSegmentFileSampleR\x16collectionSegmentFiles\x12^\n" +
+	"\x19collection_segment_states\x18\n" +
+	" \x03(\v2\".barq.CollectionSegmentStateSampleR\x17collectionSegmentStates\"~\n" +
+	"\x12GetMetricsResponse\x128\n" +
+	"\vdefinitions\x18\x01 \x03(\v2\x16.barq.MetricDefinitionR\vdefinitions\x12.\n" +
+	"\astorage\x18\x02 \x01(\v2\x14.barq.StorageMetricsR\astorage\"\x19\n" +
+	"\x17GetClusterStatusRequest\"\xdc\x01\n" +
+	"\x18GetClusterStatusResponse\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12%\n" +
+	"\x04mode\x18\x02 \x01(\x0e2\x11.barq.ClusterModeR\x04mode\x12@\n" +
+	"\x10write_durability\x18\x03 \x01(\x0e2\x15.barq.WriteDurabilityR\x0fwriteDurability\x12\x1f\n" +
+	"\vshard_count\x18\x04 \x01(\rR\n" +
+	"shardCount\x12\x1d\n" +
+	"\n" +
+	"node_count\x18\x05 \x01(\x04R\tnodeCount\"7\n" +
+	"\x15GetSegmentInfoRequest\x12\x1e\n" +
+	"\n" +
+	"collection\x18\x01 \x01(\tR\n" +
+	"collection\"N\n" +
+	"\fSegmentCount\x12(\n" +
+	"\x05state\x18\x01 \x01(\x0e2\x12.barq.SegmentStateR\x05state\x12\x14\n" +
+	"\x05count\x18\x02 \x01(\x04R\x05count\"\xf6\x01\n" +
+	"\x15CollectionSegmentInfo\x12\x16\n" +
+	"\x06tenant\x18\x01 \x01(\tR\x06tenant\x12\x1e\n" +
+	"\n" +
+	"collection\x18\x02 \x01(\tR\n" +
+	"collection\x127\n" +
+	"\rcurrent_state\x18\x03 \x01(\x0e2\x12.barq.SegmentStateR\fcurrentState\x121\n" +
+	"\vindex_state\x18\x04 \x01(\x0e2\x10.barq.IndexStateR\n" +
+	"indexState\x129\n" +
+	"\x0esegment_counts\x18\x05 \x03(\v2\x12.barq.SegmentCountR\rsegmentCounts\"W\n" +
+	"\x16GetSegmentInfoResponse\x12=\n" +
+	"\vcollections\x18\x01 \x03(\v2\x1b.barq.CollectionSegmentInfoR\vcollections\"F\n" +
 	"\vSearchQuery\x12\x16\n" +
 	"\x06vector\x18\x01 \x03(\x02R\x06vector\x12\x1f\n" +
 	"\vfilter_json\x18\x02 \x01(\tR\n" +
@@ -1357,14 +2620,45 @@ const file_barq_proto_rawDesc = "" +
 	"\x17CONSISTENCY_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13CONSISTENCY_PRIMARY\x10\x01\x12\x19\n" +
 	"\x15CONSISTENCY_FOLLOWERS\x10\x02\x12\x13\n" +
-	"\x0fCONSISTENCY_ANY\x10\x032\xcd\x04\n" +
+	"\x0fCONSISTENCY_ANY\x10\x03*t\n" +
+	"\n" +
+	"MetricKind\x12\x1b\n" +
+	"\x17METRIC_KIND_UNSPECIFIED\x10\x00\x12\x17\n" +
+	"\x13METRIC_KIND_COUNTER\x10\x01\x12\x15\n" +
+	"\x11METRIC_KIND_GAUGE\x10\x02\x12\x19\n" +
+	"\x15METRIC_KIND_HISTOGRAM\x10\x03*\x7f\n" +
+	"\fSegmentState\x12\x1d\n" +
+	"\x19SEGMENT_STATE_UNSPECIFIED\x10\x00\x12\x19\n" +
+	"\x15SEGMENT_STATE_GROWING\x10\x01\x12\x18\n" +
+	"\x14SEGMENT_STATE_SEALED\x10\x02\x12\x1b\n" +
+	"\x17SEGMENT_STATE_COMPACTED\x10\x03*\x91\x01\n" +
+	"\vClusterMode\x12\x1c\n" +
+	"\x18CLUSTER_MODE_UNSPECIFIED\x10\x00\x12\x1c\n" +
+	"\x18CLUSTER_MODE_SINGLE_NODE\x10\x01\x12#\n" +
+	"\x1fCLUSTER_MODE_ROUTED_REPLICATION\x10\x02\x12!\n" +
+	"\x1dCLUSTER_MODE_CONSENSUS_BACKED\x10\x03*\x9e\x01\n" +
+	"\x0fWriteDurability\x12 \n" +
+	"\x1cWRITE_DURABILITY_UNSPECIFIED\x10\x00\x12\x1f\n" +
+	"\x1bWRITE_DURABILITY_NODE_LOCAL\x10\x01\x12!\n" +
+	"\x1dWRITE_DURABILITY_PRIMARY_ONLY\x10\x02\x12%\n" +
+	"!WRITE_DURABILITY_CONSENSUS_QUORUM\x10\x03*q\n" +
+	"\n" +
+	"IndexState\x12\x1b\n" +
+	"\x17INDEX_STATE_UNSPECIFIED\x10\x00\x12\x18\n" +
+	"\x14INDEX_STATE_BUILDING\x10\x01\x12\x15\n" +
+	"\x11INDEX_STATE_READY\x10\x02\x12\x15\n" +
+	"\x11INDEX_STATE_STALE\x10\x032\xae\x06\n" +
 	"\x04Barq\x123\n" +
 	"\x06Status\x12\x13.barq.StatusRequest\x1a\x14.barq.StatusResponse\x12Q\n" +
 	"\x10CreateCollection\x12\x1d.barq.CreateCollectionRequest\x1a\x1e.barq.CreateCollectionResponse\x123\n" +
 	"\x06Insert\x12\x13.barq.InsertRequest\x1a\x14.barq.InsertResponse\x12=\n" +
 	"\vInsertAsync\x12\x13.barq.InsertRequest\x1a\x19.barq.InsertAsyncResponse\x12N\n" +
 	"\x0fGetInsertStatus\x12\x1c.barq.GetInsertStatusRequest\x1a\x1d.barq.GetInsertStatusResponse\x123\n" +
-	"\x06Search\x12\x13.barq.SearchRequest\x1a\x14.barq.SearchResponse\x123\n" +
+	"\x06Search\x12\x13.barq.SearchRequest\x1a\x14.barq.SearchResponse\x12?\n" +
+	"\n" +
+	"GetMetrics\x12\x17.barq.GetMetricsRequest\x1a\x18.barq.GetMetricsResponse\x12Q\n" +
+	"\x10GetClusterStatus\x12\x1d.barq.GetClusterStatusRequest\x1a\x1e.barq.GetClusterStatusResponse\x12K\n" +
+	"\x0eGetSegmentInfo\x12\x1b.barq.GetSegmentInfoRequest\x1a\x1c.barq.GetSegmentInfoResponse\x123\n" +
 	"\x06Health\x12\x13.barq.HealthRequest\x1a\x14.barq.HealthResponse\x12K\n" +
 	"\x0eInsertDocument\x12\x1b.barq.InsertDocumentRequest\x1a\x1c.barq.InsertDocumentResponse\x12B\n" +
 	"\vBatchSearch\x12\x18.barq.BatchSearchRequest\x1a\x19.barq.BatchSearchResponseb\x06proto3"
@@ -1381,66 +2675,109 @@ func file_barq_proto_rawDescGZIP() []byte {
 	return file_barq_proto_rawDescData
 }
 
-var file_barq_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_barq_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
+var file_barq_proto_enumTypes = make([]protoimpl.EnumInfo, 7)
+var file_barq_proto_msgTypes = make([]protoimpl.MessageInfo, 37)
 var file_barq_proto_goTypes = []any{
-	(InsertStatusState)(0),           // 0: barq.InsertStatusState
-	(Consistency)(0),                 // 1: barq.Consistency
-	(*StatusRequest)(nil),            // 2: barq.StatusRequest
-	(*StatusResponse)(nil),           // 3: barq.StatusResponse
-	(*HealthRequest)(nil),            // 4: barq.HealthRequest
-	(*HealthResponse)(nil),           // 5: barq.HealthResponse
-	(*CreateCollectionRequest)(nil),  // 6: barq.CreateCollectionRequest
-	(*CreateCollectionResponse)(nil), // 7: barq.CreateCollectionResponse
-	(*InsertOptions)(nil),            // 8: barq.InsertOptions
-	(*InsertRequest)(nil),            // 9: barq.InsertRequest
-	(*InsertResponse)(nil),           // 10: barq.InsertResponse
-	(*InsertAsyncResponse)(nil),      // 11: barq.InsertAsyncResponse
-	(*GetInsertStatusRequest)(nil),   // 12: barq.GetInsertStatusRequest
-	(*GetInsertStatusResponse)(nil),  // 13: barq.GetInsertStatusResponse
-	(*InsertDocumentRequest)(nil),    // 14: barq.InsertDocumentRequest
-	(*InsertDocumentResponse)(nil),   // 15: barq.InsertDocumentResponse
-	(*SearchOptions)(nil),            // 16: barq.SearchOptions
-	(*SearchRequest)(nil),            // 17: barq.SearchRequest
-	(*SearchResult)(nil),             // 18: barq.SearchResult
-	(*SearchResponse)(nil),           // 19: barq.SearchResponse
-	(*SearchQuery)(nil),              // 20: barq.SearchQuery
-	(*BatchSearchRequest)(nil),       // 21: barq.BatchSearchRequest
-	(*QueryResults)(nil),             // 22: barq.QueryResults
-	(*BatchSearchResponse)(nil),      // 23: barq.BatchSearchResponse
+	(InsertStatusState)(0),               // 0: barq.InsertStatusState
+	(Consistency)(0),                     // 1: barq.Consistency
+	(MetricKind)(0),                      // 2: barq.MetricKind
+	(SegmentState)(0),                    // 3: barq.SegmentState
+	(ClusterMode)(0),                     // 4: barq.ClusterMode
+	(WriteDurability)(0),                 // 5: barq.WriteDurability
+	(IndexState)(0),                      // 6: barq.IndexState
+	(*StatusRequest)(nil),                // 7: barq.StatusRequest
+	(*StatusResponse)(nil),               // 8: barq.StatusResponse
+	(*HealthRequest)(nil),                // 9: barq.HealthRequest
+	(*HealthResponse)(nil),               // 10: barq.HealthResponse
+	(*CreateCollectionRequest)(nil),      // 11: barq.CreateCollectionRequest
+	(*CreateCollectionResponse)(nil),     // 12: barq.CreateCollectionResponse
+	(*InsertOptions)(nil),                // 13: barq.InsertOptions
+	(*InsertRequest)(nil),                // 14: barq.InsertRequest
+	(*InsertResponse)(nil),               // 15: barq.InsertResponse
+	(*InsertAsyncResponse)(nil),          // 16: barq.InsertAsyncResponse
+	(*GetInsertStatusRequest)(nil),       // 17: barq.GetInsertStatusRequest
+	(*GetInsertStatusResponse)(nil),      // 18: barq.GetInsertStatusResponse
+	(*InsertDocumentRequest)(nil),        // 19: barq.InsertDocumentRequest
+	(*InsertDocumentResponse)(nil),       // 20: barq.InsertDocumentResponse
+	(*SearchOptions)(nil),                // 21: barq.SearchOptions
+	(*SearchRequest)(nil),                // 22: barq.SearchRequest
+	(*SearchResult)(nil),                 // 23: barq.SearchResult
+	(*SearchResponse)(nil),               // 24: barq.SearchResponse
+	(*GetMetricsRequest)(nil),            // 25: barq.GetMetricsRequest
+	(*MetricDefinition)(nil),             // 26: barq.MetricDefinition
+	(*TenantMemorySample)(nil),           // 27: barq.TenantMemorySample
+	(*CollectionMemorySample)(nil),       // 28: barq.CollectionMemorySample
+	(*CollectionWalSample)(nil),          // 29: barq.CollectionWalSample
+	(*CollectionSegmentFileSample)(nil),  // 30: barq.CollectionSegmentFileSample
+	(*CollectionSegmentStateSample)(nil), // 31: barq.CollectionSegmentStateSample
+	(*StorageMetrics)(nil),               // 32: barq.StorageMetrics
+	(*GetMetricsResponse)(nil),           // 33: barq.GetMetricsResponse
+	(*GetClusterStatusRequest)(nil),      // 34: barq.GetClusterStatusRequest
+	(*GetClusterStatusResponse)(nil),     // 35: barq.GetClusterStatusResponse
+	(*GetSegmentInfoRequest)(nil),        // 36: barq.GetSegmentInfoRequest
+	(*SegmentCount)(nil),                 // 37: barq.SegmentCount
+	(*CollectionSegmentInfo)(nil),        // 38: barq.CollectionSegmentInfo
+	(*GetSegmentInfoResponse)(nil),       // 39: barq.GetSegmentInfoResponse
+	(*SearchQuery)(nil),                  // 40: barq.SearchQuery
+	(*BatchSearchRequest)(nil),           // 41: barq.BatchSearchRequest
+	(*QueryResults)(nil),                 // 42: barq.QueryResults
+	(*BatchSearchResponse)(nil),          // 43: barq.BatchSearchResponse
 }
 var file_barq_proto_depIdxs = []int32{
-	8,  // 0: barq.InsertRequest.options:type_name -> barq.InsertOptions
+	13, // 0: barq.InsertRequest.options:type_name -> barq.InsertOptions
 	0,  // 1: barq.GetInsertStatusResponse.state:type_name -> barq.InsertStatusState
 	1,  // 2: barq.SearchOptions.consistency:type_name -> barq.Consistency
-	16, // 3: barq.SearchRequest.options:type_name -> barq.SearchOptions
-	18, // 4: barq.SearchResponse.results:type_name -> barq.SearchResult
-	20, // 5: barq.BatchSearchRequest.queries:type_name -> barq.SearchQuery
-	18, // 6: barq.QueryResults.hits:type_name -> barq.SearchResult
-	22, // 7: barq.BatchSearchResponse.results:type_name -> barq.QueryResults
-	2,  // 8: barq.Barq.Status:input_type -> barq.StatusRequest
-	6,  // 9: barq.Barq.CreateCollection:input_type -> barq.CreateCollectionRequest
-	9,  // 10: barq.Barq.Insert:input_type -> barq.InsertRequest
-	9,  // 11: barq.Barq.InsertAsync:input_type -> barq.InsertRequest
-	12, // 12: barq.Barq.GetInsertStatus:input_type -> barq.GetInsertStatusRequest
-	17, // 13: barq.Barq.Search:input_type -> barq.SearchRequest
-	4,  // 14: barq.Barq.Health:input_type -> barq.HealthRequest
-	14, // 15: barq.Barq.InsertDocument:input_type -> barq.InsertDocumentRequest
-	21, // 16: barq.Barq.BatchSearch:input_type -> barq.BatchSearchRequest
-	3,  // 17: barq.Barq.Status:output_type -> barq.StatusResponse
-	7,  // 18: barq.Barq.CreateCollection:output_type -> barq.CreateCollectionResponse
-	10, // 19: barq.Barq.Insert:output_type -> barq.InsertResponse
-	11, // 20: barq.Barq.InsertAsync:output_type -> barq.InsertAsyncResponse
-	13, // 21: barq.Barq.GetInsertStatus:output_type -> barq.GetInsertStatusResponse
-	19, // 22: barq.Barq.Search:output_type -> barq.SearchResponse
-	5,  // 23: barq.Barq.Health:output_type -> barq.HealthResponse
-	15, // 24: barq.Barq.InsertDocument:output_type -> barq.InsertDocumentResponse
-	23, // 25: barq.Barq.BatchSearch:output_type -> barq.BatchSearchResponse
-	17, // [17:26] is the sub-list for method output_type
-	8,  // [8:17] is the sub-list for method input_type
-	8,  // [8:8] is the sub-list for extension type_name
-	8,  // [8:8] is the sub-list for extension extendee
-	0,  // [0:8] is the sub-list for field type_name
+	21, // 3: barq.SearchRequest.options:type_name -> barq.SearchOptions
+	23, // 4: barq.SearchResponse.results:type_name -> barq.SearchResult
+	2,  // 5: barq.MetricDefinition.kind:type_name -> barq.MetricKind
+	3,  // 6: barq.CollectionSegmentFileSample.state:type_name -> barq.SegmentState
+	3,  // 7: barq.CollectionSegmentStateSample.state:type_name -> barq.SegmentState
+	27, // 8: barq.StorageMetrics.tenant_memory_bytes:type_name -> barq.TenantMemorySample
+	28, // 9: barq.StorageMetrics.collection_memory_bytes:type_name -> barq.CollectionMemorySample
+	29, // 10: barq.StorageMetrics.collection_wal:type_name -> barq.CollectionWalSample
+	30, // 11: barq.StorageMetrics.collection_segment_files:type_name -> barq.CollectionSegmentFileSample
+	31, // 12: barq.StorageMetrics.collection_segment_states:type_name -> barq.CollectionSegmentStateSample
+	26, // 13: barq.GetMetricsResponse.definitions:type_name -> barq.MetricDefinition
+	32, // 14: barq.GetMetricsResponse.storage:type_name -> barq.StorageMetrics
+	4,  // 15: barq.GetClusterStatusResponse.mode:type_name -> barq.ClusterMode
+	5,  // 16: barq.GetClusterStatusResponse.write_durability:type_name -> barq.WriteDurability
+	3,  // 17: barq.SegmentCount.state:type_name -> barq.SegmentState
+	3,  // 18: barq.CollectionSegmentInfo.current_state:type_name -> barq.SegmentState
+	6,  // 19: barq.CollectionSegmentInfo.index_state:type_name -> barq.IndexState
+	37, // 20: barq.CollectionSegmentInfo.segment_counts:type_name -> barq.SegmentCount
+	38, // 21: barq.GetSegmentInfoResponse.collections:type_name -> barq.CollectionSegmentInfo
+	40, // 22: barq.BatchSearchRequest.queries:type_name -> barq.SearchQuery
+	23, // 23: barq.QueryResults.hits:type_name -> barq.SearchResult
+	42, // 24: barq.BatchSearchResponse.results:type_name -> barq.QueryResults
+	7,  // 25: barq.Barq.Status:input_type -> barq.StatusRequest
+	11, // 26: barq.Barq.CreateCollection:input_type -> barq.CreateCollectionRequest
+	14, // 27: barq.Barq.Insert:input_type -> barq.InsertRequest
+	14, // 28: barq.Barq.InsertAsync:input_type -> barq.InsertRequest
+	17, // 29: barq.Barq.GetInsertStatus:input_type -> barq.GetInsertStatusRequest
+	22, // 30: barq.Barq.Search:input_type -> barq.SearchRequest
+	25, // 31: barq.Barq.GetMetrics:input_type -> barq.GetMetricsRequest
+	34, // 32: barq.Barq.GetClusterStatus:input_type -> barq.GetClusterStatusRequest
+	36, // 33: barq.Barq.GetSegmentInfo:input_type -> barq.GetSegmentInfoRequest
+	9,  // 34: barq.Barq.Health:input_type -> barq.HealthRequest
+	19, // 35: barq.Barq.InsertDocument:input_type -> barq.InsertDocumentRequest
+	41, // 36: barq.Barq.BatchSearch:input_type -> barq.BatchSearchRequest
+	8,  // 37: barq.Barq.Status:output_type -> barq.StatusResponse
+	12, // 38: barq.Barq.CreateCollection:output_type -> barq.CreateCollectionResponse
+	15, // 39: barq.Barq.Insert:output_type -> barq.InsertResponse
+	16, // 40: barq.Barq.InsertAsync:output_type -> barq.InsertAsyncResponse
+	18, // 41: barq.Barq.GetInsertStatus:output_type -> barq.GetInsertStatusResponse
+	24, // 42: barq.Barq.Search:output_type -> barq.SearchResponse
+	33, // 43: barq.Barq.GetMetrics:output_type -> barq.GetMetricsResponse
+	35, // 44: barq.Barq.GetClusterStatus:output_type -> barq.GetClusterStatusResponse
+	39, // 45: barq.Barq.GetSegmentInfo:output_type -> barq.GetSegmentInfoResponse
+	10, // 46: barq.Barq.Health:output_type -> barq.HealthResponse
+	20, // 47: barq.Barq.InsertDocument:output_type -> barq.InsertDocumentResponse
+	43, // 48: barq.Barq.BatchSearch:output_type -> barq.BatchSearchResponse
+	37, // [37:49] is the sub-list for method output_type
+	25, // [25:37] is the sub-list for method input_type
+	25, // [25:25] is the sub-list for extension type_name
+	25, // [25:25] is the sub-list for extension extendee
+	0,  // [0:25] is the sub-list for field type_name
 }
 
 func init() { file_barq_proto_init() }
@@ -1453,8 +2790,8 @@ func file_barq_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_barq_proto_rawDesc), len(file_barq_proto_rawDesc)),
-			NumEnums:      2,
-			NumMessages:   22,
+			NumEnums:      7,
+			NumMessages:   37,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

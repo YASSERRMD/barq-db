@@ -2,19 +2,27 @@ pub mod compat;
 
 use crate::{ApiError, ApiPermission, AppState, ReadPreference};
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
+use barq_cluster::{ClusterMode as RuntimeClusterMode, WriteDurability as RuntimeWriteDurability};
 use barq_core::{
     CatalogError, CollectionSchema, DistanceMetric, Document, DocumentId, FieldSchema, FieldType,
     Filter, IndexState, PayloadValue, TenantId,
 };
 use barq_proto::barq::barq_server::Barq;
 use barq_proto::barq::{
-    BatchSearchRequest, BatchSearchResponse, Consistency, CreateCollectionRequest,
-    CreateCollectionResponse, GetInsertStatusRequest, GetInsertStatusResponse, HealthRequest,
-    HealthResponse, InsertAsyncResponse, InsertDocumentRequest, InsertDocumentResponse,
-    InsertOptions, InsertRequest, InsertResponse, InsertStatusState, QueryResults, SearchOptions,
-    SearchRequest, SearchResponse, SearchResult, StatusRequest, StatusResponse,
+    BatchSearchRequest, BatchSearchResponse, ClusterMode, CollectionMemorySample,
+    CollectionSegmentFileSample, CollectionSegmentInfo, CollectionSegmentStateSample,
+    CollectionWalSample, Consistency, CreateCollectionRequest, CreateCollectionResponse,
+    GetClusterStatusRequest, GetClusterStatusResponse, GetInsertStatusRequest,
+    GetInsertStatusResponse, GetMetricsRequest, GetMetricsResponse, GetSegmentInfoRequest,
+    GetSegmentInfoResponse, HealthRequest, HealthResponse, IndexState as ProtoIndexState,
+    InsertAsyncResponse, InsertDocumentRequest, InsertDocumentResponse, InsertOptions,
+    InsertRequest, InsertResponse, InsertStatusState, MetricDefinition as ProtoMetricDefinition,
+    MetricKind as ProtoMetricKind, QueryResults, SearchOptions, SearchRequest, SearchResponse,
+    SearchResult, SegmentCount, SegmentState as ProtoSegmentState, StatusRequest, StatusResponse,
+    StorageMetrics, TenantMemorySample, WriteDurability,
 };
 use barq_storage::StorageError;
+use serde::Deserialize;
 use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status};
 
@@ -209,6 +217,57 @@ impl GrpcService {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct StorageMetricsSnapshot {
+    refresh_count: u64,
+    total_resident_vector_memory_bytes: u64,
+    wal_appends_total: u64,
+    wal_bytes_written_total: u64,
+    compactions_total: u64,
+    tenant_memory_bytes: Vec<StorageTenantMemorySample>,
+    collection_memory_bytes: Vec<StorageCollectionMemorySample>,
+    collection_wal: Vec<StorageCollectionWalSample>,
+    collection_segment_files: Vec<StorageCollectionSegmentFileSample>,
+    collection_segment_states: Vec<StorageCollectionSegmentStateSample>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StorageTenantMemorySample {
+    tenant: String,
+    resident_vector_memory_bytes: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct StorageCollectionMemorySample {
+    tenant: String,
+    collection: String,
+    resident_vector_memory_bytes: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct StorageCollectionWalSample {
+    tenant: String,
+    collection: String,
+    entries: u64,
+    bytes: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct StorageCollectionSegmentFileSample {
+    tenant: String,
+    collection: String,
+    state: barq_storage::SegmentState,
+    count: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct StorageCollectionSegmentStateSample {
+    tenant: String,
+    collection: String,
+    state: barq_storage::SegmentState,
+    active: bool,
+}
+
 fn wait_for_commit(options: Option<&InsertOptions>) -> bool {
     options.map_or(true, |options| options.wait_for_commit)
 }
@@ -269,6 +328,53 @@ fn proto_insert_status(state: crate::ingest::TrackedInsertState) -> InsertStatus
         crate::ingest::TrackedInsertState::Succeeded => InsertStatusState::Succeeded,
         crate::ingest::TrackedInsertState::Failed => InsertStatusState::Failed,
     }
+}
+
+fn proto_metric_kind(kind: barq_metrics::MetricKind) -> ProtoMetricKind {
+    match kind {
+        barq_metrics::MetricKind::Counter => ProtoMetricKind::Counter,
+        barq_metrics::MetricKind::Gauge => ProtoMetricKind::Gauge,
+        barq_metrics::MetricKind::Histogram => ProtoMetricKind::Histogram,
+    }
+}
+
+fn proto_segment_state(state: barq_storage::SegmentState) -> ProtoSegmentState {
+    match state {
+        barq_storage::SegmentState::Growing => ProtoSegmentState::Growing,
+        barq_storage::SegmentState::Sealed => ProtoSegmentState::Sealed,
+        barq_storage::SegmentState::Compacted => ProtoSegmentState::Compacted,
+    }
+}
+
+fn proto_index_state(state: IndexState) -> ProtoIndexState {
+    match state {
+        IndexState::Building => ProtoIndexState::Building,
+        IndexState::Ready => ProtoIndexState::Ready,
+        IndexState::Stale => ProtoIndexState::Stale,
+    }
+}
+
+fn proto_cluster_mode(mode: RuntimeClusterMode) -> ClusterMode {
+    match mode {
+        RuntimeClusterMode::SingleNode => ClusterMode::SingleNode,
+        RuntimeClusterMode::RoutedReplication => ClusterMode::RoutedReplication,
+        RuntimeClusterMode::ConsensusBacked => ClusterMode::ConsensusBacked,
+    }
+}
+
+fn proto_write_durability(durability: RuntimeWriteDurability) -> WriteDurability {
+    match durability {
+        RuntimeWriteDurability::NodeLocal => WriteDurability::NodeLocal,
+        RuntimeWriteDurability::PrimaryOnly => WriteDurability::PrimaryOnly,
+        RuntimeWriteDurability::ConsensusQuorum => WriteDurability::ConsensusQuorum,
+    }
+}
+
+fn parse_storage_metrics_snapshot(
+    report: serde_json::Value,
+) -> Result<StorageMetricsSnapshot, Status> {
+    serde_json::from_value(report)
+        .map_err(|err| Status::internal(format!("invalid storage metrics snapshot: {err}")))
 }
 
 fn metadata_to_headers(metadata: &MetadataMap) -> Result<HeaderMap, Status> {
@@ -499,6 +605,157 @@ impl Barq for GrpcService {
         let tenant = self.authenticate(request.metadata(), ApiPermission::Read)?;
         let response = self.search_internal(tenant, request.into_inner()).await?;
         Ok(Response::new(response))
+    }
+
+    async fn get_metrics(
+        &self,
+        request: Request<GetMetricsRequest>,
+    ) -> Result<Response<GetMetricsResponse>, Status> {
+        let _tenant = self.authenticate(request.metadata(), ApiPermission::Admin)?;
+        let storage = self.state.storage.lock().await;
+        let snapshot = parse_storage_metrics_snapshot(storage.metrics_report_json())?;
+
+        Ok(Response::new(GetMetricsResponse {
+            definitions: self
+                .state
+                .metric_registry
+                .definitions()
+                .into_iter()
+                .map(|definition| ProtoMetricDefinition {
+                    name: definition.name,
+                    kind: proto_metric_kind(definition.kind) as i32,
+                    description: definition.description,
+                    unit: definition.unit.unwrap_or_default(),
+                    labels: definition.labels,
+                })
+                .collect(),
+            storage: Some(StorageMetrics {
+                refresh_count: snapshot.refresh_count,
+                total_resident_vector_memory_bytes: snapshot.total_resident_vector_memory_bytes,
+                wal_appends_total: snapshot.wal_appends_total,
+                wal_bytes_written_total: snapshot.wal_bytes_written_total,
+                compactions_total: snapshot.compactions_total,
+                tenant_memory_bytes: snapshot
+                    .tenant_memory_bytes
+                    .into_iter()
+                    .map(|sample| TenantMemorySample {
+                        tenant: sample.tenant,
+                        resident_vector_memory_bytes: sample.resident_vector_memory_bytes,
+                    })
+                    .collect(),
+                collection_memory_bytes: snapshot
+                    .collection_memory_bytes
+                    .into_iter()
+                    .map(|sample| CollectionMemorySample {
+                        tenant: sample.tenant,
+                        collection: sample.collection,
+                        resident_vector_memory_bytes: sample.resident_vector_memory_bytes,
+                    })
+                    .collect(),
+                collection_wal: snapshot
+                    .collection_wal
+                    .into_iter()
+                    .map(|sample| CollectionWalSample {
+                        tenant: sample.tenant,
+                        collection: sample.collection,
+                        entries: sample.entries,
+                        bytes: sample.bytes,
+                    })
+                    .collect(),
+                collection_segment_files: snapshot
+                    .collection_segment_files
+                    .into_iter()
+                    .map(|sample| CollectionSegmentFileSample {
+                        tenant: sample.tenant,
+                        collection: sample.collection,
+                        state: proto_segment_state(sample.state) as i32,
+                        count: sample.count,
+                    })
+                    .collect(),
+                collection_segment_states: snapshot
+                    .collection_segment_states
+                    .into_iter()
+                    .map(|sample| CollectionSegmentStateSample {
+                        tenant: sample.tenant,
+                        collection: sample.collection,
+                        state: proto_segment_state(sample.state) as i32,
+                        active: sample.active,
+                    })
+                    .collect(),
+            }),
+        }))
+    }
+
+    async fn get_cluster_status(
+        &self,
+        _request: Request<GetClusterStatusRequest>,
+    ) -> Result<Response<GetClusterStatusResponse>, Status> {
+        let status = self.state.cluster.status();
+        Ok(Response::new(GetClusterStatusResponse {
+            node_id: status.node_id.0,
+            mode: proto_cluster_mode(status.mode) as i32,
+            write_durability: proto_write_durability(status.write_durability) as i32,
+            shard_count: status.shard_count,
+            node_count: status.node_count as u64,
+        }))
+    }
+
+    async fn get_segment_info(
+        &self,
+        request: Request<GetSegmentInfoRequest>,
+    ) -> Result<Response<GetSegmentInfoResponse>, Status> {
+        let tenant = self.authenticate(request.metadata(), ApiPermission::Admin)?;
+        let request = request.into_inner();
+        let requested_collection = request.collection.trim().to_string();
+
+        let storage = self.state.storage.lock().await;
+        let snapshot = parse_storage_metrics_snapshot(storage.metrics_report_json())?;
+
+        let mut collections = if requested_collection.is_empty() {
+            storage
+                .collection_names_for_tenant(&tenant)
+                .map_err(storage_error_to_status)?
+        } else {
+            vec![requested_collection]
+        };
+        collections.sort();
+
+        let mut segment_infos = Vec::with_capacity(collections.len());
+        for collection in collections {
+            let index_state = storage
+                .catalog()
+                .collection(&tenant, &collection)
+                .map_err(StorageError::Catalog)
+                .map_err(storage_error_to_status)?
+                .index_state();
+
+            let mut segment_counts: Vec<_> = snapshot
+                .collection_segment_files
+                .iter()
+                .filter(|sample| {
+                    sample.tenant == tenant.as_str() && sample.collection == collection
+                })
+                .map(|sample| SegmentCount {
+                    state: proto_segment_state(sample.state) as i32,
+                    count: sample.count,
+                })
+                .collect();
+            segment_counts.sort_by_key(|count| count.state);
+
+            segment_infos.push(CollectionSegmentInfo {
+                tenant: tenant.as_str().to_string(),
+                collection: collection.clone(),
+                current_state: proto_segment_state(
+                    storage.segment_state_for_tenant(&tenant, &collection),
+                ) as i32,
+                index_state: proto_index_state(index_state) as i32,
+                segment_counts,
+            });
+        }
+
+        Ok(Response::new(GetSegmentInfoResponse {
+            collections: segment_infos,
+        }))
     }
 
     async fn batch_search(
@@ -820,6 +1077,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn grpc_get_metrics_returns_populated_storage_metrics() {
+        let (_dir, _state, service) = grpc_service();
+        create_collection(&service, "docs").await;
+
+        service
+            .insert(Request::new(InsertRequest {
+                collection: "docs".to_string(),
+                id: "doc-metrics".to_string(),
+                vector: vec![1.0, 0.0],
+                payload_json: "{\"kind\":\"metrics\"}".to_string(),
+                options: None,
+            }))
+            .await
+            .unwrap();
+
+        let response = service
+            .get_metrics(Request::new(GetMetricsRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(response.definitions.iter().any(|definition| {
+            definition.name == "ingestion_queue_size"
+                && definition.kind == ProtoMetricKind::Gauge as i32
+        }));
+
+        let storage = response.storage.expect("storage metrics should be present");
+        assert!(storage.total_resident_vector_memory_bytes > 0);
+        assert!(storage.wal_appends_total >= 1);
+        assert!(storage.collection_wal.iter().any(|sample| {
+            sample.tenant == TenantId::default().as_str()
+                && sample.collection == "docs"
+                && sample.entries >= 1
+        }));
+    }
+
+    #[tokio::test]
+    async fn grpc_get_cluster_status_returns_configured_mode() {
+        let (_dir, _state, service) = follower_grpc_service();
+
+        let response = service
+            .get_cluster_status(Request::new(GetClusterStatusRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(response.mode, ClusterMode::RoutedReplication as i32);
+        assert_eq!(
+            response.write_durability,
+            WriteDurability::PrimaryOnly as i32
+        );
+        assert_eq!(response.node_count, 2);
+        assert_eq!(response.shard_count, 1);
+    }
+
+    #[tokio::test]
+    async fn grpc_get_segment_info_returns_populated_collection_fields() {
+        let (_dir, state, service) = grpc_service();
+        create_collection(&service, "docs").await;
+
+        service
+            .insert(Request::new(InsertRequest {
+                collection: "docs".to_string(),
+                id: "doc-segment".to_string(),
+                vector: vec![1.0, 0.0],
+                payload_json: "{}".to_string(),
+                options: None,
+            }))
+            .await
+            .unwrap();
+
+        state
+            .storage
+            .lock()
+            .await
+            .seal_segment_for_tenant(&TenantId::default(), "docs")
+            .unwrap();
+
+        let response = service
+            .get_segment_info(Request::new(GetSegmentInfoRequest {
+                collection: "docs".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(response.collections.len(), 1);
+        let info = &response.collections[0];
+        assert_eq!(info.tenant, TenantId::default().as_str());
+        assert_eq!(info.collection, "docs");
+        assert_eq!(info.current_state, ProtoSegmentState::Sealed as i32);
+        assert_ne!(info.index_state, ProtoIndexState::Unspecified as i32);
+        assert!(info
+            .segment_counts
+            .iter()
+            .any(|count| { count.state == ProtoSegmentState::Sealed as i32 && count.count >= 1 }));
+    }
+
+    #[tokio::test]
     async fn grpc_invalid_requests_return_invalid_argument() {
         let (_dir, _state, service) = grpc_service();
         create_collection(&service, "docs").await;
@@ -1129,6 +1485,128 @@ mod tests {
                 "document {id} should flush after release"
             );
         }
+
+        shutdown.send(()).unwrap();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sdk_observability_clients_parse_metrics_and_status() {
+        let _env_lock = sdk_env_lock().lock().unwrap();
+        let (_dir, _state, service) = grpc_service();
+        create_collection(&service, "sdk-observability").await;
+        service
+            .insert(Request::new(InsertRequest {
+                collection: "sdk-observability".to_string(),
+                id: "seed-doc".to_string(),
+                vector: vec![1.0, 0.0],
+                payload_json: "{\"seed\":true}".to_string(),
+                options: None,
+            }))
+            .await
+            .unwrap();
+
+        let (addr, handle, shutdown) = start_grpc_server(service).await;
+        let grpc_addr = addr.to_string();
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let _grpc_override = EnvVarGuard::set("BARQ_GRPC_ADDR", &grpc_addr);
+
+        let rust_task = tokio::spawn(async move {
+            let client = PublicBarqClient::new("http://127.0.0.1:8080", "");
+            let metrics = client.get_metrics().await.expect("rust get metrics");
+            assert!(!metrics.definitions.is_empty());
+            assert!(
+                metrics
+                    .storage
+                    .as_ref()
+                    .expect("rust metrics storage")
+                    .total_resident_vector_memory_bytes
+                    > 0
+            );
+
+            let status = client
+                .get_cluster_status()
+                .await
+                .expect("rust get cluster status");
+            assert_eq!(status.mode, ClusterMode::SingleNode as i32);
+            assert_eq!(status.node_count, 1);
+            assert_eq!(status.shard_count, 1);
+
+            let segment_info = client
+                .get_segment_info(Some("sdk-observability"))
+                .await
+                .expect("rust get segment info");
+            assert_eq!(segment_info.collections.len(), 1);
+            assert_eq!(segment_info.collections[0].collection, "sdk-observability");
+        });
+
+        let python = spawn_command(
+            &workspace_root.join("barq-sdk-python"),
+            &[
+                ("PYTHONPATH", "."),
+                ("BARQ_BASE_URL", "http://127.0.0.1:8080"),
+                ("BARQ_GRPC_ADDR", grpc_addr.as_str()),
+                ("BARQ_TEST_COLLECTION", "sdk-observability"),
+            ],
+            "python3",
+            [
+                "-m",
+                "unittest",
+                "discover",
+                "-s",
+                "tests",
+                "-p",
+                "test_observability_smoke.py",
+            ],
+        )
+        .await;
+
+        let go = spawn_command(
+            &workspace_root.join("barq-sdk-go"),
+            &[
+                ("BARQ_BASE_URL", "http://127.0.0.1:8080"),
+                ("BARQ_GRPC_ADDR", grpc_addr.as_str()),
+                ("BARQ_TEST_COLLECTION", "sdk-observability"),
+            ],
+            "go",
+            [
+                "test",
+                "./...",
+                "-run",
+                "TestObservabilityClientReadsMetricsAndClusterStatus",
+                "-count=1",
+            ],
+        )
+        .await;
+
+        let typescript_build = spawn_command(
+            &workspace_root.join("barq-sdk-ts"),
+            &[],
+            "node",
+            ["./node_modules/typescript/lib/tsc.js", "--pretty", "false"],
+        )
+        .await;
+        wait_for_success("typescript build", typescript_build).await;
+
+        let typescript = spawn_command(
+            &workspace_root.join("barq-sdk-ts"),
+            &[
+                ("BARQ_BASE_URL", "http://127.0.0.1:8080"),
+                ("BARQ_GRPC_ADDR", grpc_addr.as_str()),
+                ("BARQ_TEST_COLLECTION", "sdk-observability"),
+            ],
+            "node",
+            ["--test", "test/observability_smoke.test.js"],
+        )
+        .await;
+
+        rust_task.await.unwrap();
+        wait_for_success("python observability smoke", python).await;
+        wait_for_success("go observability smoke", go).await;
+        wait_for_success("typescript observability smoke", typescript).await;
 
         shutdown.send(()).unwrap();
         handle.await.unwrap();

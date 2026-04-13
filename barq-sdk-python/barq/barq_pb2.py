@@ -24,17 +24,27 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\nbarq.proto\x12\x04\x62\x61rq\"\x0f\n\rStatusRequest\"-\n\x0eStatusResponse\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x0f\n\x07version\x18\x02 \x01(\t\"\x0f\n\rHealthRequest\"-\n\x0eHealthResponse\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x0f\n\x07version\x18\x02 \x01(\t\"J\n\x17\x43reateCollectionRequest\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x11\n\tdimension\x18\x02 \x01(\r\x12\x0e\n\x06metric\x18\x03 \x01(\t\"+\n\x18\x43reateCollectionResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\"(\n\rInsertOptions\x12\x17\n\x0fwait_for_commit\x18\x01 \x01(\x08\"{\n\rInsertRequest\x12\x12\n\ncollection\x18\x01 \x01(\t\x12\n\n\x02id\x18\x02 \x01(\t\x12\x0e\n\x06vector\x18\x03 \x03(\x02\x12\x14\n\x0cpayload_json\x18\x04 \x01(\t\x12$\n\x07options\x18\x05 \x01(\x0b\x32\x13.barq.InsertOptions\"!\n\x0eInsertResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\";\n\x13InsertAsyncResponse\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x12\n\nrequest_id\x18\x02 \x01(\t\",\n\x16GetInsertStatusRequest\x12\x12\n\nrequest_id\x18\x01 \x01(\t\"l\n\x17GetInsertStatusResponse\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12&\n\x05state\x18\x02 \x01(\x0e\x32\x17.barq.InsertStatusState\x12\x15\n\rerror_message\x18\x03 \x01(\t\"]\n\x15InsertDocumentRequest\x12\x12\n\ncollection\x18\x01 \x01(\t\x12\n\n\x02id\x18\x02 \x01(\t\x12\x0e\n\x06vector\x18\x03 \x03(\x02\x12\x14\n\x0cpayload_json\x18\x04 \x01(\t\")\n\x16InsertDocumentResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\"O\n\rSearchOptions\x12&\n\x0b\x63onsistency\x18\x01 \x01(\x0e\x32\x11.barq.Consistency\x12\x16\n\x0e\x61llow_fallback\x18\x02 \x01(\x08\"h\n\rSearchRequest\x12\x12\n\ncollection\x18\x01 \x01(\t\x12\x0e\n\x06vector\x18\x02 \x03(\x02\x12\r\n\x05top_k\x18\x03 \x01(\r\x12$\n\x07options\x18\x04 \x01(\x0b\x32\x13.barq.SearchOptions\"?\n\x0cSearchResult\x12\n\n\x02id\x18\x01 \x01(\t\x12\r\n\x05score\x18\x02 \x01(\x02\x12\x14\n\x0cpayload_json\x18\x03 \x01(\t\"5\n\x0eSearchResponse\x12#\n\x07results\x18\x01 \x03(\x0b\x32\x12.barq.SearchResult\"2\n\x0bSearchQuery\x12\x0e\n\x06vector\x18\x01 \x03(\x02\x12\x13\n\x0b\x66ilter_json\x18\x02 \x01(\t\"[\n\x12\x42\x61tchSearchRequest\x12\x12\n\ncollection\x18\x01 \x01(\t\x12\"\n\x07queries\x18\x02 \x03(\x0b\x32\x11.barq.SearchQuery\x12\r\n\x05top_k\x18\x03 \x01(\r\"0\n\x0cQueryResults\x12 \n\x04hits\x18\x01 \x03(\x0b\x32\x12.barq.SearchResult\":\n\x13\x42\x61tchSearchResponse\x12#\n\x07results\x18\x01 \x03(\x0b\x32\x12.barq.QueryResults*\xbf\x01\n\x11InsertStatusState\x12#\n\x1fINSERT_STATUS_STATE_UNSPECIFIED\x10\x00\x12\x1e\n\x1aINSERT_STATUS_STATE_QUEUED\x10\x01\x12\"\n\x1eINSERT_STATUS_STATE_PROCESSING\x10\x02\x12!\n\x1dINSERT_STATUS_STATE_SUCCEEDED\x10\x03\x12\x1e\n\x1aINSERT_STATUS_STATE_FAILED\x10\x04*s\n\x0b\x43onsistency\x12\x1b\n\x17\x43ONSISTENCY_UNSPECIFIED\x10\x00\x12\x17\n\x13\x43ONSISTENCY_PRIMARY\x10\x01\x12\x19\n\x15\x43ONSISTENCY_FOLLOWERS\x10\x02\x12\x13\n\x0f\x43ONSISTENCY_ANY\x10\x03\x32\xcd\x04\n\x04\x42\x61rq\x12\x33\n\x06Status\x12\x13.barq.StatusRequest\x1a\x14.barq.StatusResponse\x12Q\n\x10\x43reateCollection\x12\x1d.barq.CreateCollectionRequest\x1a\x1e.barq.CreateCollectionResponse\x12\x33\n\x06Insert\x12\x13.barq.InsertRequest\x1a\x14.barq.InsertResponse\x12=\n\x0bInsertAsync\x12\x13.barq.InsertRequest\x1a\x19.barq.InsertAsyncResponse\x12N\n\x0fGetInsertStatus\x12\x1c.barq.GetInsertStatusRequest\x1a\x1d.barq.GetInsertStatusResponse\x12\x33\n\x06Search\x12\x13.barq.SearchRequest\x1a\x14.barq.SearchResponse\x12\x33\n\x06Health\x12\x13.barq.HealthRequest\x1a\x14.barq.HealthResponse\x12K\n\x0eInsertDocument\x12\x1b.barq.InsertDocumentRequest\x1a\x1c.barq.InsertDocumentResponse\x12\x42\n\x0b\x42\x61tchSearch\x12\x18.barq.BatchSearchRequest\x1a\x19.barq.BatchSearchResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\nbarq.proto\x12\x04\x62\x61rq\"\x0f\n\rStatusRequest\"-\n\x0eStatusResponse\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x0f\n\x07version\x18\x02 \x01(\t\"\x0f\n\rHealthRequest\"-\n\x0eHealthResponse\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x0f\n\x07version\x18\x02 \x01(\t\"J\n\x17\x43reateCollectionRequest\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x11\n\tdimension\x18\x02 \x01(\r\x12\x0e\n\x06metric\x18\x03 \x01(\t\"+\n\x18\x43reateCollectionResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\"(\n\rInsertOptions\x12\x17\n\x0fwait_for_commit\x18\x01 \x01(\x08\"{\n\rInsertRequest\x12\x12\n\ncollection\x18\x01 \x01(\t\x12\n\n\x02id\x18\x02 \x01(\t\x12\x0e\n\x06vector\x18\x03 \x03(\x02\x12\x14\n\x0cpayload_json\x18\x04 \x01(\t\x12$\n\x07options\x18\x05 \x01(\x0b\x32\x13.barq.InsertOptions\"!\n\x0eInsertResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\";\n\x13InsertAsyncResponse\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x12\n\nrequest_id\x18\x02 \x01(\t\",\n\x16GetInsertStatusRequest\x12\x12\n\nrequest_id\x18\x01 \x01(\t\"l\n\x17GetInsertStatusResponse\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12&\n\x05state\x18\x02 \x01(\x0e\x32\x17.barq.InsertStatusState\x12\x15\n\rerror_message\x18\x03 \x01(\t\"]\n\x15InsertDocumentRequest\x12\x12\n\ncollection\x18\x01 \x01(\t\x12\n\n\x02id\x18\x02 \x01(\t\x12\x0e\n\x06vector\x18\x03 \x03(\x02\x12\x14\n\x0cpayload_json\x18\x04 \x01(\t\")\n\x16InsertDocumentResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\"O\n\rSearchOptions\x12&\n\x0b\x63onsistency\x18\x01 \x01(\x0e\x32\x11.barq.Consistency\x12\x16\n\x0e\x61llow_fallback\x18\x02 \x01(\x08\"h\n\rSearchRequest\x12\x12\n\ncollection\x18\x01 \x01(\t\x12\x0e\n\x06vector\x18\x02 \x03(\x02\x12\r\n\x05top_k\x18\x03 \x01(\r\x12$\n\x07options\x18\x04 \x01(\x0b\x32\x13.barq.SearchOptions\"?\n\x0cSearchResult\x12\n\n\x02id\x18\x01 \x01(\t\x12\r\n\x05score\x18\x02 \x01(\x02\x12\x14\n\x0cpayload_json\x18\x03 \x01(\t\"5\n\x0eSearchResponse\x12#\n\x07results\x18\x01 \x03(\x0b\x32\x12.barq.SearchResult\"\x13\n\x11GetMetricsRequest\"s\n\x10MetricDefinition\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x1e\n\x04kind\x18\x02 \x01(\x0e\x32\x10.barq.MetricKind\x12\x13\n\x0b\x64\x65scription\x18\x03 \x01(\t\x12\x0c\n\x04unit\x18\x04 \x01(\t\x12\x0e\n\x06labels\x18\x05 \x03(\t\"J\n\x12TenantMemorySample\x12\x0e\n\x06tenant\x18\x01 \x01(\t\x12$\n\x1cresident_vector_memory_bytes\x18\x02 \x01(\x04\"b\n\x16\x43ollectionMemorySample\x12\x0e\n\x06tenant\x18\x01 \x01(\t\x12\x12\n\ncollection\x18\x02 \x01(\t\x12$\n\x1cresident_vector_memory_bytes\x18\x03 \x01(\x04\"Y\n\x13\x43ollectionWalSample\x12\x0e\n\x06tenant\x18\x01 \x01(\t\x12\x12\n\ncollection\x18\x02 \x01(\t\x12\x0f\n\x07\x65ntries\x18\x03 \x01(\x04\x12\r\n\x05\x62ytes\x18\x04 \x01(\x04\"s\n\x1b\x43ollectionSegmentFileSample\x12\x0e\n\x06tenant\x18\x01 \x01(\t\x12\x12\n\ncollection\x18\x02 \x01(\t\x12!\n\x05state\x18\x03 \x01(\x0e\x32\x12.barq.SegmentState\x12\r\n\x05\x63ount\x18\x04 \x01(\x04\"u\n\x1c\x43ollectionSegmentStateSample\x12\x0e\n\x06tenant\x18\x01 \x01(\t\x12\x12\n\ncollection\x18\x02 \x01(\t\x12!\n\x05state\x18\x03 \x01(\x0e\x32\x12.barq.SegmentState\x12\x0e\n\x06\x61\x63tive\x18\x04 \x01(\x08\"\xdf\x03\n\x0eStorageMetrics\x12\x15\n\rrefresh_count\x18\x01 \x01(\x04\x12*\n\"total_resident_vector_memory_bytes\x18\x02 \x01(\x04\x12\x19\n\x11wal_appends_total\x18\x03 \x01(\x04\x12\x1f\n\x17wal_bytes_written_total\x18\x04 \x01(\x04\x12\x19\n\x11\x63ompactions_total\x18\x05 \x01(\x04\x12\x35\n\x13tenant_memory_bytes\x18\x06 \x03(\x0b\x32\x18.barq.TenantMemorySample\x12=\n\x17\x63ollection_memory_bytes\x18\x07 \x03(\x0b\x32\x1c.barq.CollectionMemorySample\x12\x31\n\x0e\x63ollection_wal\x18\x08 \x03(\x0b\x32\x19.barq.CollectionWalSample\x12\x43\n\x18\x63ollection_segment_files\x18\t \x03(\x0b\x32!.barq.CollectionSegmentFileSample\x12\x45\n\x19\x63ollection_segment_states\x18\n \x03(\x0b\x32\".barq.CollectionSegmentStateSample\"h\n\x12GetMetricsResponse\x12+\n\x0b\x64\x65\x66initions\x18\x01 \x03(\x0b\x32\x16.barq.MetricDefinition\x12%\n\x07storage\x18\x02 \x01(\x0b\x32\x14.barq.StorageMetrics\"\x19\n\x17GetClusterStatusRequest\"\xa6\x01\n\x18GetClusterStatusResponse\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x1f\n\x04mode\x18\x02 \x01(\x0e\x32\x11.barq.ClusterMode\x12/\n\x10write_durability\x18\x03 \x01(\x0e\x32\x15.barq.WriteDurability\x12\x13\n\x0bshard_count\x18\x04 \x01(\r\x12\x12\n\nnode_count\x18\x05 \x01(\x04\"+\n\x15GetSegmentInfoRequest\x12\x12\n\ncollection\x18\x01 \x01(\t\"@\n\x0cSegmentCount\x12!\n\x05state\x18\x01 \x01(\x0e\x32\x12.barq.SegmentState\x12\r\n\x05\x63ount\x18\x02 \x01(\x04\"\xb9\x01\n\x15\x43ollectionSegmentInfo\x12\x0e\n\x06tenant\x18\x01 \x01(\t\x12\x12\n\ncollection\x18\x02 \x01(\t\x12)\n\rcurrent_state\x18\x03 \x01(\x0e\x32\x12.barq.SegmentState\x12%\n\x0bindex_state\x18\x04 \x01(\x0e\x32\x10.barq.IndexState\x12*\n\x0esegment_counts\x18\x05 \x03(\x0b\x32\x12.barq.SegmentCount\"J\n\x16GetSegmentInfoResponse\x12\x30\n\x0b\x63ollections\x18\x01 \x03(\x0b\x32\x1b.barq.CollectionSegmentInfo\"2\n\x0bSearchQuery\x12\x0e\n\x06vector\x18\x01 \x03(\x02\x12\x13\n\x0b\x66ilter_json\x18\x02 \x01(\t\"[\n\x12\x42\x61tchSearchRequest\x12\x12\n\ncollection\x18\x01 \x01(\t\x12\"\n\x07queries\x18\x02 \x03(\x0b\x32\x11.barq.SearchQuery\x12\r\n\x05top_k\x18\x03 \x01(\r\"0\n\x0cQueryResults\x12 \n\x04hits\x18\x01 \x03(\x0b\x32\x12.barq.SearchResult\":\n\x13\x42\x61tchSearchResponse\x12#\n\x07results\x18\x01 \x03(\x0b\x32\x12.barq.QueryResults*\xbf\x01\n\x11InsertStatusState\x12#\n\x1fINSERT_STATUS_STATE_UNSPECIFIED\x10\x00\x12\x1e\n\x1aINSERT_STATUS_STATE_QUEUED\x10\x01\x12\"\n\x1eINSERT_STATUS_STATE_PROCESSING\x10\x02\x12!\n\x1dINSERT_STATUS_STATE_SUCCEEDED\x10\x03\x12\x1e\n\x1aINSERT_STATUS_STATE_FAILED\x10\x04*s\n\x0b\x43onsistency\x12\x1b\n\x17\x43ONSISTENCY_UNSPECIFIED\x10\x00\x12\x17\n\x13\x43ONSISTENCY_PRIMARY\x10\x01\x12\x19\n\x15\x43ONSISTENCY_FOLLOWERS\x10\x02\x12\x13\n\x0f\x43ONSISTENCY_ANY\x10\x03*t\n\nMetricKind\x12\x1b\n\x17METRIC_KIND_UNSPECIFIED\x10\x00\x12\x17\n\x13METRIC_KIND_COUNTER\x10\x01\x12\x15\n\x11METRIC_KIND_GAUGE\x10\x02\x12\x19\n\x15METRIC_KIND_HISTOGRAM\x10\x03*\x7f\n\x0cSegmentState\x12\x1d\n\x19SEGMENT_STATE_UNSPECIFIED\x10\x00\x12\x19\n\x15SEGMENT_STATE_GROWING\x10\x01\x12\x18\n\x14SEGMENT_STATE_SEALED\x10\x02\x12\x1b\n\x17SEGMENT_STATE_COMPACTED\x10\x03*\x91\x01\n\x0b\x43lusterMode\x12\x1c\n\x18\x43LUSTER_MODE_UNSPECIFIED\x10\x00\x12\x1c\n\x18\x43LUSTER_MODE_SINGLE_NODE\x10\x01\x12#\n\x1f\x43LUSTER_MODE_ROUTED_REPLICATION\x10\x02\x12!\n\x1d\x43LUSTER_MODE_CONSENSUS_BACKED\x10\x03*\x9e\x01\n\x0fWriteDurability\x12 \n\x1cWRITE_DURABILITY_UNSPECIFIED\x10\x00\x12\x1f\n\x1bWRITE_DURABILITY_NODE_LOCAL\x10\x01\x12!\n\x1dWRITE_DURABILITY_PRIMARY_ONLY\x10\x02\x12%\n!WRITE_DURABILITY_CONSENSUS_QUORUM\x10\x03*q\n\nIndexState\x12\x1b\n\x17INDEX_STATE_UNSPECIFIED\x10\x00\x12\x18\n\x14INDEX_STATE_BUILDING\x10\x01\x12\x15\n\x11INDEX_STATE_READY\x10\x02\x12\x15\n\x11INDEX_STATE_STALE\x10\x03\x32\xae\x06\n\x04\x42\x61rq\x12\x33\n\x06Status\x12\x13.barq.StatusRequest\x1a\x14.barq.StatusResponse\x12Q\n\x10\x43reateCollection\x12\x1d.barq.CreateCollectionRequest\x1a\x1e.barq.CreateCollectionResponse\x12\x33\n\x06Insert\x12\x13.barq.InsertRequest\x1a\x14.barq.InsertResponse\x12=\n\x0bInsertAsync\x12\x13.barq.InsertRequest\x1a\x19.barq.InsertAsyncResponse\x12N\n\x0fGetInsertStatus\x12\x1c.barq.GetInsertStatusRequest\x1a\x1d.barq.GetInsertStatusResponse\x12\x33\n\x06Search\x12\x13.barq.SearchRequest\x1a\x14.barq.SearchResponse\x12?\n\nGetMetrics\x12\x17.barq.GetMetricsRequest\x1a\x18.barq.GetMetricsResponse\x12Q\n\x10GetClusterStatus\x12\x1d.barq.GetClusterStatusRequest\x1a\x1e.barq.GetClusterStatusResponse\x12K\n\x0eGetSegmentInfo\x12\x1b.barq.GetSegmentInfoRequest\x1a\x1c.barq.GetSegmentInfoResponse\x12\x33\n\x06Health\x12\x13.barq.HealthRequest\x1a\x14.barq.HealthResponse\x12K\n\x0eInsertDocument\x12\x1b.barq.InsertDocumentRequest\x1a\x1c.barq.InsertDocumentResponse\x12\x42\n\x0b\x42\x61tchSearch\x12\x18.barq.BatchSearchRequest\x1a\x19.barq.BatchSearchResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'barq_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_INSERTSTATUSSTATE']._serialized_start=1389
-  _globals['_INSERTSTATUSSTATE']._serialized_end=1580
-  _globals['_CONSISTENCY']._serialized_start=1582
-  _globals['_CONSISTENCY']._serialized_end=1697
+  _globals['_INSERTSTATUSSTATE']._serialized_start=3189
+  _globals['_INSERTSTATUSSTATE']._serialized_end=3380
+  _globals['_CONSISTENCY']._serialized_start=3382
+  _globals['_CONSISTENCY']._serialized_end=3497
+  _globals['_METRICKIND']._serialized_start=3499
+  _globals['_METRICKIND']._serialized_end=3615
+  _globals['_SEGMENTSTATE']._serialized_start=3617
+  _globals['_SEGMENTSTATE']._serialized_end=3744
+  _globals['_CLUSTERMODE']._serialized_start=3747
+  _globals['_CLUSTERMODE']._serialized_end=3892
+  _globals['_WRITEDURABILITY']._serialized_start=3895
+  _globals['_WRITEDURABILITY']._serialized_end=4053
+  _globals['_INDEXSTATE']._serialized_start=4055
+  _globals['_INDEXSTATE']._serialized_end=4168
   _globals['_STATUSREQUEST']._serialized_start=20
   _globals['_STATUSREQUEST']._serialized_end=35
   _globals['_STATUSRESPONSE']._serialized_start=37
@@ -71,14 +81,44 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_SEARCHRESULT']._serialized_end=1076
   _globals['_SEARCHRESPONSE']._serialized_start=1078
   _globals['_SEARCHRESPONSE']._serialized_end=1131
-  _globals['_SEARCHQUERY']._serialized_start=1133
-  _globals['_SEARCHQUERY']._serialized_end=1183
-  _globals['_BATCHSEARCHREQUEST']._serialized_start=1185
-  _globals['_BATCHSEARCHREQUEST']._serialized_end=1276
-  _globals['_QUERYRESULTS']._serialized_start=1278
-  _globals['_QUERYRESULTS']._serialized_end=1326
-  _globals['_BATCHSEARCHRESPONSE']._serialized_start=1328
-  _globals['_BATCHSEARCHRESPONSE']._serialized_end=1386
-  _globals['_BARQ']._serialized_start=1700
-  _globals['_BARQ']._serialized_end=2289
+  _globals['_GETMETRICSREQUEST']._serialized_start=1133
+  _globals['_GETMETRICSREQUEST']._serialized_end=1152
+  _globals['_METRICDEFINITION']._serialized_start=1154
+  _globals['_METRICDEFINITION']._serialized_end=1269
+  _globals['_TENANTMEMORYSAMPLE']._serialized_start=1271
+  _globals['_TENANTMEMORYSAMPLE']._serialized_end=1345
+  _globals['_COLLECTIONMEMORYSAMPLE']._serialized_start=1347
+  _globals['_COLLECTIONMEMORYSAMPLE']._serialized_end=1445
+  _globals['_COLLECTIONWALSAMPLE']._serialized_start=1447
+  _globals['_COLLECTIONWALSAMPLE']._serialized_end=1536
+  _globals['_COLLECTIONSEGMENTFILESAMPLE']._serialized_start=1538
+  _globals['_COLLECTIONSEGMENTFILESAMPLE']._serialized_end=1653
+  _globals['_COLLECTIONSEGMENTSTATESAMPLE']._serialized_start=1655
+  _globals['_COLLECTIONSEGMENTSTATESAMPLE']._serialized_end=1772
+  _globals['_STORAGEMETRICS']._serialized_start=1775
+  _globals['_STORAGEMETRICS']._serialized_end=2254
+  _globals['_GETMETRICSRESPONSE']._serialized_start=2256
+  _globals['_GETMETRICSRESPONSE']._serialized_end=2360
+  _globals['_GETCLUSTERSTATUSREQUEST']._serialized_start=2362
+  _globals['_GETCLUSTERSTATUSREQUEST']._serialized_end=2387
+  _globals['_GETCLUSTERSTATUSRESPONSE']._serialized_start=2390
+  _globals['_GETCLUSTERSTATUSRESPONSE']._serialized_end=2556
+  _globals['_GETSEGMENTINFOREQUEST']._serialized_start=2558
+  _globals['_GETSEGMENTINFOREQUEST']._serialized_end=2601
+  _globals['_SEGMENTCOUNT']._serialized_start=2603
+  _globals['_SEGMENTCOUNT']._serialized_end=2667
+  _globals['_COLLECTIONSEGMENTINFO']._serialized_start=2670
+  _globals['_COLLECTIONSEGMENTINFO']._serialized_end=2855
+  _globals['_GETSEGMENTINFORESPONSE']._serialized_start=2857
+  _globals['_GETSEGMENTINFORESPONSE']._serialized_end=2931
+  _globals['_SEARCHQUERY']._serialized_start=2933
+  _globals['_SEARCHQUERY']._serialized_end=2983
+  _globals['_BATCHSEARCHREQUEST']._serialized_start=2985
+  _globals['_BATCHSEARCHREQUEST']._serialized_end=3076
+  _globals['_QUERYRESULTS']._serialized_start=3078
+  _globals['_QUERYRESULTS']._serialized_end=3126
+  _globals['_BATCHSEARCHRESPONSE']._serialized_start=3128
+  _globals['_BATCHSEARCHRESPONSE']._serialized_end=3186
+  _globals['_BARQ']._serialized_start=4171
+  _globals['_BARQ']._serialized_end=4985
 # @@protoc_insertion_point(module_scope)

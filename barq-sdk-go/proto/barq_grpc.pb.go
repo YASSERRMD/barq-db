@@ -25,6 +25,9 @@ const (
 	Barq_InsertAsync_FullMethodName      = "/barq.Barq/InsertAsync"
 	Barq_GetInsertStatus_FullMethodName  = "/barq.Barq/GetInsertStatus"
 	Barq_Search_FullMethodName           = "/barq.Barq/Search"
+	Barq_GetMetrics_FullMethodName       = "/barq.Barq/GetMetrics"
+	Barq_GetClusterStatus_FullMethodName = "/barq.Barq/GetClusterStatus"
+	Barq_GetSegmentInfo_FullMethodName   = "/barq.Barq/GetSegmentInfo"
 	Barq_Health_FullMethodName           = "/barq.Barq/Health"
 	Barq_InsertDocument_FullMethodName   = "/barq.Barq/InsertDocument"
 	Barq_BatchSearch_FullMethodName      = "/barq.Barq/BatchSearch"
@@ -40,6 +43,9 @@ type BarqClient interface {
 	InsertAsync(ctx context.Context, in *InsertRequest, opts ...grpc.CallOption) (*InsertAsyncResponse, error)
 	GetInsertStatus(ctx context.Context, in *GetInsertStatusRequest, opts ...grpc.CallOption) (*GetInsertStatusResponse, error)
 	Search(ctx context.Context, in *SearchRequest, opts ...grpc.CallOption) (*SearchResponse, error)
+	GetMetrics(ctx context.Context, in *GetMetricsRequest, opts ...grpc.CallOption) (*GetMetricsResponse, error)
+	GetClusterStatus(ctx context.Context, in *GetClusterStatusRequest, opts ...grpc.CallOption) (*GetClusterStatusResponse, error)
+	GetSegmentInfo(ctx context.Context, in *GetSegmentInfoRequest, opts ...grpc.CallOption) (*GetSegmentInfoResponse, error)
 	// Legacy RPCs kept temporarily while SDKs migrate to the canonical contract.
 	Health(ctx context.Context, in *HealthRequest, opts ...grpc.CallOption) (*HealthResponse, error)
 	InsertDocument(ctx context.Context, in *InsertDocumentRequest, opts ...grpc.CallOption) (*InsertDocumentResponse, error)
@@ -114,6 +120,36 @@ func (c *barqClient) Search(ctx context.Context, in *SearchRequest, opts ...grpc
 	return out, nil
 }
 
+func (c *barqClient) GetMetrics(ctx context.Context, in *GetMetricsRequest, opts ...grpc.CallOption) (*GetMetricsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetMetricsResponse)
+	err := c.cc.Invoke(ctx, Barq_GetMetrics_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *barqClient) GetClusterStatus(ctx context.Context, in *GetClusterStatusRequest, opts ...grpc.CallOption) (*GetClusterStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetClusterStatusResponse)
+	err := c.cc.Invoke(ctx, Barq_GetClusterStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *barqClient) GetSegmentInfo(ctx context.Context, in *GetSegmentInfoRequest, opts ...grpc.CallOption) (*GetSegmentInfoResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetSegmentInfoResponse)
+	err := c.cc.Invoke(ctx, Barq_GetSegmentInfo_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *barqClient) Health(ctx context.Context, in *HealthRequest, opts ...grpc.CallOption) (*HealthResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(HealthResponse)
@@ -154,6 +190,9 @@ type BarqServer interface {
 	InsertAsync(context.Context, *InsertRequest) (*InsertAsyncResponse, error)
 	GetInsertStatus(context.Context, *GetInsertStatusRequest) (*GetInsertStatusResponse, error)
 	Search(context.Context, *SearchRequest) (*SearchResponse, error)
+	GetMetrics(context.Context, *GetMetricsRequest) (*GetMetricsResponse, error)
+	GetClusterStatus(context.Context, *GetClusterStatusRequest) (*GetClusterStatusResponse, error)
+	GetSegmentInfo(context.Context, *GetSegmentInfoRequest) (*GetSegmentInfoResponse, error)
 	// Legacy RPCs kept temporarily while SDKs migrate to the canonical contract.
 	Health(context.Context, *HealthRequest) (*HealthResponse, error)
 	InsertDocument(context.Context, *InsertDocumentRequest) (*InsertDocumentResponse, error)
@@ -185,6 +224,15 @@ func (UnimplementedBarqServer) GetInsertStatus(context.Context, *GetInsertStatus
 }
 func (UnimplementedBarqServer) Search(context.Context, *SearchRequest) (*SearchResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Search not implemented")
+}
+func (UnimplementedBarqServer) GetMetrics(context.Context, *GetMetricsRequest) (*GetMetricsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetMetrics not implemented")
+}
+func (UnimplementedBarqServer) GetClusterStatus(context.Context, *GetClusterStatusRequest) (*GetClusterStatusResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetClusterStatus not implemented")
+}
+func (UnimplementedBarqServer) GetSegmentInfo(context.Context, *GetSegmentInfoRequest) (*GetSegmentInfoResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetSegmentInfo not implemented")
 }
 func (UnimplementedBarqServer) Health(context.Context, *HealthRequest) (*HealthResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Health not implemented")
@@ -324,6 +372,60 @@ func _Barq_Search_Handler(srv interface{}, ctx context.Context, dec func(interfa
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Barq_GetMetrics_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetMetricsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BarqServer).GetMetrics(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Barq_GetMetrics_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BarqServer).GetMetrics(ctx, req.(*GetMetricsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Barq_GetClusterStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetClusterStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BarqServer).GetClusterStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Barq_GetClusterStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BarqServer).GetClusterStatus(ctx, req.(*GetClusterStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Barq_GetSegmentInfo_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSegmentInfoRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BarqServer).GetSegmentInfo(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Barq_GetSegmentInfo_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BarqServer).GetSegmentInfo(ctx, req.(*GetSegmentInfoRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Barq_Health_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(HealthRequest)
 	if err := dec(in); err != nil {
@@ -408,6 +510,18 @@ var Barq_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Search",
 			Handler:    _Barq_Search_Handler,
+		},
+		{
+			MethodName: "GetMetrics",
+			Handler:    _Barq_GetMetrics_Handler,
+		},
+		{
+			MethodName: "GetClusterStatus",
+			Handler:    _Barq_GetClusterStatus_Handler,
+		},
+		{
+			MethodName: "GetSegmentInfo",
+			Handler:    _Barq_GetSegmentInfo_Handler,
 		},
 		{
 			MethodName: "Health",
