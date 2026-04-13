@@ -530,6 +530,124 @@ pub struct HybridSearchResult {
     pub score: f32,
 }
 
+/// High-level shape for a planned query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryVariant {
+    /// Vector similarity search without a metadata filter.
+    VectorOnly,
+    /// Text search without a metadata filter.
+    TextOnly,
+    /// Hybrid search that blends text and vector scoring.
+    Hybrid,
+    /// Vector similarity search restricted by a metadata filter.
+    FilteredVector,
+    /// Text search restricted by a metadata filter.
+    FilteredText,
+    /// Hybrid search that blends text and vector scoring with a metadata filter.
+    FilteredHybrid,
+}
+
+impl QueryVariant {
+    /// Returns whether the planned query reads vector scores.
+    pub fn uses_vector(self) -> bool {
+        matches!(
+            self,
+            Self::VectorOnly | Self::Hybrid | Self::FilteredVector | Self::FilteredHybrid
+        )
+    }
+
+    /// Returns whether the planned query reads text scores.
+    pub fn uses_text(self) -> bool {
+        matches!(
+            self,
+            Self::TextOnly | Self::Hybrid | Self::FilteredText | Self::FilteredHybrid
+        )
+    }
+
+    /// Returns whether the planned query carries a metadata filter.
+    pub fn has_filter(self) -> bool {
+        matches!(
+            self,
+            Self::FilteredVector | Self::FilteredText | Self::FilteredHybrid
+        )
+    }
+}
+
+/// Planned query shape and validation output for collection search execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueryPlan {
+    variant: QueryVariant,
+    top_k: usize,
+}
+
+impl QueryPlan {
+    /// Creates a query plan from the provided vector/text inputs and optional filter.
+    pub fn new(
+        vector: Option<&[f32]>,
+        text: Option<&str>,
+        filter: Option<&Filter>,
+        top_k: usize,
+    ) -> Result<Self, CatalogError> {
+        if top_k == 0 {
+            return Err(CatalogError::InvalidSchema(
+                "top_k must be positive".to_string(),
+            ));
+        }
+
+        let has_vector = match vector {
+            Some(values) if values.is_empty() => {
+                return Err(CatalogError::InvalidSchema(
+                    "vector query cannot be empty".to_string(),
+                ))
+            }
+            Some(_) => true,
+            None => false,
+        };
+        let has_text = text.map(|value| !value.trim().is_empty()).unwrap_or(false);
+
+        let variant = match (has_vector, has_text, filter.is_some()) {
+            (true, false, false) => QueryVariant::VectorOnly,
+            (false, true, false) => QueryVariant::TextOnly,
+            (true, true, false) => QueryVariant::Hybrid,
+            (true, false, true) => QueryVariant::FilteredVector,
+            (false, true, true) => QueryVariant::FilteredText,
+            (true, true, true) => QueryVariant::FilteredHybrid,
+            (false, false, _) => {
+                return Err(CatalogError::InvalidSchema(
+                    "query plan requires vector and/or text input".to_string(),
+                ))
+            }
+        };
+
+        Ok(Self { variant, top_k })
+    }
+
+    /// Returns the planned high-level query variant.
+    pub fn variant(self) -> QueryVariant {
+        self.variant
+    }
+
+    /// Returns the requested top-k for the plan.
+    pub fn top_k(self) -> usize {
+        self.top_k
+    }
+
+    /// Returns whether the plan reads vector scores.
+    pub fn uses_vector(self) -> bool {
+        self.variant.uses_vector()
+    }
+
+    /// Returns whether the plan reads text scores.
+    pub fn uses_text(self) -> bool {
+        self.variant.uses_text()
+    }
+
+    /// Returns whether the plan applies a metadata filter.
+    pub fn has_filter(self) -> bool {
+        self.variant.has_filter()
+    }
+}
+
 impl CollectionSchema {
     pub fn validate(&self) -> Result<(), CatalogError> {
         if self.name.trim().is_empty() {
@@ -838,6 +956,8 @@ impl Collection {
         top_k: usize,
         filter: Option<&Filter>,
     ) -> Result<Vec<SearchResult>, CatalogError> {
+        let plan = QueryPlan::new(Some(vector), None, filter, top_k)?;
+        let top_k = plan.top_k();
         if let Some(f) = filter {
             self.validate_filter(f)?;
         }
@@ -990,6 +1110,8 @@ impl Collection {
         top_k: usize,
         filter: Option<&Filter>,
     ) -> Result<Vec<SearchResult>, CatalogError> {
+        let plan = QueryPlan::new(None, Some(query), filter, top_k)?;
+        let top_k = plan.top_k();
         if let Some(f) = filter {
             self.validate_filter(f)?;
         }
@@ -1022,6 +1144,8 @@ impl Collection {
         weights: Option<HybridWeights>,
         filter: Option<&Filter>,
     ) -> Result<Vec<HybridSearchResult>, CatalogError> {
+        let plan = QueryPlan::new(Some(vector), Some(query), filter, top_k)?;
+        let top_k = plan.top_k();
         if let Some(f) = filter {
             self.validate_filter(f)?;
         }
@@ -1029,12 +1153,6 @@ impl Collection {
         self.text_index
             .as_ref()
             .ok_or_else(|| CatalogError::InvalidSchema("collection has no text index".into()))?;
-
-        if top_k == 0 {
-            return Err(CatalogError::InvalidSchema(
-                "top_k must be positive".to_string(),
-            ));
-        }
 
         let (bm25_results, vector_results) = rayon::join(
             || self.search_text_with_filter(query, top_k * 2, filter),
@@ -1666,6 +1784,69 @@ mod tests {
         let results = collection.search_text("rust guide", 2).unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].id, DocumentId::U64(2));
+    }
+
+    #[test]
+    fn query_plan_creates_common_query_variants() {
+        let vector = [0.1, 0.2, 0.3];
+        let filter = Filter::Exists {
+            field: "body".to_string(),
+        };
+        let cases = [
+            (
+                QueryPlan::new(Some(&vector), None, None, 3).unwrap(),
+                QueryVariant::VectorOnly,
+            ),
+            (
+                QueryPlan::new(None, Some("rust"), None, 3).unwrap(),
+                QueryVariant::TextOnly,
+            ),
+            (
+                QueryPlan::new(Some(&vector), Some("rust"), None, 3).unwrap(),
+                QueryVariant::Hybrid,
+            ),
+            (
+                QueryPlan::new(Some(&vector), None, Some(&filter), 3).unwrap(),
+                QueryVariant::FilteredVector,
+            ),
+            (
+                QueryPlan::new(None, Some("rust"), Some(&filter), 3).unwrap(),
+                QueryVariant::FilteredText,
+            ),
+            (
+                QueryPlan::new(Some(&vector), Some("rust"), Some(&filter), 3).unwrap(),
+                QueryVariant::FilteredHybrid,
+            ),
+        ];
+
+        for (plan, expected) in cases {
+            assert_eq!(plan.variant(), expected);
+            assert_eq!(plan.has_filter(), expected.has_filter());
+            assert_eq!(plan.uses_vector(), expected.uses_vector());
+            assert_eq!(plan.uses_text(), expected.uses_text());
+            assert_eq!(plan.top_k(), 3);
+        }
+    }
+
+    #[test]
+    fn query_plan_rejects_or_normalizes_invalid_combinations() {
+        let vector = [0.1, 0.2, 0.3];
+        let empty_vector: [f32; 0] = [];
+        let filter = Filter::Exists {
+            field: "body".to_string(),
+        };
+
+        let normalized = QueryPlan::new(Some(&vector), Some("   "), None, 5).unwrap();
+        assert_eq!(normalized.variant(), QueryVariant::VectorOnly);
+
+        let missing_query = QueryPlan::new(None, Some("   "), Some(&filter), 5).unwrap_err();
+        assert!(matches!(missing_query, CatalogError::InvalidSchema(_)));
+
+        let zero_top_k = QueryPlan::new(Some(&vector), None, None, 0).unwrap_err();
+        assert!(matches!(zero_top_k, CatalogError::InvalidSchema(_)));
+
+        let empty_vector_err = QueryPlan::new(Some(&empty_vector), None, None, 5).unwrap_err();
+        assert!(matches!(empty_vector_err, CatalogError::InvalidSchema(_)));
     }
 
     #[test]
