@@ -1,3 +1,4 @@
+use barq_metrics::{MetricDefinition, MetricKind};
 use barq_core::{CollectionSchema, Document, FieldType, PayloadValue, TenantId};
 use barq_storage::{Storage, StorageError};
 use std::collections::VecDeque;
@@ -40,6 +41,37 @@ impl IngestionConfig {
             backpressure_policy: parse_backpressure_policy("BARQ_INGEST_BACKPRESSURE_POLICY"),
         }
     }
+}
+
+pub(crate) fn ingestion_metric_definitions() -> Vec<MetricDefinition> {
+    vec![
+        MetricDefinition::new(
+            "ingestion_batch_count_total",
+            MetricKind::Counter,
+            "Total number of ingestion batches flushed by the background worker",
+        ),
+        MetricDefinition::new(
+            "ingestion_lag_seconds",
+            MetricKind::Gauge,
+            "Observed lag between enqueue time and batch flush for the oldest request",
+        )
+        .with_unit("seconds"),
+        MetricDefinition::new(
+            "ingestion_queue_size",
+            MetricKind::Gauge,
+            "Current number of queued ingestion requests awaiting flush",
+        ),
+        MetricDefinition::new(
+            "ingestion_requests_failed_total",
+            MetricKind::Counter,
+            "Total number of ingestion requests that failed during background flush",
+        ),
+        MetricDefinition::new(
+            "ingestion_requests_succeeded_total",
+            MetricKind::Counter,
+            "Total number of ingestion requests successfully flushed by the worker",
+        ),
+    ]
 }
 
 /// Saturation policy for the ingestion queue.
@@ -581,8 +613,8 @@ impl PauseBeforeDequeue {
 #[cfg(test)]
 mod tests {
     use super::{
-        validate_insert_document, BackpressurePolicy, IngestionConfig, IngestionQueue,
-        IngestionMetricsSnapshot,
+        ingestion_metric_definitions, validate_insert_document, BackpressurePolicy,
+        IngestionConfig, IngestionQueue, IngestionMetricsSnapshot,
         DEFAULT_INGEST_BATCH_SIZE, DEFAULT_INGEST_QUEUE_CAPACITY,
     };
     use crate::{
@@ -672,6 +704,30 @@ mod tests {
         while start.elapsed().as_micros() == 0 {
             std::hint::spin_loop();
         }
+    }
+
+    #[test]
+    fn ingestion_metric_catalog_registers_queue_lag_batch_and_outcome_metrics() {
+        let (_, state, _) = build_state(4, 2);
+        let definitions = state.metric_definitions();
+        let names: Vec<_> = definitions.into_iter().map(|definition| definition.name).collect();
+
+        assert_eq!(
+            names,
+            vec![
+                "ingestion_batch_count_total".to_string(),
+                "ingestion_lag_seconds".to_string(),
+                "ingestion_queue_size".to_string(),
+                "ingestion_requests_failed_total".to_string(),
+                "ingestion_requests_succeeded_total".to_string(),
+            ]
+        );
+
+        let static_names: Vec<_> = ingestion_metric_definitions()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+        assert_eq!(names, static_names);
     }
 
     #[test]

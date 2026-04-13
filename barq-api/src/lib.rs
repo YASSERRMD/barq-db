@@ -9,6 +9,9 @@ use axum::{
     routing::{delete, get, post, put},
     Json, Router,
 };
+#[cfg(test)]
+use barq_metrics::MetricDefinition;
+use barq_metrics::MetricsRegistry;
 use barq_bm25::Bm25Config;
 pub use barq_cluster::{ClusterConfig, ClusterError, ClusterRouter};
 use barq_core::{
@@ -18,8 +21,8 @@ use barq_core::{
 use barq_index::{DistanceMetric, DocumentId, DocumentIdError, IndexType};
 use barq_storage::{SegmentState, Storage, StorageError, TenantQuota, TenantUsageReport};
 use ingest::{
-    validate_insert_document, IngestionConfig, IngestionInsertRequest, IngestionService,
-    QueueAdmissionError,
+    ingestion_metric_definitions, validate_insert_document, IngestionConfig,
+    IngestionInsertRequest, IngestionService, QueueAdmissionError,
 };
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use serde::{Deserialize, Serialize};
@@ -44,6 +47,8 @@ pub struct AppState {
     pub metrics: PrometheusHandle,
     pub cluster: ClusterRouter,
     ingestion: Arc<IngestionService>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    metric_registry: MetricsRegistry,
 }
 
 impl AppState {
@@ -58,13 +63,20 @@ impl AppState {
         config: IngestionConfig,
     ) -> Self {
         let storage = Arc::new(Mutex::new(storage));
+        let metric_registry = init_metric_registry();
         Self {
             ingestion: IngestionService::new(storage.clone(), config),
             storage,
             auth,
             metrics: init_metrics_recorder(),
             cluster,
+            metric_registry,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn metric_definitions(&self) -> Vec<MetricDefinition> {
+        self.metric_registry.definitions()
     }
 }
 
@@ -88,6 +100,14 @@ fn init_metrics_recorder() -> PrometheusHandle {
                 .expect("failed to install metrics recorder")
         })
         .clone()
+}
+
+fn init_metric_registry() -> MetricsRegistry {
+    let registry = MetricsRegistry::new();
+    registry
+        .register_all(ingestion_metric_definitions())
+        .expect("failed to register ingestion metrics");
+    registry
 }
 
 fn audit_log(action: &str, identity: &ApiIdentity, details: &str) {
