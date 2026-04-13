@@ -15,7 +15,7 @@
 While many vector databases exist, Barq focuses on:
 1.  **Operational Simplicity**: Easy to deploy and manage with our Kubernetes Operator.
 2.  **Cost Efficiency**: Tiering lets you store PB-scale datasets without PB-scale SSD costs.
-3.  **Developer Experience**: Typed SDKs for Python, TypeScript, Go, and Rust.
+3.  **Developer Experience**: Typed SDKs for Python, TypeScript, Go, and Rust, aligned to the canonical gRPC contract in `proto/barq.proto`.
 
 ## Getting Started
 

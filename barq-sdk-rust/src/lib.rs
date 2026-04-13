@@ -5,7 +5,7 @@ use std::time::Duration;
 pub use barq_core::{CollectionSchema, DistanceMetric, DocumentId, Filter, HybridWeights, PayloadValue};
 use tonic::transport::Channel;
 use barq_proto::barq::barq_client::BarqClient as TonicBarqClient;
-use barq_proto::barq::{CreateCollectionRequest, InsertDocumentRequest, SearchRequest, HealthRequest};
+use barq_proto::barq::{CreateCollectionRequest, InsertRequest, SearchRequest, StatusRequest};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BarqError {
@@ -252,9 +252,13 @@ impl BarqGrpcClient {
         Ok(Self { client })
     }
 
-    pub async fn health(&mut self) -> Result<bool> {
-        let response = self.client.health(HealthRequest {}).await?;
+    pub async fn status(&mut self) -> Result<bool> {
+        let response = self.client.status(StatusRequest {}).await?;
         Ok(response.into_inner().ok)
+    }
+
+    pub async fn health(&mut self) -> Result<bool> {
+        self.status().await
     }
 
     pub async fn create_collection(
@@ -277,7 +281,7 @@ impl BarqGrpcClient {
         Ok(())
     }
 
-    pub async fn insert_document(
+    pub async fn insert(
         &mut self,
         collection: &str,
         id: impl Into<DocumentId>,
@@ -289,13 +293,23 @@ impl BarqGrpcClient {
             DocumentId::Str(s) => s,
         };
         
-        self.client.insert_document(InsertDocumentRequest {
+        self.client.insert(InsertRequest {
             collection: collection.to_string(),
             id: id_str,
             vector,
             payload_json: payload.to_string(),
         }).await?;
         Ok(())
+    }
+
+    pub async fn insert_document(
+        &mut self,
+        collection: &str,
+        id: impl Into<DocumentId>,
+        vector: Vec<f32>,
+        payload: serde_json::Value,
+    ) -> Result<()> {
+        self.insert(collection, id, vector, payload).await
     }
     
     pub async fn search(

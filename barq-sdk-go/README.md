@@ -15,6 +15,13 @@ The official Go SDK for [Barq DB](https://github.com/YASSERRMD/barq-db) - a high
 go get github.com/YASSERRMD/barq-db/barq-sdk-go
 ```
 
+## API Contract
+
+`proto/barq.proto` in the repository root is the canonical Barq API contract.
+
+- `GrpcClient` follows that gRPC surface directly.
+- `Client` remains available for compatibility with the current HTTP endpoints.
+
 ---
 
 ## Quick Start
@@ -80,7 +87,7 @@ func main() {
 
 ---
 
-## HTTP Client
+## Compatibility HTTP Client
 
 ### Initialization
 
@@ -232,15 +239,15 @@ if err != nil {
 }
 defer client.Close()
 
-// Health check
-ok, err := client.Health(ctx)
+// Status check
+ok, err := client.Status(ctx)
 fmt.Println("Healthy:", ok)
 
 // Create collection
 err = client.CreateCollection(ctx, "vectors", 384, "L2")
 
 // Insert document
-err = client.InsertDocument(ctx, "vectors", "doc-001", vector, map[string]string{
+err = client.Insert(ctx, "vectors", "doc-001", vector, map[string]string{
 	"label": "example",
 })
 
@@ -308,8 +315,10 @@ type SearchResult struct {
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
+| `Status` | `(ctx) (bool, error)` | Canonical status RPC |
 | `Health` | `(ctx) (bool, error)` | Health check |
 | `CreateCollection` | `(ctx, name, dimension, metric) error` | Create collection |
+| `Insert` | `(ctx, collection, id, vector, payload) error` | Canonical insert RPC |
 | `InsertDocument` | `(ctx, collection, id, vector, payload) error` | Insert |
 | `Search` | `(ctx, collection, vector, topK) ([]SearchResult, error)` | Search |
 | `Close` | `() error` | Close connection |

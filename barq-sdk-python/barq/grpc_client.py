@@ -9,15 +9,18 @@ class GrpcClient:
     def __init__(self, target: str):
         self.channel = grpc.insecure_channel(target)
         self.stub = barq_pb2_grpc.BarqStub(self.channel)
-        
-    def health(self) -> bool:
-        response = self.stub.Health(barq_pb2.HealthRequest())
+
+    def status(self) -> bool:
+        response = self.stub.Status(barq_pb2.StatusRequest())
         return response.ok
-        
+
+    def health(self) -> bool:
+        return self.status()
+
     def create_collection(
-        self, 
-        name: str, 
-        dimension: int, 
+        self,
+        name: str,
+        dimension: int,
         metric: str = "L2"
     ):
         req = barq_pb2.CreateCollectionRequest(
@@ -27,7 +30,7 @@ class GrpcClient:
         )
         self.stub.CreateCollection(req)
         
-    def insert_document(
+    def insert(
         self,
         collection: str,
         id: Any,
@@ -35,14 +38,23 @@ class GrpcClient:
         payload: Optional[Dict] = None
     ):
         payload_json = json.dumps(payload) if payload else "{}"
-        req = barq_pb2.InsertDocumentRequest(
+        req = barq_pb2.InsertRequest(
             collection=collection,
             id=str(id),
             vector=vector,
             payload_json=payload_json
         )
-        self.stub.InsertDocument(req)
-        
+        self.stub.Insert(req)
+
+    def insert_document(
+        self,
+        collection: str,
+        id: Any,
+        vector: List[float],
+        payload: Optional[Dict] = None
+    ):
+        self.insert(collection, id, vector, payload)
+
     def search(
         self,
         collection: str,

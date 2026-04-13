@@ -35,11 +35,11 @@ export declare class Collection {
 }
 export declare class GrpcClient {
     private client;
-    private packageDefinition;
-    private protoDescriptor;
-    constructor(address: string, protoPath: string);
+    constructor(address: string, protoPath?: string);
+    status(): Promise<boolean>;
     health(): Promise<boolean>;
     createCollection(name: string, dimension: number, metric?: string): Promise<void>;
+    insert(collection: string, id: string | number, vector: number[], payload?: any): Promise<void>;
     insertDocument(collection: string, id: string | number, vector: number[], payload?: any): Promise<void>;
     search(collection: string, vector: number[], topK?: number): Promise<SearchResult[]>;
 }
