@@ -4151,6 +4151,60 @@ mod tests {
             }));
     }
 
+    #[test]
+    fn metrics_report_json_reloads_persisted_wal_and_segment_state_after_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let tenant = TenantId::default();
+        {
+            let mut storage = Storage::open(root.path()).unwrap();
+            storage
+                .create_collection(sample_schema("restart_metrics"))
+                .unwrap();
+            storage
+                .insert("restart_metrics", sample_document(1), false)
+                .unwrap();
+            storage
+                .flush_wal_to_segment(&tenant, "restart_metrics")
+                .unwrap();
+            storage
+                .insert("restart_metrics", sample_document(2), false)
+                .unwrap();
+        }
+
+        let reopened = Storage::open(root.path()).unwrap();
+        let report = reopened.metrics_report_json();
+
+        assert!(report["collection_wal"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|sample| {
+                sample["tenant"] == serde_json::json!("default")
+                    && sample["collection"] == serde_json::json!("restart_metrics")
+                    && sample["entries"].as_u64().unwrap() >= 1
+            }));
+        assert!(report["collection_segment_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|sample| {
+                sample["tenant"] == serde_json::json!("default")
+                    && sample["collection"] == serde_json::json!("restart_metrics")
+                    && sample["state"] == serde_json::json!("Sealed")
+                    && sample["count"].as_u64().unwrap() >= 1
+            }));
+        assert!(report["collection_segment_states"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|sample| {
+                sample["tenant"] == serde_json::json!("default")
+                    && sample["collection"] == serde_json::json!("restart_metrics")
+                    && sample["state"] == serde_json::json!("Growing")
+                    && sample["active"] == serde_json::json!(true)
+            }));
+    }
+
     proptest! {
         #[test]
         fn compaction_property_latest_write_wins(ops in proptest::collection::vec((1u8..16u8, any::<bool>()), 1..64)) {
