@@ -47,6 +47,35 @@ function compatDocumentId(value) {
     }
     return { Str: value };
 }
+function grpcInsertOptions(options) {
+    if (!options || options.waitForCommit === undefined) {
+        return undefined;
+    }
+    return {
+        waitForCommit: options.waitForCommit,
+    };
+}
+function grpcSearchOptions(options) {
+    if (!options || (options.consistency === undefined && options.allowFallback === undefined)) {
+        return undefined;
+    }
+    const consistency = (() => {
+        switch (options.consistency) {
+            case "primary":
+                return "CONSISTENCY_PRIMARY";
+            case "followers":
+                return "CONSISTENCY_FOLLOWERS";
+            case "any":
+                return "CONSISTENCY_ANY";
+            default:
+                return "CONSISTENCY_UNSPECIFIED";
+        }
+    })();
+    return {
+        consistency,
+        allowFallback: options.allowFallback ?? true,
+    };
+}
 function grpcTargetFromBaseUrl(baseUrl) {
     const override = process.env.BARQ_GRPC_ADDR;
     if (override) {
@@ -119,18 +148,21 @@ class Collection {
         this.client = client;
         this.name = name;
     }
-    async insert(id, vector, payload) {
+    async insert(id, vector, payload, options) {
         ensureSupportedApiVersion();
-        await this.client.grpc().insert(this.name, id, vector, payload ?? {});
+        await this.client.grpc().insert(this.name, id, vector, payload ?? {}, options);
     }
-    async search(vector, query, topK = 10, filter) {
+    async search(vector, query, topK = 10, filter, options) {
         ensureSupportedApiVersion();
         if (vector && !query && !filter) {
-            const results = await this.client.grpc().search(this.name, vector, topK);
+            const results = await this.client.grpc().search(this.name, vector, topK, options);
             return results.map((result) => ({
                 id: compatDocumentId(String(result.id)),
                 score: result.score,
             }));
+        }
+        if (options) {
+            throw new Error("advanced search options are only supported for vector-only gRPC search");
         }
         let path = `/collections/${this.name}/search`;
         if (vector && query)
@@ -194,12 +226,13 @@ class GrpcClient {
             });
         });
     }
-    insert(collection, id, vector, payload = {}) {
+    insert(collection, id, vector, payload = {}, options) {
         const request = {
             collection,
             id: String(id),
             vector,
             payloadJson: JSON.stringify(payload),
+            options: grpcInsertOptions(options),
         };
         return new Promise((resolve, reject) => {
             this.client.insert(request, this.metadata, (err) => {
@@ -209,15 +242,16 @@ class GrpcClient {
             });
         });
     }
-    insertDocument(collection, id, vector, payload = {}) {
-        return this.insert(collection, id, vector, payload);
+    insertDocument(collection, id, vector, payload = {}, options) {
+        return this.insert(collection, id, vector, payload, options);
     }
-    search(collection, vector, topK = 10) {
+    search(collection, vector, topK = 10, options) {
         return new Promise((resolve, reject) => {
             this.client.search({
                 collection,
                 vector,
-                topK
+                topK,
+                options: grpcSearchOptions(options),
             }, this.metadata, (err, response) => {
                 if (err)
                     return reject(err);

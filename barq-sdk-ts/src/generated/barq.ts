@@ -1,5 +1,5 @@
 import type * as grpc from '@grpc/grpc-js';
-import type { MessageTypeDefinition } from '@grpc/proto-loader';
+import type { EnumTypeDefinition, MessageTypeDefinition } from '@grpc/proto-loader';
 
 import type { BarqClient as _barq_BarqClient, BarqDefinition as _barq_BarqDefinition } from './barq/Barq';
 
@@ -12,15 +12,18 @@ export interface ProtoGrpcType {
     Barq: SubtypeConstructor<typeof grpc.Client, _barq_BarqClient> & { service: _barq_BarqDefinition }
     BatchSearchRequest: MessageTypeDefinition
     BatchSearchResponse: MessageTypeDefinition
+    Consistency: EnumTypeDefinition
     CreateCollectionRequest: MessageTypeDefinition
     CreateCollectionResponse: MessageTypeDefinition
     HealthRequest: MessageTypeDefinition
     HealthResponse: MessageTypeDefinition
     InsertDocumentRequest: MessageTypeDefinition
     InsertDocumentResponse: MessageTypeDefinition
+    InsertOptions: MessageTypeDefinition
     InsertRequest: MessageTypeDefinition
     InsertResponse: MessageTypeDefinition
     QueryResults: MessageTypeDefinition
+    SearchOptions: MessageTypeDefinition
     SearchQuery: MessageTypeDefinition
     SearchRequest: MessageTypeDefinition
     SearchResponse: MessageTypeDefinition

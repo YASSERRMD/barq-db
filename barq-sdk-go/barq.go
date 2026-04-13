@@ -119,6 +119,11 @@ type InsertRequest struct {
 	ID      interface{}     `json:"id"`
 	Vector  []float32       `json:"vector"`
 	Payload json.RawMessage `json:"payload,omitempty"`
+	Options *InsertOptions  `json:"options,omitempty"`
+}
+
+type InsertOptions struct {
+	WaitForCommit *bool
 }
 
 func (c *Client) Insert(ctx context.Context, collection string, req InsertRequest) error {
@@ -130,14 +135,35 @@ func (c *Client) Insert(ctx context.Context, collection string, req InsertReques
 		return err
 	}
 	defer grpcClient.Close()
-	return grpcClient.Insert(ctx, collection, req.ID, req.Vector, rawPayloadToAny(req.Payload))
+	return grpcClient.InsertWithOptions(
+		ctx,
+		collection,
+		req.ID,
+		req.Vector,
+		rawPayloadToAny(req.Payload),
+		req.Options,
+	)
 }
 
 type SearchRequest struct {
-	Vector []float32   `json:"vector,omitempty"`
-	Query  string      `json:"query,omitempty"`
-	TopK   int         `json:"top_k"`
-	Filter interface{} `json:"filter,omitempty"`
+	Vector  []float32      `json:"vector,omitempty"`
+	Query   string         `json:"query,omitempty"`
+	TopK    int            `json:"top_k"`
+	Filter  interface{}    `json:"filter,omitempty"`
+	Options *SearchOptions `json:"options,omitempty"`
+}
+
+type Consistency string
+
+const (
+	ConsistencyPrimary   Consistency = "primary"
+	ConsistencyFollowers Consistency = "followers"
+	ConsistencyAny       Consistency = "any"
+)
+
+type SearchOptions struct {
+	Consistency   *Consistency
+	AllowFallback *bool
 }
 
 type SearchResponse struct {
@@ -160,11 +186,15 @@ func (c *Client) Search(ctx context.Context, collection string, req SearchReques
 		}
 		defer grpcClient.Close()
 
-		results, err := grpcClient.Search(ctx, collection, req.Vector, req.TopK)
+		results, err := grpcClient.SearchWithOptions(ctx, collection, req.Vector, req.TopK, req.Options)
 		if err != nil {
 			return nil, err
 		}
 		return results, nil
+	}
+
+	if req.Options != nil {
+		return nil, errors.New("advanced search options are only supported for vector-only gRPC search")
 	}
 
 	path := fmt.Sprintf("/collections/%s/search", collection)
@@ -240,6 +270,10 @@ func (c *GrpcClient) CreateCollection(ctx context.Context, name string, dimensio
 }
 
 func (c *GrpcClient) Insert(ctx context.Context, collection string, id interface{}, vector []float32, payload interface{}) error {
+	return c.InsertWithOptions(ctx, collection, id, vector, payload, nil)
+}
+
+func (c *GrpcClient) InsertWithOptions(ctx context.Context, collection string, id interface{}, vector []float32, payload interface{}, options *InsertOptions) error {
 	idStr := fmt.Sprintf("%v", id)
 
 	payloadBytes, err := json.Marshal(payload)
@@ -252,6 +286,7 @@ func (c *GrpcClient) Insert(ctx context.Context, collection string, id interface
 		Id:          idStr,
 		Vector:      vector,
 		PayloadJson: string(payloadBytes),
+		Options:     protoInsertOptions(options),
 	})
 	return err
 }
@@ -261,10 +296,15 @@ func (c *GrpcClient) InsertDocument(ctx context.Context, collection string, id i
 }
 
 func (c *GrpcClient) Search(ctx context.Context, collection string, vector []float32, topK int) ([]SearchResult, error) {
+	return c.SearchWithOptions(ctx, collection, vector, topK, nil)
+}
+
+func (c *GrpcClient) SearchWithOptions(ctx context.Context, collection string, vector []float32, topK int, options *SearchOptions) ([]SearchResult, error) {
 	resp, err := c.client.Search(c.authContext(ctx), &pb.SearchRequest{
 		Collection: collection,
 		Vector:     vector,
 		TopK:       uint32(topK),
+		Options:    protoSearchOptions(options),
 	})
 	if err != nil {
 		return nil, err
@@ -307,6 +347,45 @@ func (c *Client) grpcTarget() string {
 		return c.config.BaseURL
 	}
 	return fmt.Sprintf("%s:%d", host, 50051)
+}
+
+func protoInsertOptions(options *InsertOptions) *pb.InsertOptions {
+	if options == nil || options.WaitForCommit == nil {
+		return nil
+	}
+	return &pb.InsertOptions{
+		WaitForCommit: *options.WaitForCommit,
+	}
+}
+
+func protoSearchOptions(options *SearchOptions) *pb.SearchOptions {
+	if options == nil || (options.Consistency == nil && options.AllowFallback == nil) {
+		return nil
+	}
+
+	consistency := pb.Consistency_CONSISTENCY_UNSPECIFIED
+	if options.Consistency != nil {
+		switch *options.Consistency {
+		case ConsistencyPrimary:
+			consistency = pb.Consistency_CONSISTENCY_PRIMARY
+		case ConsistencyFollowers:
+			consistency = pb.Consistency_CONSISTENCY_FOLLOWERS
+		case ConsistencyAny:
+			consistency = pb.Consistency_CONSISTENCY_ANY
+		default:
+			consistency = pb.Consistency_CONSISTENCY_UNSPECIFIED
+		}
+	}
+
+	allowFallback := true
+	if options.AllowFallback != nil {
+		allowFallback = *options.AllowFallback
+	}
+
+	return &pb.SearchOptions{
+		Consistency:   consistency,
+		AllowFallback: allowFallback,
+	}
 }
 
 func rawPayloadToAny(payload json.RawMessage) interface{} {

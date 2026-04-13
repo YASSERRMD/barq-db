@@ -90,9 +90,10 @@ class BarqClient:
         id: Union[int, str],
         vector: List[float],
         payload: Optional[Dict] = None,
+        options: Optional[Dict[str, Any]] = None,
     ):
         _require_supported_api_version()
-        self._grpc().insert(collection, id, vector, payload or {})
+        self._grpc().insert(collection, id, vector, payload or {}, options=options)
         return {}
 
     def search(
@@ -102,10 +103,16 @@ class BarqClient:
         query: Optional[str] = None,
         top_k: int = 10,
         filter: Optional[Dict] = None,
+        options: Optional[Dict[str, Any]] = None,
     ) -> List[Dict]:
         _require_supported_api_version()
         if vector and not query and filter is None:
-            results = self._grpc().search(collection=collection, vector=vector, top_k=top_k)
+            results = self._grpc().search(
+                collection=collection,
+                vector=vector,
+                top_k=top_k,
+                options=options,
+            )
             return [
                 {
                     "id": _compat_document_id(str(result["id"])),
@@ -113,6 +120,11 @@ class BarqClient:
                 }
                 for result in results
             ]
+
+        if options:
+            raise ValueError(
+                "advanced search options are only supported for vector-only gRPC search"
+            )
 
         url = f"{self.base_url}/collections/{collection}/search"
         if vector and query:
