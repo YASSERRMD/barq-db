@@ -1164,7 +1164,9 @@ pub fn init_tracing() {
 mod tests {
     use super::*;
     use barq_admin::auth::{AuthMethod, JwtClaims, JwtVerifier};
-    use barq_cluster::{NodeConfig, NodeId, ReadPreference, ShardId, ShardPlacement};
+    use barq_cluster::{
+        ClusterMode, ClusterStatus, NodeConfig, NodeId, ReadPreference, ShardId, ShardPlacement,
+    };
     use barq_core::TenantId;
     use barq_index::DocumentId;
     use axum::http::{header, HeaderMap, HeaderValue};
@@ -1651,6 +1653,74 @@ mod tests {
             .get(reqwest::header::LOCATION)
             .expect("location header");
         assert_eq!(location.to_str().unwrap(), "http://node-1");
+
+        shutdown.send(()).unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn admin_status_reports_single_node_mode() {
+        init_tracing();
+        let dir = tempfile::tempdir().unwrap();
+        let cluster = ClusterRouter::from_config(ClusterConfig::single_node()).unwrap();
+
+        let (addr, shutdown, handle) = start_test_server_with_cluster(dir.path(), cluster).await;
+        let client = Client::new();
+
+        let response = client
+            .get(format!("http://{}/admin/status", addr))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        let status: ClusterStatus = response.json().await.unwrap();
+        assert_eq!(status.mode, ClusterMode::SingleNode);
+        assert_eq!(status.node_count, 1);
+        assert_eq!(status.shard_count, 1);
+
+        shutdown.send(()).unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn admin_status_reports_routed_replication_mode() {
+        init_tracing();
+        let dir = tempfile::tempdir().unwrap();
+
+        let cluster_config = ClusterConfig {
+            node_id: NodeId::new("node-0"),
+            nodes: vec![
+                NodeConfig {
+                    id: NodeId::new("node-0"),
+                    address: "http://node-0".into(),
+                },
+                NodeConfig {
+                    id: NodeId::new("node-1"),
+                    address: "http://node-1".into(),
+                },
+            ],
+            shard_count: 2,
+            replication_factor: 2,
+            read_preference: ReadPreference::Primary,
+            placements: HashMap::new(),
+        };
+        let cluster = ClusterRouter::from_config(cluster_config).unwrap();
+
+        let (addr, shutdown, handle) = start_test_server_with_cluster(dir.path(), cluster).await;
+        let client = Client::new();
+
+        let response = client
+            .get(format!("http://{}/admin/status", addr))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        let status: ClusterStatus = response.json().await.unwrap();
+        assert_eq!(status.mode, ClusterMode::RoutedReplication);
+        assert_eq!(status.node_count, 2);
+        assert_eq!(status.shard_count, 2);
 
         shutdown.send(()).unwrap();
         handle.await.unwrap().unwrap();

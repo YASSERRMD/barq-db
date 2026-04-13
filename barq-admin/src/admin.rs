@@ -27,6 +27,7 @@ pub fn admin_routes() -> Router<AdminState> {
         .route("/compact", post(admin_compact))
         .route("/index/rebuild", post(admin_index_rebuild))
         .route("/node/drain", post(admin_node_drain))
+        .route("/status", get(admin_status))
         .route("/topology", get(admin_topology))
 }
 
@@ -96,4 +97,12 @@ async fn admin_topology(
     state.auth.authenticate(&headers, ApiPermission::Admin, None)?;
     let placements = state.cluster.placements.clone();
     Ok(Json(serde_json::to_value(placements).unwrap()))
+}
+
+async fn admin_status(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state.auth.authenticate(&headers, ApiPermission::Admin, None)?;
+    Ok(Json(serde_json::to_value(state.cluster.status()).unwrap()))
 }

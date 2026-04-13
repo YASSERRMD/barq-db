@@ -20,6 +20,27 @@ impl NodeId {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct ShardId(pub u32);
 
+/// Honest capability mode for the current cluster deployment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClusterMode {
+    /// All reads and writes are handled on a single node.
+    SingleNode,
+    /// Requests are routed across static primaries/replicas without consensus.
+    RoutedReplication,
+    /// Writes are committed through a real consensus protocol.
+    ConsensusBacked,
+}
+
+/// Runtime status that describes the current cluster capability honestly.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ClusterStatus {
+    pub node_id: NodeId,
+    pub mode: ClusterMode,
+    pub shard_count: u32,
+    pub node_count: usize,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NodeConfig {
     pub id: NodeId,
@@ -205,6 +226,25 @@ impl ClusterRouter {
         let mut hasher = BuildHasherDefault::<ahash::AHasher>::default().build_hasher();
         hasher.write(key.as_bytes());
         ShardId((hasher.finish() % self.placements.len() as u64) as u32)
+    }
+
+    /// Return the honest capability mode for the configured cluster.
+    pub fn mode(&self) -> ClusterMode {
+        if self.node_addresses.len() <= 1 {
+            ClusterMode::SingleNode
+        } else {
+            ClusterMode::RoutedReplication
+        }
+    }
+
+    /// Return runtime status describing the currently supported cluster mode.
+    pub fn status(&self) -> ClusterStatus {
+        ClusterStatus {
+            node_id: self.node_id.clone(),
+            mode: self.mode(),
+            shard_count: self.placements.len() as u32,
+            node_count: self.node_addresses.len(),
+        }
     }
 
     /// Determine a shard using a tenant/document composite key, ensuring multi-tenant
@@ -723,5 +763,23 @@ mod tests {
         );
         assert_eq!(admin.config.placements.len(), updated.len());
         assert!(admin.config.placements.contains_key(&ShardId(2)));
+    }
+
+    #[test]
+    fn cluster_mode_serializes_and_deserializes() {
+        let encoded = serde_json::to_string(&ClusterMode::RoutedReplication).unwrap();
+        assert_eq!(encoded, "\"routed_replication\"");
+
+        let decoded: ClusterMode = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, ClusterMode::RoutedReplication);
+    }
+
+    #[test]
+    fn cluster_status_reports_honest_mode() {
+        let router = ClusterRouter::from_config(test_config()).unwrap();
+        let status = router.status();
+        assert_eq!(status.mode, ClusterMode::RoutedReplication);
+        assert_eq!(status.node_count, 3);
+        assert_eq!(status.shard_count, 4);
     }
 }
