@@ -49,6 +49,11 @@ class BarqStub(object):
                 request_serializer=barq__pb2.InsertRequest.SerializeToString,
                 response_deserializer=barq__pb2.InsertResponse.FromString,
                 _registered_method=True)
+        self.InsertAsync = channel.unary_unary(
+                '/barq.Barq/InsertAsync',
+                request_serializer=barq__pb2.InsertRequest.SerializeToString,
+                response_deserializer=barq__pb2.InsertAsyncResponse.FromString,
+                _registered_method=True)
         self.Search = channel.unary_unary(
                 '/barq.Barq/Search',
                 request_serializer=barq__pb2.SearchRequest.SerializeToString,
@@ -87,6 +92,12 @@ class BarqServicer(object):
         raise NotImplementedError('Method not implemented!')
 
     def Insert(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def InsertAsync(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -134,6 +145,11 @@ def add_BarqServicer_to_server(servicer, server):
                     servicer.Insert,
                     request_deserializer=barq__pb2.InsertRequest.FromString,
                     response_serializer=barq__pb2.InsertResponse.SerializeToString,
+            ),
+            'InsertAsync': grpc.unary_unary_rpc_method_handler(
+                    servicer.InsertAsync,
+                    request_deserializer=barq__pb2.InsertRequest.FromString,
+                    response_serializer=barq__pb2.InsertAsyncResponse.SerializeToString,
             ),
             'Search': grpc.unary_unary_rpc_method_handler(
                     servicer.Search,
@@ -237,6 +253,33 @@ class Barq(object):
             '/barq.Barq/Insert',
             barq__pb2.InsertRequest.SerializeToString,
             barq__pb2.InsertResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def InsertAsync(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/barq.Barq/InsertAsync',
+            barq__pb2.InsertRequest.SerializeToString,
+            barq__pb2.InsertAsyncResponse.FromString,
             options,
             channel_credentials,
             insecure,

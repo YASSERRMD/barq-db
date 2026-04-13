@@ -517,6 +517,58 @@ func (x *InsertResponse) GetSuccess() bool {
 	return false
 }
 
+type InsertAsyncResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Accepted      bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
+	RequestId     string                 `protobuf:"bytes,2,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *InsertAsyncResponse) Reset() {
+	*x = InsertAsyncResponse{}
+	mi := &file_barq_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InsertAsyncResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InsertAsyncResponse) ProtoMessage() {}
+
+func (x *InsertAsyncResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_barq_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InsertAsyncResponse.ProtoReflect.Descriptor instead.
+func (*InsertAsyncResponse) Descriptor() ([]byte, []int) {
+	return file_barq_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *InsertAsyncResponse) GetAccepted() bool {
+	if x != nil {
+		return x.Accepted
+	}
+	return false
+}
+
+func (x *InsertAsyncResponse) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
 type InsertDocumentRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Collection    string                 `protobuf:"bytes,1,opt,name=collection,proto3" json:"collection,omitempty"`
@@ -529,7 +581,7 @@ type InsertDocumentRequest struct {
 
 func (x *InsertDocumentRequest) Reset() {
 	*x = InsertDocumentRequest{}
-	mi := &file_barq_proto_msgTypes[9]
+	mi := &file_barq_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -541,7 +593,7 @@ func (x *InsertDocumentRequest) String() string {
 func (*InsertDocumentRequest) ProtoMessage() {}
 
 func (x *InsertDocumentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_barq_proto_msgTypes[9]
+	mi := &file_barq_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -554,7 +606,7 @@ func (x *InsertDocumentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InsertDocumentRequest.ProtoReflect.Descriptor instead.
 func (*InsertDocumentRequest) Descriptor() ([]byte, []int) {
-	return file_barq_proto_rawDescGZIP(), []int{9}
+	return file_barq_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *InsertDocumentRequest) GetCollection() string {
@@ -594,7 +646,7 @@ type InsertDocumentResponse struct {
 
 func (x *InsertDocumentResponse) Reset() {
 	*x = InsertDocumentResponse{}
-	mi := &file_barq_proto_msgTypes[10]
+	mi := &file_barq_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -606,7 +658,7 @@ func (x *InsertDocumentResponse) String() string {
 func (*InsertDocumentResponse) ProtoMessage() {}
 
 func (x *InsertDocumentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_barq_proto_msgTypes[10]
+	mi := &file_barq_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -619,7 +671,7 @@ func (x *InsertDocumentResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InsertDocumentResponse.ProtoReflect.Descriptor instead.
 func (*InsertDocumentResponse) Descriptor() ([]byte, []int) {
-	return file_barq_proto_rawDescGZIP(), []int{10}
+	return file_barq_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *InsertDocumentResponse) GetSuccess() bool {
@@ -639,7 +691,7 @@ type SearchOptions struct {
 
 func (x *SearchOptions) Reset() {
 	*x = SearchOptions{}
-	mi := &file_barq_proto_msgTypes[11]
+	mi := &file_barq_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -651,7 +703,7 @@ func (x *SearchOptions) String() string {
 func (*SearchOptions) ProtoMessage() {}
 
 func (x *SearchOptions) ProtoReflect() protoreflect.Message {
-	mi := &file_barq_proto_msgTypes[11]
+	mi := &file_barq_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -664,7 +716,7 @@ func (x *SearchOptions) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchOptions.ProtoReflect.Descriptor instead.
 func (*SearchOptions) Descriptor() ([]byte, []int) {
-	return file_barq_proto_rawDescGZIP(), []int{11}
+	return file_barq_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *SearchOptions) GetConsistency() Consistency {
@@ -693,7 +745,7 @@ type SearchRequest struct {
 
 func (x *SearchRequest) Reset() {
 	*x = SearchRequest{}
-	mi := &file_barq_proto_msgTypes[12]
+	mi := &file_barq_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -705,7 +757,7 @@ func (x *SearchRequest) String() string {
 func (*SearchRequest) ProtoMessage() {}
 
 func (x *SearchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_barq_proto_msgTypes[12]
+	mi := &file_barq_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -718,7 +770,7 @@ func (x *SearchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchRequest.ProtoReflect.Descriptor instead.
 func (*SearchRequest) Descriptor() ([]byte, []int) {
-	return file_barq_proto_rawDescGZIP(), []int{12}
+	return file_barq_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *SearchRequest) GetCollection() string {
@@ -760,7 +812,7 @@ type SearchResult struct {
 
 func (x *SearchResult) Reset() {
 	*x = SearchResult{}
-	mi := &file_barq_proto_msgTypes[13]
+	mi := &file_barq_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -772,7 +824,7 @@ func (x *SearchResult) String() string {
 func (*SearchResult) ProtoMessage() {}
 
 func (x *SearchResult) ProtoReflect() protoreflect.Message {
-	mi := &file_barq_proto_msgTypes[13]
+	mi := &file_barq_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -785,7 +837,7 @@ func (x *SearchResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchResult.ProtoReflect.Descriptor instead.
 func (*SearchResult) Descriptor() ([]byte, []int) {
-	return file_barq_proto_rawDescGZIP(), []int{13}
+	return file_barq_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *SearchResult) GetId() string {
@@ -818,7 +870,7 @@ type SearchResponse struct {
 
 func (x *SearchResponse) Reset() {
 	*x = SearchResponse{}
-	mi := &file_barq_proto_msgTypes[14]
+	mi := &file_barq_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -830,7 +882,7 @@ func (x *SearchResponse) String() string {
 func (*SearchResponse) ProtoMessage() {}
 
 func (x *SearchResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_barq_proto_msgTypes[14]
+	mi := &file_barq_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -843,7 +895,7 @@ func (x *SearchResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchResponse.ProtoReflect.Descriptor instead.
 func (*SearchResponse) Descriptor() ([]byte, []int) {
-	return file_barq_proto_rawDescGZIP(), []int{14}
+	return file_barq_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *SearchResponse) GetResults() []*SearchResult {
@@ -863,7 +915,7 @@ type SearchQuery struct {
 
 func (x *SearchQuery) Reset() {
 	*x = SearchQuery{}
-	mi := &file_barq_proto_msgTypes[15]
+	mi := &file_barq_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -875,7 +927,7 @@ func (x *SearchQuery) String() string {
 func (*SearchQuery) ProtoMessage() {}
 
 func (x *SearchQuery) ProtoReflect() protoreflect.Message {
-	mi := &file_barq_proto_msgTypes[15]
+	mi := &file_barq_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -888,7 +940,7 @@ func (x *SearchQuery) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchQuery.ProtoReflect.Descriptor instead.
 func (*SearchQuery) Descriptor() ([]byte, []int) {
-	return file_barq_proto_rawDescGZIP(), []int{15}
+	return file_barq_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *SearchQuery) GetVector() []float32 {
@@ -916,7 +968,7 @@ type BatchSearchRequest struct {
 
 func (x *BatchSearchRequest) Reset() {
 	*x = BatchSearchRequest{}
-	mi := &file_barq_proto_msgTypes[16]
+	mi := &file_barq_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -928,7 +980,7 @@ func (x *BatchSearchRequest) String() string {
 func (*BatchSearchRequest) ProtoMessage() {}
 
 func (x *BatchSearchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_barq_proto_msgTypes[16]
+	mi := &file_barq_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -941,7 +993,7 @@ func (x *BatchSearchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BatchSearchRequest.ProtoReflect.Descriptor instead.
 func (*BatchSearchRequest) Descriptor() ([]byte, []int) {
-	return file_barq_proto_rawDescGZIP(), []int{16}
+	return file_barq_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *BatchSearchRequest) GetCollection() string {
@@ -974,7 +1026,7 @@ type QueryResults struct {
 
 func (x *QueryResults) Reset() {
 	*x = QueryResults{}
-	mi := &file_barq_proto_msgTypes[17]
+	mi := &file_barq_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -986,7 +1038,7 @@ func (x *QueryResults) String() string {
 func (*QueryResults) ProtoMessage() {}
 
 func (x *QueryResults) ProtoReflect() protoreflect.Message {
-	mi := &file_barq_proto_msgTypes[17]
+	mi := &file_barq_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -999,7 +1051,7 @@ func (x *QueryResults) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryResults.ProtoReflect.Descriptor instead.
 func (*QueryResults) Descriptor() ([]byte, []int) {
-	return file_barq_proto_rawDescGZIP(), []int{17}
+	return file_barq_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *QueryResults) GetHits() []*SearchResult {
@@ -1018,7 +1070,7 @@ type BatchSearchResponse struct {
 
 func (x *BatchSearchResponse) Reset() {
 	*x = BatchSearchResponse{}
-	mi := &file_barq_proto_msgTypes[18]
+	mi := &file_barq_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1030,7 +1082,7 @@ func (x *BatchSearchResponse) String() string {
 func (*BatchSearchResponse) ProtoMessage() {}
 
 func (x *BatchSearchResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_barq_proto_msgTypes[18]
+	mi := &file_barq_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1043,7 +1095,7 @@ func (x *BatchSearchResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BatchSearchResponse.ProtoReflect.Descriptor instead.
 func (*BatchSearchResponse) Descriptor() ([]byte, []int) {
-	return file_barq_proto_rawDescGZIP(), []int{18}
+	return file_barq_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *BatchSearchResponse) GetResults() []*QueryResults {
@@ -1084,7 +1136,11 @@ const file_barq_proto_rawDesc = "" +
 	"\fpayload_json\x18\x04 \x01(\tR\vpayloadJson\x12-\n" +
 	"\aoptions\x18\x05 \x01(\v2\x13.barq.InsertOptionsR\aoptions\"*\n" +
 	"\x0eInsertResponse\x12\x18\n" +
-	"\asuccess\x18\x01 \x01(\bR\asuccess\"\x82\x01\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\"P\n" +
+	"\x13InsertAsyncResponse\x12\x1a\n" +
+	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x02 \x01(\tR\trequestId\"\x82\x01\n" +
 	"\x15InsertDocumentRequest\x12\x1e\n" +
 	"\n" +
 	"collection\x18\x01 \x01(\tR\n" +
@@ -1128,11 +1184,12 @@ const file_barq_proto_rawDesc = "" +
 	"\x17CONSISTENCY_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13CONSISTENCY_PRIMARY\x10\x01\x12\x19\n" +
 	"\x15CONSISTENCY_FOLLOWERS\x10\x02\x12\x13\n" +
-	"\x0fCONSISTENCY_ANY\x10\x032\xbe\x03\n" +
+	"\x0fCONSISTENCY_ANY\x10\x032\xfd\x03\n" +
 	"\x04Barq\x123\n" +
 	"\x06Status\x12\x13.barq.StatusRequest\x1a\x14.barq.StatusResponse\x12Q\n" +
 	"\x10CreateCollection\x12\x1d.barq.CreateCollectionRequest\x1a\x1e.barq.CreateCollectionResponse\x123\n" +
-	"\x06Insert\x12\x13.barq.InsertRequest\x1a\x14.barq.InsertResponse\x123\n" +
+	"\x06Insert\x12\x13.barq.InsertRequest\x1a\x14.barq.InsertResponse\x12=\n" +
+	"\vInsertAsync\x12\x13.barq.InsertRequest\x1a\x19.barq.InsertAsyncResponse\x123\n" +
 	"\x06Search\x12\x13.barq.SearchRequest\x1a\x14.barq.SearchResponse\x123\n" +
 	"\x06Health\x12\x13.barq.HealthRequest\x1a\x14.barq.HealthResponse\x12K\n" +
 	"\x0eInsertDocument\x12\x1b.barq.InsertDocumentRequest\x1a\x1c.barq.InsertDocumentResponse\x12B\n" +
@@ -1151,7 +1208,7 @@ func file_barq_proto_rawDescGZIP() []byte {
 }
 
 var file_barq_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_barq_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
+var file_barq_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
 var file_barq_proto_goTypes = []any{
 	(Consistency)(0),                 // 0: barq.Consistency
 	(*StatusRequest)(nil),            // 1: barq.StatusRequest
@@ -1163,41 +1220,44 @@ var file_barq_proto_goTypes = []any{
 	(*InsertOptions)(nil),            // 7: barq.InsertOptions
 	(*InsertRequest)(nil),            // 8: barq.InsertRequest
 	(*InsertResponse)(nil),           // 9: barq.InsertResponse
-	(*InsertDocumentRequest)(nil),    // 10: barq.InsertDocumentRequest
-	(*InsertDocumentResponse)(nil),   // 11: barq.InsertDocumentResponse
-	(*SearchOptions)(nil),            // 12: barq.SearchOptions
-	(*SearchRequest)(nil),            // 13: barq.SearchRequest
-	(*SearchResult)(nil),             // 14: barq.SearchResult
-	(*SearchResponse)(nil),           // 15: barq.SearchResponse
-	(*SearchQuery)(nil),              // 16: barq.SearchQuery
-	(*BatchSearchRequest)(nil),       // 17: barq.BatchSearchRequest
-	(*QueryResults)(nil),             // 18: barq.QueryResults
-	(*BatchSearchResponse)(nil),      // 19: barq.BatchSearchResponse
+	(*InsertAsyncResponse)(nil),      // 10: barq.InsertAsyncResponse
+	(*InsertDocumentRequest)(nil),    // 11: barq.InsertDocumentRequest
+	(*InsertDocumentResponse)(nil),   // 12: barq.InsertDocumentResponse
+	(*SearchOptions)(nil),            // 13: barq.SearchOptions
+	(*SearchRequest)(nil),            // 14: barq.SearchRequest
+	(*SearchResult)(nil),             // 15: barq.SearchResult
+	(*SearchResponse)(nil),           // 16: barq.SearchResponse
+	(*SearchQuery)(nil),              // 17: barq.SearchQuery
+	(*BatchSearchRequest)(nil),       // 18: barq.BatchSearchRequest
+	(*QueryResults)(nil),             // 19: barq.QueryResults
+	(*BatchSearchResponse)(nil),      // 20: barq.BatchSearchResponse
 }
 var file_barq_proto_depIdxs = []int32{
 	7,  // 0: barq.InsertRequest.options:type_name -> barq.InsertOptions
 	0,  // 1: barq.SearchOptions.consistency:type_name -> barq.Consistency
-	12, // 2: barq.SearchRequest.options:type_name -> barq.SearchOptions
-	14, // 3: barq.SearchResponse.results:type_name -> barq.SearchResult
-	16, // 4: barq.BatchSearchRequest.queries:type_name -> barq.SearchQuery
-	14, // 5: barq.QueryResults.hits:type_name -> barq.SearchResult
-	18, // 6: barq.BatchSearchResponse.results:type_name -> barq.QueryResults
+	13, // 2: barq.SearchRequest.options:type_name -> barq.SearchOptions
+	15, // 3: barq.SearchResponse.results:type_name -> barq.SearchResult
+	17, // 4: barq.BatchSearchRequest.queries:type_name -> barq.SearchQuery
+	15, // 5: barq.QueryResults.hits:type_name -> barq.SearchResult
+	19, // 6: barq.BatchSearchResponse.results:type_name -> barq.QueryResults
 	1,  // 7: barq.Barq.Status:input_type -> barq.StatusRequest
 	5,  // 8: barq.Barq.CreateCollection:input_type -> barq.CreateCollectionRequest
 	8,  // 9: barq.Barq.Insert:input_type -> barq.InsertRequest
-	13, // 10: barq.Barq.Search:input_type -> barq.SearchRequest
-	3,  // 11: barq.Barq.Health:input_type -> barq.HealthRequest
-	10, // 12: barq.Barq.InsertDocument:input_type -> barq.InsertDocumentRequest
-	17, // 13: barq.Barq.BatchSearch:input_type -> barq.BatchSearchRequest
-	2,  // 14: barq.Barq.Status:output_type -> barq.StatusResponse
-	6,  // 15: barq.Barq.CreateCollection:output_type -> barq.CreateCollectionResponse
-	9,  // 16: barq.Barq.Insert:output_type -> barq.InsertResponse
-	15, // 17: barq.Barq.Search:output_type -> barq.SearchResponse
-	4,  // 18: barq.Barq.Health:output_type -> barq.HealthResponse
-	11, // 19: barq.Barq.InsertDocument:output_type -> barq.InsertDocumentResponse
-	19, // 20: barq.Barq.BatchSearch:output_type -> barq.BatchSearchResponse
-	14, // [14:21] is the sub-list for method output_type
-	7,  // [7:14] is the sub-list for method input_type
+	8,  // 10: barq.Barq.InsertAsync:input_type -> barq.InsertRequest
+	14, // 11: barq.Barq.Search:input_type -> barq.SearchRequest
+	3,  // 12: barq.Barq.Health:input_type -> barq.HealthRequest
+	11, // 13: barq.Barq.InsertDocument:input_type -> barq.InsertDocumentRequest
+	18, // 14: barq.Barq.BatchSearch:input_type -> barq.BatchSearchRequest
+	2,  // 15: barq.Barq.Status:output_type -> barq.StatusResponse
+	6,  // 16: barq.Barq.CreateCollection:output_type -> barq.CreateCollectionResponse
+	9,  // 17: barq.Barq.Insert:output_type -> barq.InsertResponse
+	10, // 18: barq.Barq.InsertAsync:output_type -> barq.InsertAsyncResponse
+	16, // 19: barq.Barq.Search:output_type -> barq.SearchResponse
+	4,  // 20: barq.Barq.Health:output_type -> barq.HealthResponse
+	12, // 21: barq.Barq.InsertDocument:output_type -> barq.InsertDocumentResponse
+	20, // 22: barq.Barq.BatchSearch:output_type -> barq.BatchSearchResponse
+	15, // [15:23] is the sub-list for method output_type
+	7,  // [7:15] is the sub-list for method input_type
 	7,  // [7:7] is the sub-list for extension type_name
 	7,  // [7:7] is the sub-list for extension extendee
 	0,  // [0:7] is the sub-list for field type_name
@@ -1214,7 +1274,7 @@ func file_barq_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_barq_proto_rawDesc), len(file_barq_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   19,
+			NumMessages:   20,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

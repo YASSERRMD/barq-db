@@ -145,6 +145,25 @@ func (c *Client) Insert(ctx context.Context, collection string, req InsertReques
 	)
 }
 
+func (c *Client) InsertAsync(ctx context.Context, collection string, req InsertRequest) (string, error) {
+	if err := requireSupportedAPIVersion(); err != nil {
+		return "", err
+	}
+	grpcClient, err := NewGrpcClientWithAPIKey(c.grpcTarget(), c.config.APIKey)
+	if err != nil {
+		return "", err
+	}
+	defer grpcClient.Close()
+	return grpcClient.InsertAsync(
+		ctx,
+		collection,
+		req.ID,
+		req.Vector,
+		rawPayloadToAny(req.Payload),
+		req.Options,
+	)
+}
+
 type SearchRequest struct {
 	Vector  []float32      `json:"vector,omitempty"`
 	Query   string         `json:"query,omitempty"`
@@ -271,6 +290,27 @@ func (c *GrpcClient) CreateCollection(ctx context.Context, name string, dimensio
 
 func (c *GrpcClient) Insert(ctx context.Context, collection string, id interface{}, vector []float32, payload interface{}) error {
 	return c.InsertWithOptions(ctx, collection, id, vector, payload, nil)
+}
+
+func (c *GrpcClient) InsertAsync(ctx context.Context, collection string, id interface{}, vector []float32, payload interface{}, options *InsertOptions) (string, error) {
+	idStr := fmt.Sprintf("%v", id)
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := c.client.InsertAsync(c.authContext(ctx), &pb.InsertRequest{
+		Collection:  collection,
+		Id:          idStr,
+		Vector:      vector,
+		PayloadJson: string(payloadBytes),
+		Options:     protoInsertOptions(options),
+	})
+	if err != nil {
+		return "", err
+	}
+	return resp.RequestId, nil
 }
 
 func (c *GrpcClient) InsertWithOptions(ctx context.Context, collection string, id interface{}, vector []float32, payload interface{}, options *InsertOptions) error {

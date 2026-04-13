@@ -17,6 +17,7 @@ export interface ProtoGrpcType {
     CreateCollectionResponse: MessageTypeDefinition
     HealthRequest: MessageTypeDefinition
     HealthResponse: MessageTypeDefinition
+    InsertAsyncResponse: MessageTypeDefinition
     InsertDocumentRequest: MessageTypeDefinition
     InsertDocumentResponse: MessageTypeDefinition
     InsertOptions: MessageTypeDefinition

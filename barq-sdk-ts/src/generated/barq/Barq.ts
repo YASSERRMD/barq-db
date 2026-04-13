@@ -8,6 +8,7 @@ import type { CreateCollectionRequest as _barq_CreateCollectionRequest, CreateCo
 import type { CreateCollectionResponse as _barq_CreateCollectionResponse, CreateCollectionResponse__Output as _barq_CreateCollectionResponse__Output } from '../barq/CreateCollectionResponse';
 import type { HealthRequest as _barq_HealthRequest, HealthRequest__Output as _barq_HealthRequest__Output } from '../barq/HealthRequest';
 import type { HealthResponse as _barq_HealthResponse, HealthResponse__Output as _barq_HealthResponse__Output } from '../barq/HealthResponse';
+import type { InsertAsyncResponse as _barq_InsertAsyncResponse, InsertAsyncResponse__Output as _barq_InsertAsyncResponse__Output } from '../barq/InsertAsyncResponse';
 import type { InsertDocumentRequest as _barq_InsertDocumentRequest, InsertDocumentRequest__Output as _barq_InsertDocumentRequest__Output } from '../barq/InsertDocumentRequest';
 import type { InsertDocumentResponse as _barq_InsertDocumentResponse, InsertDocumentResponse__Output as _barq_InsertDocumentResponse__Output } from '../barq/InsertDocumentResponse';
 import type { InsertRequest as _barq_InsertRequest, InsertRequest__Output as _barq_InsertRequest__Output } from '../barq/InsertRequest';
@@ -54,6 +55,15 @@ export interface BarqClient extends grpc.Client {
   insert(argument: _barq_InsertRequest, options: grpc.CallOptions, callback: grpc.requestCallback<_barq_InsertResponse__Output>): grpc.ClientUnaryCall;
   insert(argument: _barq_InsertRequest, callback: grpc.requestCallback<_barq_InsertResponse__Output>): grpc.ClientUnaryCall;
   
+  InsertAsync(argument: _barq_InsertRequest, metadata: grpc.Metadata, options: grpc.CallOptions, callback: grpc.requestCallback<_barq_InsertAsyncResponse__Output>): grpc.ClientUnaryCall;
+  InsertAsync(argument: _barq_InsertRequest, metadata: grpc.Metadata, callback: grpc.requestCallback<_barq_InsertAsyncResponse__Output>): grpc.ClientUnaryCall;
+  InsertAsync(argument: _barq_InsertRequest, options: grpc.CallOptions, callback: grpc.requestCallback<_barq_InsertAsyncResponse__Output>): grpc.ClientUnaryCall;
+  InsertAsync(argument: _barq_InsertRequest, callback: grpc.requestCallback<_barq_InsertAsyncResponse__Output>): grpc.ClientUnaryCall;
+  insertAsync(argument: _barq_InsertRequest, metadata: grpc.Metadata, options: grpc.CallOptions, callback: grpc.requestCallback<_barq_InsertAsyncResponse__Output>): grpc.ClientUnaryCall;
+  insertAsync(argument: _barq_InsertRequest, metadata: grpc.Metadata, callback: grpc.requestCallback<_barq_InsertAsyncResponse__Output>): grpc.ClientUnaryCall;
+  insertAsync(argument: _barq_InsertRequest, options: grpc.CallOptions, callback: grpc.requestCallback<_barq_InsertAsyncResponse__Output>): grpc.ClientUnaryCall;
+  insertAsync(argument: _barq_InsertRequest, callback: grpc.requestCallback<_barq_InsertAsyncResponse__Output>): grpc.ClientUnaryCall;
+  
   InsertDocument(argument: _barq_InsertDocumentRequest, metadata: grpc.Metadata, options: grpc.CallOptions, callback: grpc.requestCallback<_barq_InsertDocumentResponse__Output>): grpc.ClientUnaryCall;
   InsertDocument(argument: _barq_InsertDocumentRequest, metadata: grpc.Metadata, callback: grpc.requestCallback<_barq_InsertDocumentResponse__Output>): grpc.ClientUnaryCall;
   InsertDocument(argument: _barq_InsertDocumentRequest, options: grpc.CallOptions, callback: grpc.requestCallback<_barq_InsertDocumentResponse__Output>): grpc.ClientUnaryCall;
@@ -92,6 +102,8 @@ export interface BarqHandlers extends grpc.UntypedServiceImplementation {
   
   Insert: grpc.handleUnaryCall<_barq_InsertRequest__Output, _barq_InsertResponse>;
   
+  InsertAsync: grpc.handleUnaryCall<_barq_InsertRequest__Output, _barq_InsertAsyncResponse>;
+  
   InsertDocument: grpc.handleUnaryCall<_barq_InsertDocumentRequest__Output, _barq_InsertDocumentResponse>;
   
   Search: grpc.handleUnaryCall<_barq_SearchRequest__Output, _barq_SearchResponse>;
@@ -105,6 +117,7 @@ export interface BarqDefinition extends grpc.ServiceDefinition {
   CreateCollection: MethodDefinition<_barq_CreateCollectionRequest, _barq_CreateCollectionResponse, _barq_CreateCollectionRequest__Output, _barq_CreateCollectionResponse__Output>
   Health: MethodDefinition<_barq_HealthRequest, _barq_HealthResponse, _barq_HealthRequest__Output, _barq_HealthResponse__Output>
   Insert: MethodDefinition<_barq_InsertRequest, _barq_InsertResponse, _barq_InsertRequest__Output, _barq_InsertResponse__Output>
+  InsertAsync: MethodDefinition<_barq_InsertRequest, _barq_InsertAsyncResponse, _barq_InsertRequest__Output, _barq_InsertAsyncResponse__Output>
   InsertDocument: MethodDefinition<_barq_InsertDocumentRequest, _barq_InsertDocumentResponse, _barq_InsertDocumentRequest__Output, _barq_InsertDocumentResponse__Output>
   Search: MethodDefinition<_barq_SearchRequest, _barq_SearchResponse, _barq_SearchRequest__Output, _barq_SearchResponse__Output>
   Status: MethodDefinition<_barq_StatusRequest, _barq_StatusResponse, _barq_StatusRequest__Output, _barq_StatusResponse__Output>

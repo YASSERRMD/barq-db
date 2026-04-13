@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 from typing import Optional, List, Dict, Any, Union
@@ -95,6 +96,24 @@ class BarqClient:
         _require_supported_api_version()
         self._grpc().insert(collection, id, vector, payload or {}, options=options)
         return {}
+
+    async def insert_async(
+        self,
+        collection: str,
+        id: Union[int, str],
+        vector: List[float],
+        payload: Optional[Dict] = None,
+        options: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        _require_supported_api_version()
+        return await asyncio.to_thread(
+            self._grpc().insert_async,
+            collection,
+            id,
+            vector,
+            payload or {},
+            options,
+        )
 
     def search(
         self,

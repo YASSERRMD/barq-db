@@ -6,6 +6,7 @@ service Barq {
   rpc Status (StatusRequest) returns (StatusResponse);
   rpc CreateCollection (CreateCollectionRequest) returns (CreateCollectionResponse);
   rpc Insert (InsertRequest) returns (InsertResponse);
+  rpc InsertAsync (InsertRequest) returns (InsertAsyncResponse);
   rpc Search (SearchRequest) returns (SearchResponse);
 
   // Legacy RPCs kept temporarily while SDKs migrate to the canonical contract.
@@ -52,6 +53,11 @@ message InsertRequest {
 
 message InsertResponse {
   bool success = 1;
+}
+
+message InsertAsyncResponse {
+  bool accepted = 1;
+  string request_id = 2;
 }
 
 message InsertDocumentRequest {

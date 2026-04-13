@@ -168,6 +168,11 @@ export class Collection {
         await this.client.grpc().insert(this.name, id, vector, payload ?? {}, options);
     }
 
+    async insertAsync(id: string | number, vector: number[], payload?: any, options?: InsertOptions): Promise<string> {
+        ensureSupportedApiVersion();
+        return this.client.grpc().insertAsync(this.name, id, vector, payload ?? {}, options);
+    }
+
     async search(
         vector?: number[],
         query?: string,
@@ -279,6 +284,23 @@ export class GrpcClient {
             this.client.insert(request, this.metadata, (err) => {
                 if (err) return reject(err);
                 resolve();
+            });
+        });
+    }
+
+    insertAsync(collection: string, id: string | number, vector: number[], payload: any = {}, options?: InsertOptions): Promise<string> {
+        const request: InsertRequest = {
+            collection,
+            id: String(id),
+            vector,
+            payloadJson: JSON.stringify(payload),
+            options: grpcInsertOptions(options),
+        };
+
+        return new Promise((resolve, reject) => {
+            this.client.insertAsync(request, this.metadata, (err, response?: { requestId?: string }) => {
+                if (err) return reject(err);
+                resolve(response?.requestId ?? "");
             });
         });
     }

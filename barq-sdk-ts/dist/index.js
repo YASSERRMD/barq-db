@@ -152,6 +152,10 @@ class Collection {
         ensureSupportedApiVersion();
         await this.client.grpc().insert(this.name, id, vector, payload ?? {}, options);
     }
+    async insertAsync(id, vector, payload, options) {
+        ensureSupportedApiVersion();
+        return this.client.grpc().insertAsync(this.name, id, vector, payload ?? {}, options);
+    }
     async search(vector, query, topK = 10, filter, options) {
         ensureSupportedApiVersion();
         if (vector && !query && !filter) {
@@ -239,6 +243,22 @@ class GrpcClient {
                 if (err)
                     return reject(err);
                 resolve();
+            });
+        });
+    }
+    insertAsync(collection, id, vector, payload = {}, options) {
+        const request = {
+            collection,
+            id: String(id),
+            vector,
+            payloadJson: JSON.stringify(payload),
+            options: grpcInsertOptions(options),
+        };
+        return new Promise((resolve, reject) => {
+            this.client.insertAsync(request, this.metadata, (err, response) => {
+                if (err)
+                    return reject(err);
+                resolve(response?.requestId ?? "");
             });
         });
     }

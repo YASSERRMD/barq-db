@@ -55,6 +55,27 @@ class GrpcClient:
             req.options.CopyFrom(insert_options)
         self.stub.Insert(req, metadata=self.metadata)
 
+    def insert_async(
+        self,
+        collection: str,
+        id: Any,
+        vector: List[float],
+        payload: Optional[Dict] = None,
+        options: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        payload_json = json.dumps(payload) if payload else "{}"
+        req = barq_pb2.InsertRequest(
+            collection=collection,
+            id=str(id),
+            vector=vector,
+            payload_json=payload_json,
+        )
+        insert_options = self._insert_options(options)
+        if insert_options is not None:
+            req.options.CopyFrom(insert_options)
+        response = self.stub.InsertAsync(req, metadata=self.metadata)
+        return response.request_id
+
     def insert_document(
         self,
         collection: str,

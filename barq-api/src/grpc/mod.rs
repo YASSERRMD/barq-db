@@ -527,18 +527,14 @@ impl Barq for GrpcService {
 mod tests {
     use super::*;
     use crate::ingest::TrackedInsertState;
-    use crate::{ApiAuth, ApiRole, ClusterConfig, ClusterRouter};
+    use crate::{ApiAuth, ClusterConfig, ClusterRouter};
     use barq_cluster::{NodeConfig, NodeId, ShardId, ShardPlacement};
-    use barq_sdk_rust::{
-        BarqClient as PublicBarqClient, InsertOptions as PublicInsertOptions,
-        SearchConsistency as PublicSearchConsistency, SearchOptions as PublicSearchOptions,
-    };
+    use barq_sdk_rust::BarqClient as PublicBarqClient;
     use std::collections::HashMap;
     use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
     use std::process::Stdio;
     use std::sync::{Mutex, OnceLock};
-    use tempfile::tempdir;
     use tokio::process::{Child, Command};
     use tonic::transport::Server;
     use tonic::Code;
@@ -546,6 +542,29 @@ mod tests {
     fn sdk_env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: impl Into<String>) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value.into());
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
     }
 
     fn grpc_service() -> (tempfile::TempDir, AppState, GrpcService) {
@@ -928,6 +947,159 @@ mod tests {
             .tracked_insert_status(&response.request_id)
             .expect("tracked insert should exist");
         assert_eq!(tracked.state, TrackedInsertState::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn sdk_async_clients_accept_concurrent_inserts_and_respect_queue_backlog() {
+        let _env_lock = sdk_env_lock().lock().unwrap();
+        let (_dir, state, service) = grpc_service();
+        let hook = state.ingestion.install_pause_before_dequeue();
+        let (addr, handle, shutdown) = start_grpc_server(service).await;
+        let grpc_addr = addr.to_string();
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let _grpc_override = EnvVarGuard::set("BARQ_GRPC_ADDR", &grpc_addr);
+
+        let rust_task = tokio::spawn(async move {
+            let client = PublicBarqClient::new("http://127.0.0.1:8080", "");
+            client
+                .create_collection("sdk-rust-async", 2, DistanceMetric::Cosine, None, None)
+                .await
+                .expect("rust create collection");
+            client
+                .collection("sdk-rust-async")
+                .insert_async(
+                    "rust-async-doc",
+                    vec![1.0, 0.0],
+                    Some(serde_json::json!({"sdk": "rust", "mode": "async"})),
+                )
+                .await
+                .expect("rust async insert")
+        });
+
+        let python = spawn_command(
+            &workspace_root.join("barq-sdk-python"),
+            &[
+                ("PYTHONPATH", "."),
+                ("BARQ_BASE_URL", "http://127.0.0.1:8080"),
+                ("BARQ_GRPC_ADDR", grpc_addr.as_str()),
+                ("BARQ_TEST_COLLECTION", "sdk-python-async"),
+            ],
+            "python3",
+            [
+                "-m",
+                "unittest",
+                "discover",
+                "-s",
+                "tests",
+                "-p",
+                "test_async_smoke.py",
+            ],
+        )
+        .await;
+
+        let go = spawn_command(
+            &workspace_root.join("barq-sdk-go"),
+            &[
+                ("BARQ_BASE_URL", "http://127.0.0.1:8080"),
+                ("BARQ_GRPC_ADDR", grpc_addr.as_str()),
+                ("BARQ_TEST_COLLECTION", "sdk-go-async"),
+            ],
+            "go",
+            [
+                "test",
+                "./...",
+                "-run",
+                "TestAsyncInsertReturnsRequestID",
+                "-count=1",
+            ],
+        )
+        .await;
+
+        let typescript_build = spawn_command(
+            &workspace_root.join("barq-sdk-ts"),
+            &[],
+            "node",
+            ["./node_modules/typescript/lib/tsc.js", "--pretty", "false"],
+        )
+        .await;
+        wait_for_success("typescript build", typescript_build).await;
+
+        let typescript = spawn_command(
+            &workspace_root.join("barq-sdk-ts"),
+            &[
+                ("BARQ_BASE_URL", "http://127.0.0.1:8080"),
+                ("BARQ_GRPC_ADDR", grpc_addr.as_str()),
+                ("BARQ_TEST_COLLECTION", "sdk-ts-async"),
+            ],
+            "node",
+            ["--test", "test/async_smoke.test.js"],
+        )
+        .await;
+
+        hook.wait_until_reached().await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while state.ingestion.queue_len() < 4 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("all async inserts should reach the queue");
+        assert_eq!(state.ingestion.queue_len(), 4);
+
+        for (collection, id) in [
+            ("sdk-rust-async", "rust-async-doc"),
+            ("sdk-python-async", "python-async-doc"),
+            ("sdk-go-async", "go-async-doc"),
+            ("sdk-ts-async", "ts-async-doc"),
+        ] {
+            let document = state
+                .storage
+                .lock()
+                .await
+                .get_document(
+                    &TenantId::default(),
+                    collection,
+                    &DocumentId::Str(id.to_string()),
+                )
+                .unwrap();
+            assert!(document.is_none(), "document {id} should still be queued");
+        }
+
+        hook.release();
+        let rust_request_id = rust_task.await.unwrap();
+        assert!(rust_request_id.starts_with("ingest-"));
+        wait_for_success("python async smoke", python).await;
+        wait_for_success("go async smoke", go).await;
+        wait_for_success("typescript async smoke", typescript).await;
+        state.ingestion.drain().await;
+
+        for (collection, id) in [
+            ("sdk-rust-async", "rust-async-doc"),
+            ("sdk-python-async", "python-async-doc"),
+            ("sdk-go-async", "go-async-doc"),
+            ("sdk-ts-async", "ts-async-doc"),
+        ] {
+            let document = state
+                .storage
+                .lock()
+                .await
+                .get_document(
+                    &TenantId::default(),
+                    collection,
+                    &DocumentId::Str(id.to_string()),
+                )
+                .unwrap();
+            assert!(
+                document.is_some(),
+                "document {id} should flush after release"
+            );
+        }
+
+        shutdown.send(()).unwrap();
+        handle.await.unwrap();
     }
 
     #[tokio::test]

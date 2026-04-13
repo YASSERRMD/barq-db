@@ -255,6 +255,29 @@ impl Collection {
             .await
     }
 
+    pub async fn insert_async(
+        &self,
+        id: impl Into<DocumentId>,
+        vector: Vec<f32>,
+        payload: Option<serde_json::Value>,
+    ) -> Result<String> {
+        ensure_supported_api_version()?;
+        let id_obj = id.into();
+        let mut client = BarqGrpcClient::connect_with_api_key(
+            grpc_endpoint(&self.client.base_url)?,
+            self.client.api_key.clone(),
+        )
+        .await?;
+        client
+            .insert_async(
+                &self.name,
+                id_obj,
+                vector,
+                payload.unwrap_or_else(|| json!({})),
+            )
+            .await
+    }
+
     pub async fn insert_with_options(
         &self,
         id: impl Into<DocumentId>,
@@ -554,6 +577,31 @@ impl BarqGrpcClient {
     ) -> Result<()> {
         self.insert_with_options(collection, id, vector, payload, None)
             .await
+    }
+
+    pub async fn insert_async(
+        &mut self,
+        collection: &str,
+        id: impl Into<DocumentId>,
+        vector: Vec<f32>,
+        payload: serde_json::Value,
+    ) -> Result<String> {
+        let id_str = match id.into() {
+            DocumentId::U64(v) => v.to_string(),
+            DocumentId::Str(v) => v,
+        };
+
+        let response = self
+            .client
+            .insert_async(self.request(InsertRequest {
+                collection: collection.to_string(),
+                id: id_str,
+                vector,
+                payload_json: payload.to_string(),
+                options: None,
+            })?)
+            .await?;
+        Ok(response.into_inner().request_id)
     }
 
     pub async fn insert_with_options(
