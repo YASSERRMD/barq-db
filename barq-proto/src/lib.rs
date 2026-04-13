@@ -5,9 +5,13 @@ pub mod barq {
 #[cfg(test)]
 mod tests {
     use super::barq::{
-        Consistency, GetInsertStatusRequest, GetInsertStatusResponse, InsertAsyncResponse,
-        InsertOptions, InsertRequest, InsertResponse, InsertStatusState, SearchOptions,
-        SearchRequest, StatusRequest, StatusResponse,
+        ClusterMode, CollectionSegmentInfo, CollectionSegmentStateSample, Consistency,
+        GetClusterStatusRequest, GetClusterStatusResponse, GetInsertStatusRequest,
+        GetInsertStatusResponse, GetMetricsRequest, GetMetricsResponse, GetSegmentInfoRequest,
+        GetSegmentInfoResponse, IndexState, InsertAsyncResponse, InsertOptions, InsertRequest,
+        InsertResponse, InsertStatusState, MetricDefinition, MetricKind, SearchOptions,
+        SearchRequest, SegmentCount, SegmentState, StatusRequest, StatusResponse, StorageMetrics,
+        WriteDurability,
     };
 
     #[test]
@@ -110,5 +114,69 @@ mod tests {
         };
         assert_eq!(response.state, InsertStatusState::Succeeded as i32);
         assert!(response.error_message.is_empty());
+    }
+
+    #[test]
+    fn observability_messages_compile() {
+        let metrics_request = GetMetricsRequest {};
+        let cluster_request = GetClusterStatusRequest {};
+        let segment_request = GetSegmentInfoRequest {
+            collection: "docs".to_string(),
+        };
+
+        let metrics_response = GetMetricsResponse {
+            definitions: vec![MetricDefinition {
+                name: "search_requests_total".to_string(),
+                kind: MetricKind::Counter as i32,
+                description: "Total searches".to_string(),
+                unit: String::new(),
+                labels: vec!["type".to_string()],
+            }],
+            storage: Some(StorageMetrics {
+                refresh_count: 1,
+                total_resident_vector_memory_bytes: 128,
+                wal_appends_total: 2,
+                wal_bytes_written_total: 64,
+                compactions_total: 0,
+                tenant_memory_bytes: Vec::new(),
+                collection_memory_bytes: Vec::new(),
+                collection_wal: Vec::new(),
+                collection_segment_files: Vec::new(),
+                collection_segment_states: vec![CollectionSegmentStateSample {
+                    tenant: "default".to_string(),
+                    collection: "docs".to_string(),
+                    state: SegmentState::Sealed as i32,
+                    active: true,
+                }],
+            }),
+        };
+
+        let cluster_response = GetClusterStatusResponse {
+            node_id: "local".to_string(),
+            mode: ClusterMode::SingleNode as i32,
+            write_durability: WriteDurability::NodeLocal as i32,
+            shard_count: 1,
+            node_count: 1,
+        };
+
+        let segment_response = GetSegmentInfoResponse {
+            collections: vec![CollectionSegmentInfo {
+                tenant: "default".to_string(),
+                collection: "docs".to_string(),
+                current_state: SegmentState::Growing as i32,
+                index_state: IndexState::Ready as i32,
+                segment_counts: vec![SegmentCount {
+                    state: SegmentState::Sealed as i32,
+                    count: 1,
+                }],
+            }],
+        };
+
+        let _ = metrics_request;
+        let _ = cluster_request;
+        assert_eq!(segment_request.collection, "docs");
+        assert_eq!(metrics_response.definitions.len(), 1);
+        assert_eq!(cluster_response.mode, ClusterMode::SingleNode as i32);
+        assert_eq!(segment_response.collections[0].segment_counts[0].count, 1);
     }
 }
