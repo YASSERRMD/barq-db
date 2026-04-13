@@ -8,6 +8,7 @@ use tokio::sync::{
     oneshot, Mutex as AsyncMutex, Notify, OwnedSemaphorePermit, Semaphore, TryAcquireError,
 };
 
+pub(crate) const DEFAULT_INGEST_BATCH_SIZE: usize = 16;
 pub(crate) const DEFAULT_INGEST_QUEUE_CAPACITY: usize = 64;
 
 /// Bounded FIFO queue used by the asynchronous ingestion pipeline.
@@ -105,31 +106,42 @@ pub(crate) struct IngestionService {
     storage: Arc<AsyncMutex<Storage>>,
     queue: Mutex<IngestionQueue<PendingInsert>>,
     queue_slots: Arc<Semaphore>,
+    batch_size: usize,
     queue_capacity: usize,
     pending_jobs: AtomicUsize,
     item_available: Notify,
     worker_handle: AsyncMutex<Option<tokio::task::JoinHandle<()>>>,
     #[cfg(test)]
     pause_before_dequeue: Mutex<Option<Arc<PauseBeforeDequeue>>>,
+    #[cfg(test)]
+    observed_batch_sizes: Mutex<Vec<usize>>,
 }
 
 impl IngestionService {
     /// Creates a new ingestion service backed by the provided storage engine.
-    pub(crate) fn new(storage: Arc<AsyncMutex<Storage>>, queue_capacity: usize) -> Arc<Self> {
+    pub(crate) fn new(
+        storage: Arc<AsyncMutex<Storage>>,
+        queue_capacity: usize,
+        batch_size: usize,
+    ) -> Arc<Self> {
         assert!(
             queue_capacity > 0,
             "ingestion queue capacity must be positive"
         );
+        assert!(batch_size > 0, "ingestion batch size must be positive");
         Arc::new(Self {
             storage,
             queue: Mutex::new(IngestionQueue::new(queue_capacity)),
             queue_slots: Arc::new(Semaphore::new(queue_capacity)),
+            batch_size,
             queue_capacity,
             pending_jobs: AtomicUsize::new(0),
             item_available: Notify::new(),
             worker_handle: AsyncMutex::new(None),
             #[cfg(test)]
             pause_before_dequeue: Mutex::new(None),
+            #[cfg(test)]
+            observed_batch_sizes: Mutex::new(Vec::new()),
         })
     }
 
@@ -182,15 +194,15 @@ impl IngestionService {
     async fn worker_loop(self: Arc<Self>) {
         loop {
             let notified = self.item_available.notified();
-            if let Some(pending) = self.take_next().await {
-                self.apply_one(pending).await;
+            if let Some(batch) = self.take_batch().await {
+                self.apply_batch(batch).await;
                 continue;
             }
             notified.await;
         }
     }
 
-    async fn take_next(&self) -> Option<PendingInsert> {
+    async fn take_batch(&self) -> Option<Vec<PendingInsert>> {
         if self.queue_len() == 0 {
             return None;
         }
@@ -207,26 +219,49 @@ impl IngestionService {
             hook.pause().await;
         }
 
-        self.queue
-            .lock()
-            .expect("ingestion queue lock poisoned")
-            .dequeue()
+        let mut queue = self.queue.lock().expect("ingestion queue lock poisoned");
+        let mut batch = Vec::with_capacity(self.batch_size);
+        while batch.len() < self.batch_size {
+            match queue.dequeue() {
+                Some(pending) => batch.push(pending),
+                None => break,
+            }
+        }
+        if batch.is_empty() {
+            None
+        } else {
+            Some(batch)
+        }
     }
 
-    async fn apply_one(&self, pending: PendingInsert) {
-        let _lag = pending.enqueued_at.elapsed();
-        let _permit = pending.permit;
-        let result = {
-            let mut storage = self.storage.lock().await;
-            storage.insert_for_tenant(
+    async fn apply_batch(&self, batch: Vec<PendingInsert>) {
+        #[cfg(test)]
+        self.observed_batch_sizes
+            .lock()
+            .expect("observed batch sizes lock poisoned")
+            .push(batch.len());
+
+        let mut storage = self.storage.lock().await;
+        let mut completions = Vec::with_capacity(batch.len());
+
+        for pending in batch {
+            let _lag = pending.enqueued_at.elapsed();
+            let _permit = pending.permit;
+            let result = storage.insert_for_tenant(
                 &pending.request.tenant,
                 &pending.request.collection,
                 pending.request.document,
                 pending.request.upsert,
-            )
-        };
-        let _ = pending.completion.send(result);
-        self.pending_jobs.fetch_sub(1, Ordering::SeqCst);
+            );
+            completions.push((pending.completion, result));
+        }
+
+        drop(storage);
+
+        for (completion, result) in completions {
+            let _ = completion.send(result);
+            self.pending_jobs.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 
     pub(crate) fn queue_len(&self) -> usize {
@@ -244,6 +279,14 @@ impl IngestionService {
             .lock()
             .expect("pause hook lock poisoned") = Some(Arc::clone(&hook));
         hook
+    }
+
+    #[cfg(test)]
+    fn observed_batch_sizes(&self) -> Vec<usize> {
+        self.observed_batch_sizes
+            .lock()
+            .expect("observed batch sizes lock poisoned")
+            .clone()
     }
 }
 
@@ -337,7 +380,7 @@ mod tests {
     use proptest::prelude::*;
     use tempfile::TempDir;
 
-    fn build_state(queue_capacity: usize) -> (TempDir, AppState, TenantId) {
+    fn build_state(queue_capacity: usize, batch_size: usize) -> (TempDir, AppState, TenantId) {
         let dir = TempDir::new().unwrap();
         let tenant = TenantId::new("tenant-ingest");
         let mut storage = Storage::open(dir.path()).unwrap();
@@ -364,7 +407,8 @@ mod tests {
         let auth = ApiAuth::new().require_keys();
         auth.insert("writer", tenant.clone(), ApiRole::Writer);
         let cluster = ClusterRouter::from_config(ClusterConfig::single_node()).unwrap();
-        let state = AppState::new_with_ingestion_queue_capacity(storage, auth, cluster, queue_capacity);
+        let state =
+            AppState::new_with_ingestion_settings(storage, auth, cluster, queue_capacity, batch_size);
         (dir, state, tenant)
     }
 
@@ -466,7 +510,7 @@ mod tests {
 
     #[tokio::test]
     async fn insert_handler_accepts_and_queues_before_worker_dequeues() {
-        let (_dir, state, tenant) = build_state(DEFAULT_INGEST_QUEUE_CAPACITY);
+        let (_dir, state, tenant) = build_state(DEFAULT_INGEST_QUEUE_CAPACITY, 1);
         let hook = state.ingestion.install_pause_before_dequeue();
 
         let state_for_task = state.clone();
@@ -500,7 +544,7 @@ mod tests {
 
     #[tokio::test]
     async fn insert_handler_rejects_when_queue_is_full() {
-        let (_dir, state, _tenant) = build_state(1);
+        let (_dir, state, _tenant) = build_state(1, 1);
         let hook = state.ingestion.install_pause_before_dequeue();
 
         let state_for_task = state.clone();
@@ -534,7 +578,7 @@ mod tests {
 
     #[tokio::test]
     async fn insert_handler_validates_input_before_reporting_queue_pressure() {
-        let (_dir, state, _tenant) = build_state(1);
+        let (_dir, state, _tenant) = build_state(1, 1);
         let hook = state.ingestion.install_pause_before_dequeue();
 
         let state_for_task = state.clone();
@@ -564,6 +608,138 @@ mod tests {
 
         hook.release();
         assert_eq!(first_insert.await.unwrap().unwrap(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn worker_flushes_expected_docs_for_full_batch() {
+        let (_dir, state, tenant) = build_state(4, 2);
+        let hook = state.ingestion.install_pause_before_dequeue();
+
+        let first_state = state.clone();
+        let first = tokio::spawn(async move {
+            insert_document(
+                AxumPath("docs".to_string()),
+                State(first_state),
+                auth_headers(),
+                Json(insert_request(1, vec![1.0, 0.0])),
+            )
+            .await
+        });
+
+        hook.wait_until_reached().await;
+
+        let second_state = state.clone();
+        let second = tokio::spawn(async move {
+            insert_document(
+                AxumPath("docs".to_string()),
+                State(second_state),
+                auth_headers(),
+                Json(insert_request(2, vec![0.0, 1.0])),
+            )
+            .await
+        });
+
+        while state.ingestion.queue_len() < 2 {
+            tokio::task::yield_now().await;
+        }
+
+        hook.release();
+        assert_eq!(first.await.unwrap().unwrap(), StatusCode::CREATED);
+        assert_eq!(second.await.unwrap().unwrap(), StatusCode::CREATED);
+        assert_eq!(state.ingestion.observed_batch_sizes(), vec![2]);
+
+        let storage = state.storage.lock().await;
+        assert!(storage
+            .get_document(&tenant, "docs", &barq_index::DocumentId::U64(1))
+            .unwrap()
+            .is_some());
+        assert!(storage
+            .get_document(&tenant, "docs", &barq_index::DocumentId::U64(2))
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn worker_respects_batch_boundaries() {
+        let (_dir, state, tenant) = build_state(8, 2);
+        let hook = state.ingestion.install_pause_before_dequeue();
+
+        let first_state = state.clone();
+        let first = tokio::spawn(async move {
+            insert_document(
+                AxumPath("docs".to_string()),
+                State(first_state),
+                auth_headers(),
+                Json(insert_request(1, vec![1.0, 0.0])),
+            )
+            .await
+        });
+
+        hook.wait_until_reached().await;
+
+        let second_state = state.clone();
+        let second = tokio::spawn(async move {
+            insert_document(
+                AxumPath("docs".to_string()),
+                State(second_state),
+                auth_headers(),
+                Json(insert_request(2, vec![0.0, 1.0])),
+            )
+            .await
+        });
+
+        let third_state = state.clone();
+        let third = tokio::spawn(async move {
+            insert_document(
+                AxumPath("docs".to_string()),
+                State(third_state),
+                auth_headers(),
+                Json(insert_request(3, vec![0.5, 0.5])),
+            )
+            .await
+        });
+
+        while state.ingestion.queue_len() < 3 {
+            tokio::task::yield_now().await;
+        }
+
+        hook.release();
+        assert_eq!(first.await.unwrap().unwrap(), StatusCode::CREATED);
+        assert_eq!(second.await.unwrap().unwrap(), StatusCode::CREATED);
+        assert_eq!(third.await.unwrap().unwrap(), StatusCode::CREATED);
+        assert_eq!(state.ingestion.observed_batch_sizes(), vec![2, 1]);
+
+        let storage = state.storage.lock().await;
+        for id in 1..=3 {
+            assert!(storage
+                .get_document(&tenant, "docs", &barq_index::DocumentId::U64(id))
+                .unwrap()
+                .is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_flushes_partial_batch_when_queue_does_not_fill() {
+        let (_dir, state, tenant) = build_state(4, 4);
+
+        assert_eq!(
+            insert_document(
+                AxumPath("docs".to_string()),
+                State(state.clone()),
+                auth_headers(),
+                Json(insert_request(1, vec![1.0, 0.0])),
+            )
+            .await
+            .unwrap(),
+            StatusCode::CREATED
+        );
+
+        assert_eq!(state.ingestion.observed_batch_sizes(), vec![1]);
+        let storage = state.storage.lock().await;
+        assert!(storage
+            .get_document(&tenant, "docs", &barq_index::DocumentId::U64(1))
+            .unwrap()
+            .is_some());
     }
 
     proptest! {
