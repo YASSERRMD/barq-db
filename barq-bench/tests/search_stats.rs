@@ -1,4 +1,5 @@
-use barq_bench::search::{calculate_search_stats, percentile};
+use barq_bench::dataset::{generate_dataset, DatasetConfig};
+use barq_bench::search::{calculate_search_stats, percentile, run_search_benchmark, SearchBenchmarkConfig};
 use std::time::Duration;
 
 #[test]
@@ -28,4 +29,23 @@ fn percentile_known_samples_are_correct() {
     assert_eq!(percentile(&samples, 95.0), 24.0);
     assert_eq!(percentile(&samples, 99.0), 24.8);
     assert_eq!(percentile(&samples, 100.0), 25.0);
+}
+
+#[test]
+fn live_search_benchmark_executes_queries() {
+    let dataset = generate_dataset(&DatasetConfig {
+        seed: 11,
+        count: 32,
+        dimension: 8,
+    })
+    .expect("dataset should be generated");
+
+    let stats = run_search_benchmark(&SearchBenchmarkConfig { queries: 12 }, &dataset)
+        .expect("search benchmark should succeed");
+
+    assert_eq!(stats.samples, 12);
+    assert!(stats.p50_millis.is_finite());
+    assert!(stats.p95_millis.is_finite());
+    assert!(stats.p99_millis.is_finite());
+    assert!(stats.qps.is_finite());
 }

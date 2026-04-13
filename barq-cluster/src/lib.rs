@@ -6,6 +6,10 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod raft;
+
+pub use raft::*;
+
 /// Identifier for a node within the cluster.
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub String);

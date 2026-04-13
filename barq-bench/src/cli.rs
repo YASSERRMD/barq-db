@@ -25,8 +25,12 @@ pub enum Command {
     /// Run search benchmarks.
     Search {
         #[arg(long)]
-        queries: usize,
+        seed: u64,
         #[arg(long)]
-        simulated_latency_micros: u64,
+        count: usize,
+        #[arg(long)]
+        dimension: usize,
+        #[arg(long)]
+        queries: usize,
     },
 }

@@ -4,15 +4,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"os"
 	"strings"
 	"time"
 
-	pb "github.com/YASSERRMD/barq-db/barq-sdk-go/proto/barq"
+	pb "github.com/YASSERRMD/barq-db/barq-sdk-go/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 )
 
 type Config struct {
@@ -23,6 +27,14 @@ type Config struct {
 type Client struct {
 	config Config
 	http   *http.Client
+}
+
+func requireSupportedAPIVersion() error {
+	version := os.Getenv("API_VERSION")
+	if version == "" || version == "v1" {
+		return nil
+	}
+	return fmt.Errorf("unsupported API_VERSION: %s", version)
 }
 
 func NewClient(config Config) *Client {
@@ -36,7 +48,7 @@ func NewClient(config Config) *Client {
 
 func (c *Client) request(ctx context.Context, method, path string, body interface{}) ([]byte, error) {
 	url := fmt.Sprintf("%s%s", strings.TrimRight(c.config.BaseURL, "/"), path)
-	
+
 	var bodyReader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -87,6 +99,18 @@ type TextField struct {
 }
 
 func (c *Client) CreateCollection(ctx context.Context, req CreateCollectionRequest) error {
+	if err := requireSupportedAPIVersion(); err != nil {
+		return err
+	}
+	if req.Index == nil && len(req.TextFields) == 0 {
+		grpcClient, err := NewGrpcClientWithAPIKey(c.grpcTarget(), c.config.APIKey)
+		if err != nil {
+			return err
+		}
+		defer grpcClient.Close()
+		return grpcClient.CreateCollection(ctx, req.Name, req.Dimension, req.Metric)
+	}
+
 	_, err := c.request(ctx, "POST", "/collections", req)
 	return err
 }
@@ -95,19 +119,133 @@ type InsertRequest struct {
 	ID      interface{}     `json:"id"`
 	Vector  []float32       `json:"vector"`
 	Payload json.RawMessage `json:"payload,omitempty"`
+	Options *InsertOptions  `json:"options,omitempty"`
+}
+
+type InsertOptions struct {
+	WaitForCommit *bool
+}
+
+type InsertState string
+
+const (
+	InsertStateQueued     InsertState = "queued"
+	InsertStateProcessing InsertState = "processing"
+	InsertStateSucceeded  InsertState = "succeeded"
+	InsertStateFailed     InsertState = "failed"
+)
+
+type InsertStatus struct {
+	RequestID    string
+	State        InsertState
+	ErrorMessage string
 }
 
 func (c *Client) Insert(ctx context.Context, collection string, req InsertRequest) error {
-	path := fmt.Sprintf("/collections/%s/documents", collection)
-	_, err := c.request(ctx, "POST", path, req)
-	return err
+	if err := requireSupportedAPIVersion(); err != nil {
+		return err
+	}
+	grpcClient, err := NewGrpcClientWithAPIKey(c.grpcTarget(), c.config.APIKey)
+	if err != nil {
+		return err
+	}
+	defer grpcClient.Close()
+	return grpcClient.InsertWithOptions(
+		ctx,
+		collection,
+		req.ID,
+		req.Vector,
+		rawPayloadToAny(req.Payload),
+		req.Options,
+	)
+}
+
+func (c *Client) InsertAsync(ctx context.Context, collection string, req InsertRequest) (string, error) {
+	if err := requireSupportedAPIVersion(); err != nil {
+		return "", err
+	}
+	grpcClient, err := NewGrpcClientWithAPIKey(c.grpcTarget(), c.config.APIKey)
+	if err != nil {
+		return "", err
+	}
+	defer grpcClient.Close()
+	return grpcClient.InsertAsync(
+		ctx,
+		collection,
+		req.ID,
+		req.Vector,
+		rawPayloadToAny(req.Payload),
+		req.Options,
+	)
+}
+
+func (c *Client) GetInsertStatus(ctx context.Context, requestID string) (InsertStatus, error) {
+	if err := requireSupportedAPIVersion(); err != nil {
+		return InsertStatus{}, err
+	}
+	grpcClient, err := NewGrpcClientWithAPIKey(c.grpcTarget(), c.config.APIKey)
+	if err != nil {
+		return InsertStatus{}, err
+	}
+	defer grpcClient.Close()
+	return grpcClient.GetInsertStatus(ctx, requestID)
+}
+
+func (c *Client) GetMetrics(ctx context.Context) (*pb.GetMetricsResponse, error) {
+	if err := requireSupportedAPIVersion(); err != nil {
+		return nil, err
+	}
+	grpcClient, err := NewGrpcClientWithAPIKey(c.grpcTarget(), c.config.APIKey)
+	if err != nil {
+		return nil, err
+	}
+	defer grpcClient.Close()
+	return grpcClient.GetMetrics(ctx)
+}
+
+func (c *Client) GetClusterStatus(ctx context.Context) (*pb.GetClusterStatusResponse, error) {
+	if err := requireSupportedAPIVersion(); err != nil {
+		return nil, err
+	}
+	grpcClient, err := NewGrpcClientWithAPIKey(c.grpcTarget(), c.config.APIKey)
+	if err != nil {
+		return nil, err
+	}
+	defer grpcClient.Close()
+	return grpcClient.GetClusterStatus(ctx)
+}
+
+func (c *Client) GetSegmentInfo(ctx context.Context, collection string) (*pb.GetSegmentInfoResponse, error) {
+	if err := requireSupportedAPIVersion(); err != nil {
+		return nil, err
+	}
+	grpcClient, err := NewGrpcClientWithAPIKey(c.grpcTarget(), c.config.APIKey)
+	if err != nil {
+		return nil, err
+	}
+	defer grpcClient.Close()
+	return grpcClient.GetSegmentInfo(ctx, collection)
 }
 
 type SearchRequest struct {
-	Vector []float32   `json:"vector,omitempty"`
-	Query  string      `json:"query,omitempty"`
-	TopK   int         `json:"top_k"`
-	Filter interface{} `json:"filter,omitempty"`
+	Vector  []float32      `json:"vector,omitempty"`
+	Query   string         `json:"query,omitempty"`
+	TopK    int            `json:"top_k"`
+	Filter  interface{}    `json:"filter,omitempty"`
+	Options *SearchOptions `json:"options,omitempty"`
+}
+
+type Consistency string
+
+const (
+	ConsistencyPrimary   Consistency = "primary"
+	ConsistencyFollowers Consistency = "followers"
+	ConsistencyAny       Consistency = "any"
+)
+
+type SearchOptions struct {
+	Consistency   *Consistency
+	AllowFallback *bool
 }
 
 type SearchResponse struct {
@@ -120,6 +258,27 @@ type SearchResult struct {
 }
 
 func (c *Client) Search(ctx context.Context, collection string, req SearchRequest) ([]SearchResult, error) {
+	if err := requireSupportedAPIVersion(); err != nil {
+		return nil, err
+	}
+	if req.Query == "" && req.Filter == nil {
+		grpcClient, err := NewGrpcClientWithAPIKey(c.grpcTarget(), c.config.APIKey)
+		if err != nil {
+			return nil, err
+		}
+		defer grpcClient.Close()
+
+		results, err := grpcClient.SearchWithOptions(ctx, collection, req.Vector, req.TopK, req.Options)
+		if err != nil {
+			return nil, err
+		}
+		return results, nil
+	}
+
+	if req.Options != nil {
+		return nil, errors.New("advanced search options are only supported for vector-only gRPC search")
+	}
+
 	path := fmt.Sprintf("/collections/%s/search", collection)
 	if req.Vector != nil && req.Query != "" {
 		path += "/hybrid"
@@ -144,31 +303,47 @@ func (c *Client) Search(ctx context.Context, collection string, req SearchReques
 type GrpcClient struct {
 	conn   *grpc.ClientConn
 	client pb.BarqClient
+	apiKey string
 }
 
 func NewGrpcClient(target string) (*GrpcClient, error) {
+	return NewGrpcClientWithAPIKey(target, "")
+}
+
+func NewGrpcClientWithAPIKey(target string, apiKey string) (*GrpcClient, error) {
 	conn, err := grpc.Dial(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, err
 	}
 	client := pb.NewBarqClient(conn)
-	return &GrpcClient{conn: conn, client: client}, nil
+	return &GrpcClient{conn: conn, client: client, apiKey: apiKey}, nil
 }
 
 func (c *GrpcClient) Close() error {
 	return c.conn.Close()
 }
 
-func (c *GrpcClient) Health(ctx context.Context) (bool, error) {
-	resp, err := c.client.Health(ctx, &pb.HealthRequest{})
+func (c *GrpcClient) authContext(ctx context.Context) context.Context {
+	if c.apiKey == "" {
+		return ctx
+	}
+	return metadata.AppendToOutgoingContext(ctx, "x-api-key", c.apiKey)
+}
+
+func (c *GrpcClient) Status(ctx context.Context) (bool, error) {
+	resp, err := c.client.Status(c.authContext(ctx), &pb.StatusRequest{})
 	if err != nil {
 		return false, err
 	}
 	return resp.Ok, nil
 }
 
+func (c *GrpcClient) Health(ctx context.Context) (bool, error) {
+	return c.Status(ctx)
+}
+
 func (c *GrpcClient) CreateCollection(ctx context.Context, name string, dimension int, metric string) error {
-	_, err := c.client.CreateCollection(ctx, &pb.CreateCollectionRequest{
+	_, err := c.client.CreateCollection(c.authContext(ctx), &pb.CreateCollectionRequest{
 		Name:      name,
 		Dimension: uint32(dimension),
 		Metric:    metric,
@@ -176,28 +351,91 @@ func (c *GrpcClient) CreateCollection(ctx context.Context, name string, dimensio
 	return err
 }
 
-func (c *GrpcClient) InsertDocument(ctx context.Context, collection string, id interface{}, vector []float32, payload interface{}) error {
+func (c *GrpcClient) Insert(ctx context.Context, collection string, id interface{}, vector []float32, payload interface{}) error {
+	return c.InsertWithOptions(ctx, collection, id, vector, payload, nil)
+}
+
+func (c *GrpcClient) InsertAsync(ctx context.Context, collection string, id interface{}, vector []float32, payload interface{}, options *InsertOptions) (string, error) {
 	idStr := fmt.Sprintf("%v", id)
-	
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := c.client.InsertAsync(c.authContext(ctx), &pb.InsertRequest{
+		Collection:  collection,
+		Id:          idStr,
+		Vector:      vector,
+		PayloadJson: string(payloadBytes),
+		Options:     protoInsertOptions(options),
+	})
+	if err != nil {
+		return "", err
+	}
+	return resp.RequestId, nil
+}
+
+func (c *GrpcClient) GetInsertStatus(ctx context.Context, requestID string) (InsertStatus, error) {
+	resp, err := c.client.GetInsertStatus(c.authContext(ctx), &pb.GetInsertStatusRequest{
+		RequestId: requestID,
+	})
+	if err != nil {
+		return InsertStatus{}, err
+	}
+	return InsertStatus{
+		RequestID:    resp.RequestId,
+		State:        insertStateFromProto(resp.State),
+		ErrorMessage: resp.ErrorMessage,
+	}, nil
+}
+
+func (c *GrpcClient) GetMetrics(ctx context.Context) (*pb.GetMetricsResponse, error) {
+	return c.client.GetMetrics(c.authContext(ctx), &pb.GetMetricsRequest{})
+}
+
+func (c *GrpcClient) GetClusterStatus(ctx context.Context) (*pb.GetClusterStatusResponse, error) {
+	return c.client.GetClusterStatus(c.authContext(ctx), &pb.GetClusterStatusRequest{})
+}
+
+func (c *GrpcClient) GetSegmentInfo(ctx context.Context, collection string) (*pb.GetSegmentInfoResponse, error) {
+	return c.client.GetSegmentInfo(c.authContext(ctx), &pb.GetSegmentInfoRequest{
+		Collection: collection,
+	})
+}
+
+func (c *GrpcClient) InsertWithOptions(ctx context.Context, collection string, id interface{}, vector []float32, payload interface{}, options *InsertOptions) error {
+	idStr := fmt.Sprintf("%v", id)
+
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
 
-	_, err = c.client.InsertDocument(ctx, &pb.InsertDocumentRequest{
+	_, err = c.client.Insert(c.authContext(ctx), &pb.InsertRequest{
 		Collection:  collection,
 		Id:          idStr,
 		Vector:      vector,
 		PayloadJson: string(payloadBytes),
+		Options:     protoInsertOptions(options),
 	})
 	return err
 }
 
+func (c *GrpcClient) InsertDocument(ctx context.Context, collection string, id interface{}, vector []float32, payload interface{}) error {
+	return c.Insert(ctx, collection, id, vector, payload)
+}
+
 func (c *GrpcClient) Search(ctx context.Context, collection string, vector []float32, topK int) ([]SearchResult, error) {
-	resp, err := c.client.Search(ctx, &pb.SearchRequest{
+	return c.SearchWithOptions(ctx, collection, vector, topK, nil)
+}
+
+func (c *GrpcClient) SearchWithOptions(ctx context.Context, collection string, vector []float32, topK int, options *SearchOptions) ([]SearchResult, error) {
+	resp, err := c.client.Search(c.authContext(ctx), &pb.SearchRequest{
 		Collection: collection,
 		Vector:     vector,
 		TopK:       uint32(topK),
+		Options:    protoSearchOptions(options),
 	})
 	if err != nil {
 		return nil, err
@@ -205,10 +443,116 @@ func (c *GrpcClient) Search(ctx context.Context, collection string, vector []flo
 
 	var results []SearchResult
 	for _, r := range resp.Results {
+		id := interface{}(map[string]interface{}{"Str": r.Id})
+		if numericID, err := parseCompatID(r.Id); err == nil {
+			id = map[string]interface{}{"U64": numericID}
+		}
 		results = append(results, SearchResult{
-			ID:    r.Id,
+			ID:    id,
 			Score: r.Score, // Proto definition must enable Score
 		})
 	}
 	return results, nil
+}
+
+func (c *Client) grpcTarget() string {
+	if override := os.Getenv("BARQ_GRPC_ADDR"); override != "" {
+		if strings.Contains(override, "://") {
+			if parsed, err := url.Parse(override); err == nil && parsed.Host != "" {
+				return parsed.Host
+			}
+		}
+		return override
+	}
+
+	parsed, err := url.Parse(c.config.BaseURL)
+	if err != nil || parsed.Host == "" {
+		return c.config.BaseURL
+	}
+	parsed.Path = ""
+	parsed.RawPath = ""
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	host := parsed.Hostname()
+	if host == "" {
+		return c.config.BaseURL
+	}
+	return fmt.Sprintf("%s:%d", host, 50051)
+}
+
+func protoInsertOptions(options *InsertOptions) *pb.InsertOptions {
+	if options == nil || options.WaitForCommit == nil {
+		return nil
+	}
+	return &pb.InsertOptions{
+		WaitForCommit: *options.WaitForCommit,
+	}
+}
+
+func protoSearchOptions(options *SearchOptions) *pb.SearchOptions {
+	if options == nil || (options.Consistency == nil && options.AllowFallback == nil) {
+		return nil
+	}
+
+	consistency := pb.Consistency_CONSISTENCY_UNSPECIFIED
+	if options.Consistency != nil {
+		switch *options.Consistency {
+		case ConsistencyPrimary:
+			consistency = pb.Consistency_CONSISTENCY_PRIMARY
+		case ConsistencyFollowers:
+			consistency = pb.Consistency_CONSISTENCY_FOLLOWERS
+		case ConsistencyAny:
+			consistency = pb.Consistency_CONSISTENCY_ANY
+		default:
+			consistency = pb.Consistency_CONSISTENCY_UNSPECIFIED
+		}
+	}
+
+	allowFallback := true
+	if options.AllowFallback != nil {
+		allowFallback = *options.AllowFallback
+	}
+
+	return &pb.SearchOptions{
+		Consistency:   consistency,
+		AllowFallback: allowFallback,
+	}
+}
+
+func insertStateFromProto(state pb.InsertStatusState) InsertState {
+	switch state {
+	case pb.InsertStatusState_INSERT_STATUS_STATE_QUEUED:
+		return InsertStateQueued
+	case pb.InsertStatusState_INSERT_STATUS_STATE_PROCESSING:
+		return InsertStateProcessing
+	case pb.InsertStatusState_INSERT_STATUS_STATE_SUCCEEDED:
+		return InsertStateSucceeded
+	case pb.InsertStatusState_INSERT_STATUS_STATE_FAILED:
+		return InsertStateFailed
+	default:
+		return InsertStateQueued
+	}
+}
+
+func rawPayloadToAny(payload json.RawMessage) interface{} {
+	if len(payload) == 0 {
+		return map[string]interface{}{}
+	}
+
+	var decoded interface{}
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		return string(payload)
+	}
+	return decoded
+}
+
+func parseCompatID(id string) (uint64, error) {
+	var value uint64
+	if _, err := fmt.Sscanf(id, "%d", &value); err != nil {
+		return 0, err
+	}
+	if fmt.Sprintf("%d", value) != id {
+		return 0, errors.New("not a numeric id")
+	}
+	return value, nil
 }

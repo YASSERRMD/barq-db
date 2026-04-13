@@ -17,7 +17,8 @@ fn harness_smoke_test() {
             measured_iterations: 2,
         },
         &dataset,
-    );
+    )
+    .expect("ingestion benchmark should succeed");
 
     assert_eq!(result.benchmark, "ingestion");
     assert_eq!(result.record_count, 32);
@@ -40,7 +41,8 @@ fn output_format_is_valid_json() {
             measured_iterations: 1,
         },
         &dataset,
-    );
+    )
+    .expect("ingestion benchmark should succeed");
 
     let json = serde_json::to_string(&result).expect("result should serialize");
     let value: Value = serde_json::from_str(&json).expect("json should parse");

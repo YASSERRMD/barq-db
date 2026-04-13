@@ -1,4 +1,6 @@
+use crate::runtime::{benchmark_collection, RuntimeBenchmarkError};
 use crate::dataset::VectorRecord;
+use barq_core::{Document, DocumentId};
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
@@ -21,32 +23,41 @@ pub struct IngestionBenchmarkResult {
 pub fn run_ingestion_benchmark(
     config: &IngestionBenchmarkConfig,
     dataset: &[VectorRecord],
-) -> IngestionBenchmarkResult {
+) -> Result<IngestionBenchmarkResult, RuntimeBenchmarkError> {
+    let first = dataset.first().ok_or(RuntimeBenchmarkError::EmptyDataset)?;
     for _ in 0..config.warmup_iterations {
-        let mut checksum = 0.0f32;
+        let mut collection = benchmark_collection("bench_ingest_warmup", first.values.len())?;
         for record in dataset {
-            checksum += record.values.iter().copied().sum::<f32>();
+            collection.insert(Document {
+                id: DocumentId::U64(record.id as u64 + 1),
+                vector: record.values.clone(),
+                payload: None,
+            })?;
         }
-        std::hint::black_box(checksum);
+        std::hint::black_box(collection.document_count());
     }
 
     let start = Instant::now();
-    let mut checksum = 0.0f32;
     for _ in 0..config.measured_iterations {
+        let mut collection = benchmark_collection("bench_ingest_measured", first.values.len())?;
         for record in dataset {
-            checksum += record.values.iter().copied().sum::<f32>();
+            collection.insert(Document {
+                id: DocumentId::U64(record.id as u64 + 1),
+                vector: record.values.clone(),
+                payload: None,
+            })?;
         }
+        std::hint::black_box(collection.document_count());
     }
-    std::hint::black_box(checksum);
     let elapsed = start.elapsed();
     let total_vectors_written = dataset.len() * config.measured_iterations;
     let secs = elapsed.as_secs_f64().max(f64::EPSILON);
 
-    IngestionBenchmarkResult {
+    Ok(IngestionBenchmarkResult {
         benchmark: "ingestion".to_string(),
         record_count: dataset.len(),
         total_vectors_written,
         elapsed_millis: elapsed.as_millis(),
         vectors_per_second: total_vectors_written as f64 / secs,
-    }
+    })
 }

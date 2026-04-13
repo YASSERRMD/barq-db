@@ -15,37 +15,37 @@ The repository currently implements:
 - Administrative shard placement updates and rebalancing helpers
 - An in-memory `ReplicationLog` and `ReplicationManager` for log-shipping style
   replication tests
+- A deterministic in-memory `RaftCluster` engine with leader election, term
+  transitions, quorum commit, stale-leader rejection, follower catch-up, and
+  partition/heal simulation coverage
 
-These capabilities support shard routing and basic replication simulation, but
-they do not provide consensus semantics.
+These capabilities provide concrete consensus behavior inside `barq-cluster`,
+but the API/runtime write path is still primarily routed replication unless a
+consensus-backed integration is added on top.
 
 ## Missing Consensus Requirements
 
 The repository does not currently implement:
 
-- Leader election
-- Persistent term tracking
-- Majority quorum commit
-- A durable replicated log
-- Log matching and conflict resolution
-- Follower catch-up after lag or restart
+- Durable on-disk persistence for Raft term, vote, and log state
+- Runtime/API integration that routes client writes through the Raft engine
 - Membership changes with consensus safety
-- Network partition handling
 - Crash recovery for in-flight consensus state
-- Stale leader rejection
+- Snapshotting/log compaction for the Raft log
+- Production network transport between real nodes
 
 Without these properties, the system cannot honestly claim Raft or
-Raft-equivalent consensus.
+Raft-equivalent production deployment semantics across the full database.
 
 ## Current Write Semantics
 
-Current writes are routed to the configured primary for a shard. The cluster
-crate also exposes an in-memory replication helper, but API write acceptance is
-not tied to a quorum commit protocol and does not wait for consensus across
-nodes.
+Current API writes are still routed to the configured primary for a shard. The
+cluster crate now also exposes a deterministic Raft engine, but API write
+acceptance is not yet wired to that quorum commit path.
 
-The present behavior is best described as static shard routing with optional
-replication helpers, not consensus-backed distributed writes.
+The present runtime behavior is best described as static shard routing with
+replication helpers, plus an in-crate consensus engine available for simulation
+and verification.
 
 The current write durability should be reported explicitly as:
 

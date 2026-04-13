@@ -2,6 +2,8 @@
 
 These scripts run **benchmark utilities**, not correctness tests.
 
+CI smoke coverage for the benchmark harness lives in `.github/workflows/benchmarks.yml`.
+
 ## Reproducible benchmark runs
 
 ```bash
@@ -14,5 +16,5 @@ For direct CLI usage:
 
 ```bash
 cargo run -p barq-bench -- --format json ingest --seed 11 --count 1000000 --dimension 128
-cargo run -p barq-bench -- --format json search --queries 10000 --simulated-latency-micros 250
+cargo run -p barq-bench -- --format json search --seed 11 --count 1000000 --dimension 128 --queries 10000
 ```

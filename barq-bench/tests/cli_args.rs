@@ -34,10 +34,14 @@ fn rejects_invalid_args_cleanly() {
     let err = Cli::try_parse_from([
         "barq-bench",
         "search",
+        "--seed",
+        "7",
+        "--count",
+        "100",
+        "--dimension",
+        "64",
         "--queries",
         "bad",
-        "--simulated-latency-micros",
-        "10",
     ])
     .expect_err("invalid count should fail");
     let rendered = err.to_string();

@@ -5,7 +5,8 @@
     "main": "dist/index.js",
     "types": "dist/index.d.ts",
     "scripts": {
-        "build": "tsc"
+        "build": "tsc",
+        "generate:proto-types": "proto-loader-gen-types --grpcLib=@grpc/grpc-js -I proto -O src/generated proto/barq.proto"
     },
     "keywords": [
         "barq",

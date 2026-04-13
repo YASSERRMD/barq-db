@@ -1,11 +1,22 @@
+pub use barq_core::{
+    CollectionSchema, DistanceMetric, DocumentId, Filter, HybridWeights, PayloadValue,
+};
+use barq_proto::barq::barq_client::BarqClient as TonicBarqClient;
+use barq_proto::barq::{
+    Consistency as ProtoConsistency, CreateCollectionRequest, GetClusterStatusRequest,
+    GetClusterStatusResponse, GetInsertStatusRequest, GetMetricsRequest, GetMetricsResponse,
+    GetSegmentInfoRequest, GetSegmentInfoResponse, InsertOptions as ProtoInsertOptions,
+    InsertRequest, InsertStatusState as ProtoInsertStatusState,
+    SearchOptions as ProtoSearchOptions, SearchRequest, StatusRequest,
+};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::env;
 use std::time::Duration;
-pub use barq_core::{CollectionSchema, DistanceMetric, DocumentId, Filter, HybridWeights, PayloadValue};
+use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
-use barq_proto::barq::barq_client::BarqClient as TonicBarqClient;
-use barq_proto::barq::{CreateCollectionRequest, InsertDocumentRequest, SearchRequest, HealthRequest};
+use tonic::Request;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BarqError {
@@ -22,6 +33,139 @@ pub enum BarqError {
 }
 
 pub type Result<T> = std::result::Result<T, BarqError>;
+
+fn ensure_supported_api_version() -> Result<()> {
+    let version = env::var("API_VERSION").unwrap_or_else(|_| "v1".to_string());
+    if version == "v1" {
+        Ok(())
+    } else {
+        Err(BarqError::Api {
+            status: StatusCode::BAD_REQUEST,
+            message: format!("unsupported API_VERSION: {version}"),
+        })
+    }
+}
+
+fn grpc_endpoint(base_url: &str) -> Result<String> {
+    if let Ok(value) = env::var("BARQ_GRPC_ADDR") {
+        if value.contains("://") {
+            return Ok(value);
+        }
+        return Ok(format!("http://{}", value));
+    }
+
+    let mut url = reqwest::Url::parse(base_url).map_err(|error| BarqError::Api {
+        status: StatusCode::BAD_REQUEST,
+        message: format!("invalid base url: {error}"),
+    })?;
+    url.set_path("");
+    url.set_query(None);
+    url.set_fragment(None);
+    url.set_port(Some(50051)).map_err(|_| BarqError::Api {
+        status: StatusCode::BAD_REQUEST,
+        message: "invalid grpc port".to_string(),
+    })?;
+    Ok(url.to_string())
+}
+
+fn compat_document_id_json(id: &str) -> serde_json::Value {
+    if let Ok(value) = id.parse::<u64>() {
+        json!({ "U64": value })
+    } else {
+        json!({ "Str": id })
+    }
+}
+
+/// Optional insert controls for the canonical gRPC API.
+#[derive(Clone, Debug, Default)]
+pub struct InsertOptions {
+    wait_for_commit: Option<bool>,
+}
+
+impl InsertOptions {
+    /// Creates an empty insert options builder that preserves existing defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Controls whether the server waits for the write to be applied before returning.
+    pub fn wait_for_commit(mut self, wait_for_commit: bool) -> Self {
+        self.wait_for_commit = Some(wait_for_commit);
+        self
+    }
+
+    fn into_proto(self) -> Option<ProtoInsertOptions> {
+        self.wait_for_commit
+            .map(|wait_for_commit| ProtoInsertOptions { wait_for_commit })
+    }
+}
+
+/// Read-routing preference for vector search requests.
+#[derive(Clone, Copy, Debug)]
+pub enum SearchConsistency {
+    Primary,
+    Followers,
+    Any,
+}
+
+/// Optional search controls for the canonical gRPC API.
+#[derive(Clone, Debug, Default)]
+pub struct SearchOptions {
+    consistency: Option<SearchConsistency>,
+    allow_fallback: Option<bool>,
+}
+
+impl SearchOptions {
+    /// Creates an empty search options builder that preserves existing defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Selects the preferred routing target for the search request.
+    pub fn consistency(mut self, consistency: SearchConsistency) -> Self {
+        self.consistency = Some(consistency);
+        self
+    }
+
+    /// Controls whether the server may fall back to brute-force search when the index is not ready.
+    pub fn allow_fallback(mut self, allow_fallback: bool) -> Self {
+        self.allow_fallback = Some(allow_fallback);
+        self
+    }
+
+    fn into_proto(self) -> Option<ProtoSearchOptions> {
+        if self.consistency.is_none() && self.allow_fallback.is_none() {
+            return None;
+        }
+
+        Some(ProtoSearchOptions {
+            consistency: match self.consistency {
+                Some(SearchConsistency::Primary) => ProtoConsistency::Primary as i32,
+                Some(SearchConsistency::Followers) => ProtoConsistency::Followers as i32,
+                Some(SearchConsistency::Any) => ProtoConsistency::Any as i32,
+                None => ProtoConsistency::Unspecified as i32,
+            },
+            allow_fallback: self.allow_fallback.unwrap_or(true),
+        })
+    }
+}
+
+/// Current lifecycle state of a tracked asynchronous insert.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InsertState {
+    Queued,
+    Processing,
+    Succeeded,
+    Failed,
+}
+
+/// Snapshot returned when polling the state of an asynchronous insert.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InsertStatus {
+    pub request_id: String,
+    pub state: InsertState,
+    pub error_message: Option<String>,
+}
 
 #[derive(Clone, Debug)]
 pub struct BarqClient {
@@ -50,26 +194,75 @@ impl BarqClient {
     }
 
     pub async fn health(&self) -> Result<()> {
-        let url = format!("{}/health", self.base_url);
-        let res = self.client.get(&url).send().await?;
-        if res.status().is_success() {
+        ensure_supported_api_version()?;
+        let mut client = BarqGrpcClient::connect_with_api_key(
+            grpc_endpoint(&self.base_url)?,
+            self.api_key.clone(),
+        )
+        .await?;
+        if client.status().await? {
             Ok(())
         } else {
             Err(BarqError::Api {
-                status: res.status(),
-                message: res.text().await?,
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                message: "grpc status returned not ok".to_string(),
             })
         }
     }
 
+    pub async fn get_metrics(&self) -> Result<GetMetricsResponse> {
+        ensure_supported_api_version()?;
+        let mut client = BarqGrpcClient::connect_with_api_key(
+            grpc_endpoint(&self.base_url)?,
+            self.api_key.clone(),
+        )
+        .await?;
+        client.get_metrics().await
+    }
+
+    pub async fn get_cluster_status(&self) -> Result<GetClusterStatusResponse> {
+        ensure_supported_api_version()?;
+        let mut client = BarqGrpcClient::connect_with_api_key(
+            grpc_endpoint(&self.base_url)?,
+            self.api_key.clone(),
+        )
+        .await?;
+        client.get_cluster_status().await
+    }
+
+    pub async fn get_segment_info(
+        &self,
+        collection: Option<&str>,
+    ) -> Result<GetSegmentInfoResponse> {
+        ensure_supported_api_version()?;
+        let mut client = BarqGrpcClient::connect_with_api_key(
+            grpc_endpoint(&self.base_url)?,
+            self.api_key.clone(),
+        )
+        .await?;
+        client.get_segment_info(collection).await
+    }
+
     pub async fn create_collection(
-        &self, 
-        name: &str, 
-        dimension: usize, 
+        &self,
+        name: &str,
+        dimension: usize,
         metric: DistanceMetric,
-        index: Option<serde_json::Value>, 
+        index: Option<serde_json::Value>,
         text_fields: Option<Vec<TextFieldRequest>>,
     ) -> Result<()> {
+        ensure_supported_api_version()?;
+        if index.is_none() && text_fields.as_ref().map_or(true, Vec::is_empty) {
+            let mut client = BarqGrpcClient::connect_with_api_key(
+                grpc_endpoint(&self.base_url)?,
+                self.api_key.clone(),
+            )
+            .await?;
+            return client
+                .create_collection(name, dimension as u32, metric)
+                .await;
+        }
+
         let url = format!("{}/collections", self.base_url);
         let payload = json!({
             "name": name,
@@ -79,7 +272,9 @@ impl BarqClient {
             "text_fields": text_fields.unwrap_or_default()
         });
 
-        let res = self.client.post(&url)
+        let res = self
+            .client
+            .post(&url)
             .header("x-api-key", &self.api_key)
             .json(&payload)
             .send()
@@ -103,47 +298,91 @@ pub struct Collection {
 }
 
 impl Collection {
-    pub async fn insert(&self, id: impl Into<DocumentId>, vector: Vec<f32>, payload: Option<serde_json::Value>) -> Result<()> {
-        let url = format!("{}/collections/{}/documents", self.client.base_url, self.name);
-        
+    pub async fn insert(
+        &self,
+        id: impl Into<DocumentId>,
+        vector: Vec<f32>,
+        payload: Option<serde_json::Value>,
+    ) -> Result<()> {
+        self.insert_with_options(id, vector, payload, InsertOptions::new())
+            .await
+    }
+
+    pub async fn insert_async(
+        &self,
+        id: impl Into<DocumentId>,
+        vector: Vec<f32>,
+        payload: Option<serde_json::Value>,
+    ) -> Result<String> {
+        ensure_supported_api_version()?;
         let id_obj = id.into();
-        let id_val = match id_obj {
-            DocumentId::U64(v) => json!(v),
-            DocumentId::Str(s) => json!(s),
-        };
+        let mut client = BarqGrpcClient::connect_with_api_key(
+            grpc_endpoint(&self.client.base_url)?,
+            self.client.api_key.clone(),
+        )
+        .await?;
+        client
+            .insert_async(
+                &self.name,
+                id_obj,
+                vector,
+                payload.unwrap_or_else(|| json!({})),
+            )
+            .await
+    }
 
-        let json_payload = json!({
-            "id": id_val,
-            "vector": vector,
-            "payload": payload
-        });
+    pub async fn insert_with_options(
+        &self,
+        id: impl Into<DocumentId>,
+        vector: Vec<f32>,
+        payload: Option<serde_json::Value>,
+        options: InsertOptions,
+    ) -> Result<()> {
+        ensure_supported_api_version()?;
+        let id_obj = id.into();
+        let mut client = BarqGrpcClient::connect_with_api_key(
+            grpc_endpoint(&self.client.base_url)?,
+            self.client.api_key.clone(),
+        )
+        .await?;
+        client
+            .insert_with_options(
+                &self.name,
+                id_obj,
+                vector,
+                payload.unwrap_or_else(|| json!({})),
+                options.into_proto(),
+            )
+            .await
+    }
 
-        let res = self.client.client.post(&url)
-            .header("x-api-key", &self.client.api_key)
-            .json(&json_payload)
-            .send()
-            .await?;
-
-        if res.status().is_success() {
-            Ok(())
-        } else {
-            Err(BarqError::Api {
-                status: res.status(),
-                message: res.text().await?,
-            })
-        }
+    pub async fn get_insert_status(&self, request_id: &str) -> Result<InsertStatus> {
+        ensure_supported_api_version()?;
+        let mut client = BarqGrpcClient::connect_with_api_key(
+            grpc_endpoint(&self.client.base_url)?,
+            self.client.api_key.clone(),
+        )
+        .await?;
+        client.get_insert_status(request_id).await
     }
 
     pub async fn search(
-        &self, 
-        vector: Option<Vec<f32>>, 
-        query: Option<String>, 
-        top_k: usize, 
+        &self,
+        vector: Option<Vec<f32>>,
+        query: Option<String>,
+        top_k: usize,
         filter: Option<Filter>,
-        weights: Option<HybridWeights>
+        weights: Option<HybridWeights>,
     ) -> Result<Vec<serde_json::Value>> {
+        if vector.is_some() && query.is_none() && filter.is_none() && weights.is_none() {
+            return self
+                .search_with_options(vector.unwrap_or_default(), top_k, SearchOptions::new())
+                .await;
+        }
+
+        ensure_supported_api_version()?;
         let mut url = format!("{}/collections/{}/search", self.client.base_url, self.name);
-        
+
         if vector.is_some() && query.is_some() {
             url.push_str("/hybrid");
         } else if query.is_some() {
@@ -158,7 +397,10 @@ impl Collection {
             "weights": weights
         });
 
-        let res = self.client.client.post(&url)
+        let res = self
+            .client
+            .client
+            .post(&url)
             .header("x-api-key", &self.client.api_key)
             .json(&payload)
             .send()
@@ -179,19 +421,49 @@ impl Collection {
         }
     }
 
+    pub async fn search_with_options(
+        &self,
+        vector: Vec<f32>,
+        top_k: usize,
+        options: SearchOptions,
+    ) -> Result<Vec<serde_json::Value>> {
+        ensure_supported_api_version()?;
+        let mut client = BarqGrpcClient::connect_with_api_key(
+            grpc_endpoint(&self.client.base_url)?,
+            self.client.api_key.clone(),
+        )
+        .await?;
+        let results = client
+            .search_with_options(&self.name, vector, top_k as u32, options.into_proto())
+            .await?;
+        Ok(results
+            .into_iter()
+            .map(|result| {
+                json!({
+                    "id": compat_document_id_json(result["id"].as_str().unwrap_or_default()),
+                    "score": result["score"],
+                })
+            })
+            .collect())
+    }
+
     pub async fn batch_search(
         &self,
         queries: Vec<SearchQuery>,
         top_k: usize,
     ) -> Result<Vec<Vec<serde_json::Value>>> {
-        let url = format!("{}/collections/{}/batch_search", self.client.base_url, self.name);
+        ensure_supported_api_version()?;
+        let url = format!(
+            "{}/collections/{}/batch_search",
+            self.client.base_url, self.name
+        );
 
-        let payload = BatchSearchRequest {
-            queries,
-            top_k,
-        };
+        let payload = BatchSearchRequest { queries, top_k };
 
-        let res = self.client.client.post(&url)
+        let res = self
+            .client
+            .client
+            .post(&url)
             .header("x-api-key", &self.client.api_key)
             .json(&payload)
             .send()
@@ -202,11 +474,11 @@ impl Collection {
             let mut results = Vec::new();
             if let Some(arr) = body["results"].as_array() {
                 for batch in arr {
-                     if let Some(hits) = batch["hits"].as_array() {
-                         results.push(hits.clone());
-                     } else {
-                         results.push(Vec::new());
-                     }
+                    if let Some(hits) = batch["hits"].as_array() {
+                        results.push(hits.clone());
+                    } else {
+                        results.push(Vec::new());
+                    }
                 }
             }
             Ok(results)
@@ -219,6 +491,62 @@ impl Collection {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{
+        InsertOptions, InsertState, ProtoConsistency, ProtoInsertStatusState, SearchConsistency,
+        SearchOptions,
+    };
+
+    #[test]
+    fn insert_options_encode_wait_for_commit() {
+        let proto = InsertOptions::new()
+            .wait_for_commit(false)
+            .into_proto()
+            .expect("insert options should encode");
+
+        assert!(!proto.wait_for_commit);
+    }
+
+    #[test]
+    fn search_options_default_allow_fallback_when_present() {
+        let proto = SearchOptions::new()
+            .consistency(SearchConsistency::Followers)
+            .into_proto()
+            .expect("search options should encode");
+
+        assert_eq!(proto.consistency, ProtoConsistency::Followers as i32);
+        assert!(proto.allow_fallback);
+    }
+
+    #[test]
+    fn search_options_can_disable_fallback_explicitly() {
+        let proto = SearchOptions::new()
+            .consistency(SearchConsistency::Primary)
+            .allow_fallback(false)
+            .into_proto()
+            .expect("search options should encode");
+
+        assert_eq!(proto.consistency, ProtoConsistency::Primary as i32);
+        assert!(!proto.allow_fallback);
+    }
+
+    #[test]
+    fn insert_status_maps_proto_states() {
+        let state =
+            match ProtoInsertStatusState::try_from(ProtoInsertStatusState::Processing as i32)
+                .unwrap()
+            {
+                ProtoInsertStatusState::Queued => InsertState::Queued,
+                ProtoInsertStatusState::Processing => InsertState::Processing,
+                ProtoInsertStatusState::Succeeded => InsertState::Succeeded,
+                ProtoInsertStatusState::Failed => InsertState::Failed,
+                ProtoInsertStatusState::Unspecified => InsertState::Queued,
+            };
+
+        assert_eq!(state, InsertState::Processing);
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TextFieldRequest {
@@ -244,17 +572,60 @@ pub struct BatchSearchRequest {
 #[derive(Clone, Debug)]
 pub struct BarqGrpcClient {
     client: TonicBarqClient<Channel>,
+    api_key: Option<String>,
+    tenant: Option<String>,
 }
 
 impl BarqGrpcClient {
     pub async fn connect(dst: String) -> Result<Self> {
+        Self::connect_with_metadata(dst, None, None).await
+    }
+
+    pub async fn connect_with_api_key(dst: String, api_key: impl Into<String>) -> Result<Self> {
+        Self::connect_with_metadata(dst, Some(api_key.into()), None).await
+    }
+
+    pub async fn connect_with_metadata(
+        dst: String,
+        api_key: Option<String>,
+        tenant: Option<String>,
+    ) -> Result<Self> {
         let client = TonicBarqClient::connect(dst).await?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            api_key,
+            tenant,
+        })
+    }
+
+    fn request<T>(&self, message: T) -> Result<Request<T>> {
+        let mut request = Request::new(message);
+        if let Some(api_key) = &self.api_key {
+            let value =
+                MetadataValue::try_from(api_key.as_str()).map_err(|error| BarqError::Api {
+                    status: StatusCode::BAD_REQUEST,
+                    message: format!("invalid api key metadata: {error}"),
+                })?;
+            request.metadata_mut().insert("x-api-key", value);
+        }
+        if let Some(tenant) = &self.tenant {
+            let value =
+                MetadataValue::try_from(tenant.as_str()).map_err(|error| BarqError::Api {
+                    status: StatusCode::BAD_REQUEST,
+                    message: format!("invalid tenant metadata: {error}"),
+                })?;
+            request.metadata_mut().insert("x-tenant-id", value);
+        }
+        Ok(request)
+    }
+
+    pub async fn status(&mut self) -> Result<bool> {
+        let response = self.client.status(self.request(StatusRequest {})?).await?;
+        Ok(response.into_inner().ok)
     }
 
     pub async fn health(&mut self) -> Result<bool> {
-        let response = self.client.health(HealthRequest {}).await?;
-        Ok(response.into_inner().ok)
+        self.status().await
     }
 
     pub async fn create_collection(
@@ -268,12 +639,75 @@ impl BarqGrpcClient {
             DistanceMetric::Dot => "Dot",
             DistanceMetric::L2 => "L2",
         };
-        
-        self.client.create_collection(CreateCollectionRequest {
-            name: name.to_string(),
-            dimension: dimension,
-            metric: metric_str.to_string(),
-        }).await?;
+
+        self.client
+            .create_collection(self.request(CreateCollectionRequest {
+                name: name.to_string(),
+                dimension: dimension,
+                metric: metric_str.to_string(),
+            })?)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn insert(
+        &mut self,
+        collection: &str,
+        id: impl Into<DocumentId>,
+        vector: Vec<f32>,
+        payload: serde_json::Value,
+    ) -> Result<()> {
+        self.insert_with_options(collection, id, vector, payload, None)
+            .await
+    }
+
+    pub async fn insert_async(
+        &mut self,
+        collection: &str,
+        id: impl Into<DocumentId>,
+        vector: Vec<f32>,
+        payload: serde_json::Value,
+    ) -> Result<String> {
+        let id_str = match id.into() {
+            DocumentId::U64(v) => v.to_string(),
+            DocumentId::Str(v) => v,
+        };
+
+        let response = self
+            .client
+            .insert_async(self.request(InsertRequest {
+                collection: collection.to_string(),
+                id: id_str,
+                vector,
+                payload_json: payload.to_string(),
+                options: None,
+            })?)
+            .await?;
+        Ok(response.into_inner().request_id)
+    }
+
+    pub async fn insert_with_options(
+        &mut self,
+        collection: &str,
+        id: impl Into<DocumentId>,
+        vector: Vec<f32>,
+        payload: serde_json::Value,
+        options: Option<ProtoInsertOptions>,
+    ) -> Result<()> {
+        let id_str = match id.into() {
+            DocumentId::U64(v) => v.to_string(),
+            DocumentId::Str(s) => s,
+        };
+
+        self.client
+            .insert(self.request(InsertRequest {
+                collection: collection.to_string(),
+                id: id_str,
+                vector,
+                payload_json: payload.to_string(),
+                options,
+            })?)
+            .await?;
         Ok(())
     }
 
@@ -284,44 +718,105 @@ impl BarqGrpcClient {
         vector: Vec<f32>,
         payload: serde_json::Value,
     ) -> Result<()> {
-        let id_str = match id.into() {
-            DocumentId::U64(v) => v.to_string(),
-            DocumentId::Str(s) => s,
-        };
-        
-        self.client.insert_document(InsertDocumentRequest {
-            collection: collection.to_string(),
-            id: id_str,
-            vector,
-            payload_json: payload.to_string(),
-        }).await?;
-        Ok(())
+        self.insert(collection, id, vector, payload).await
     }
-    
+
     pub async fn search(
         &mut self,
         collection: &str,
         vector: Vec<f32>,
         top_k: u32,
-    ) -> Result<Vec<serde_json::Value>> { // Simplification: return basic result
-        let res = self.client.search(SearchRequest {
-            collection: collection.to_string(),
-            vector,
-            top_k,
-        }).await?;
-        
+    ) -> Result<Vec<serde_json::Value>> {
+        self.search_with_options(collection, vector, top_k, None)
+            .await
+    }
+
+    pub async fn search_with_options(
+        &mut self,
+        collection: &str,
+        vector: Vec<f32>,
+        top_k: u32,
+        options: Option<ProtoSearchOptions>,
+    ) -> Result<Vec<serde_json::Value>> {
+        let res = self
+            .client
+            .search(self.request(SearchRequest {
+                collection: collection.to_string(),
+                vector,
+                top_k,
+                options,
+            })?)
+            .await?;
+
         let results = res.into_inner().results;
         let mut json_results = Vec::new();
-        
+
         for r in results {
-             json_results.push(json!({
+            json_results.push(json!({
                  "id": r.id,
                  "score": r.score,
                  "payload": serde_json::from_str::<serde_json::Value>(&r.payload_json).unwrap_or(json!({}))
              }));
         }
-        
+
         Ok(json_results)
+    }
+
+    pub async fn get_insert_status(&mut self, request_id: &str) -> Result<InsertStatus> {
+        let response = self
+            .client
+            .get_insert_status(self.request(GetInsertStatusRequest {
+                request_id: request_id.to_string(),
+            })?)
+            .await?
+            .into_inner();
+
+        Ok(InsertStatus {
+            request_id: response.request_id,
+            state: match ProtoInsertStatusState::try_from(response.state)
+                .unwrap_or(ProtoInsertStatusState::Unspecified)
+            {
+                ProtoInsertStatusState::Queued => InsertState::Queued,
+                ProtoInsertStatusState::Processing => InsertState::Processing,
+                ProtoInsertStatusState::Succeeded => InsertState::Succeeded,
+                ProtoInsertStatusState::Failed => InsertState::Failed,
+                ProtoInsertStatusState::Unspecified => InsertState::Queued,
+            },
+            error_message: if response.error_message.is_empty() {
+                None
+            } else {
+                Some(response.error_message)
+            },
+        })
+    }
+
+    pub async fn get_metrics(&mut self) -> Result<GetMetricsResponse> {
+        Ok(self
+            .client
+            .get_metrics(self.request(GetMetricsRequest {})?)
+            .await?
+            .into_inner())
+    }
+
+    pub async fn get_cluster_status(&mut self) -> Result<GetClusterStatusResponse> {
+        Ok(self
+            .client
+            .get_cluster_status(self.request(GetClusterStatusRequest {})?)
+            .await?
+            .into_inner())
+    }
+
+    pub async fn get_segment_info(
+        &mut self,
+        collection: Option<&str>,
+    ) -> Result<GetSegmentInfoResponse> {
+        Ok(self
+            .client
+            .get_segment_info(self.request(GetSegmentInfoRequest {
+                collection: collection.unwrap_or_default().to_string(),
+            })?)
+            .await?
+            .into_inner())
     }
 
     pub async fn batch_search(
@@ -330,12 +825,16 @@ impl BarqGrpcClient {
         queries: Vec<SearchQuery>,
         top_k: u32,
     ) -> Result<Vec<Vec<serde_json::Value>>> {
-        let proto_queries = queries.into_iter().map(|q| {
-            barq_proto::barq::SearchQuery {
+        let proto_queries = queries
+            .into_iter()
+            .map(|q| barq_proto::barq::SearchQuery {
                 vector: q.vector,
-                filter_json: q.filter.map(|f| serde_json::to_string(&f).unwrap_or_default()).unwrap_or_default(),
-            }
-        }).collect();
+                filter_json: q
+                    .filter
+                    .map(|f| serde_json::to_string(&f).unwrap_or_default())
+                    .unwrap_or_default(),
+            })
+            .collect();
 
         let req = barq_proto::barq::BatchSearchRequest {
             collection: collection.to_string(),
@@ -343,9 +842,9 @@ impl BarqGrpcClient {
             top_k,
         };
 
-        let response = self.client.batch_search(req).await?;
+        let response = self.client.batch_search(self.request(req)?).await?;
         let batch_results = response.into_inner().results;
-        
+
         let mut final_results = Vec::new();
         for batch in batch_results {
             let mut hits = Vec::new();
@@ -358,7 +857,7 @@ impl BarqGrpcClient {
             }
             final_results.push(hits);
         }
-        
+
         Ok(final_results)
     }
 }

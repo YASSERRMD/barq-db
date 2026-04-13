@@ -6,7 +6,7 @@
   <a href="https://github.com/YASSERRMD/barq-db/blob/main/LICENSE"><img src="https://img.shields.io/github/license/YASSERRMD/barq-db" alt="License"></a>
 </p>
 
-The official Python SDK for [Barq DB](https://github.com/YASSERRMD/barq-db) - a high-performance vector database built in Rust.
+The official Python SDK for [Barq DB](https://github.com/YASSERRMD/barq-db), compatible with the Barq v2 database engine release line.
 
 ---
 
@@ -15,6 +15,14 @@ The official Python SDK for [Barq DB](https://github.com/YASSERRMD/barq-db) - a 
 ```bash
 pip install barq-sdk-python
 ```
+
+## API Contract
+
+`proto/barq.proto` in the repository root is the canonical Barq API contract.
+
+- `GrpcClient` follows that gRPC surface directly.
+- `BarqClient` remains available for compatibility with the current HTTP endpoints.
+- Performance benchmark docs for the Barq v2 database engine live in [Performance Benchmarks](../docs/src/reference/performance.md).
 
 ---
 
@@ -46,7 +54,7 @@ client.close()
 
 ---
 
-## HTTP Client
+## Compatibility HTTP Client
 
 The `BarqClient` communicates with Barq DB over HTTP/REST.
 
@@ -176,15 +184,15 @@ results = client.search(
 
 ## gRPC Client
 
-For high-throughput applications, use the gRPC client:
+Use the canonical gRPC contract when you want the primary SDK surface:
 
 ```python
 from barq import GrpcClient
 
 client = GrpcClient(target="localhost:50051")
 
-# Health check
-if client.health():
+# Status check
+if client.status():
     print("Connected via gRPC")
 
 # Create collection
@@ -195,7 +203,7 @@ client.create_collection(
 )
 
 # Insert document
-client.insert_document(
+client.insert(
     collection="vectors",
     id="doc-001",
     vector=[0.1] * 384,
@@ -225,16 +233,24 @@ for r in results:
 | `create_collection()` | `name`, `dimension`, `metric`, `index`, `text_fields` | `dict` | Create collection |
 | `insert_document()` | `collection`, `id`, `vector`, `payload` | `dict` | Insert document |
 | `search()` | `collection`, `vector`, `query`, `top_k`, `filter` | `list[dict]` | Search documents |
+| `get_metrics()` | - | `Metrics` | Structured metrics catalog and storage snapshot |
+| `get_cluster_status()` | - | `ClusterStatus` | Honest cluster capability report |
+| `get_segment_info()` | `collection?` | `SegmentInfo` | Per-collection segment lifecycle state |
 | `close()` | - | - | Close connection |
 
 ### `GrpcClient`
 
 | Method | Parameters | Returns | Description |
 |--------|------------|---------|-------------|
+| `status()` | - | `bool` | Canonical status RPC |
 | `health()` | - | `bool` | Check server health |
 | `create_collection()` | `name`, `dimension`, `metric` | - | Create collection |
+| `insert()` | `collection`, `id`, `vector`, `payload` | - | Canonical insert RPC |
 | `insert_document()` | `collection`, `id`, `vector`, `payload` | - | Insert document |
 | `search()` | `collection`, `vector`, `top_k` | `list[dict]` | Search documents |
+| `get_metrics()` | - | `Metrics` | Structured metrics snapshot |
+| `get_cluster_status()` | - | `ClusterStatus` | Structured cluster status |
+| `get_segment_info()` | `collection?` | `SegmentInfo` | Structured segment lifecycle state |
 
 ---
 
@@ -284,8 +300,8 @@ for r in results:
 
 - Python 3.8+
 - `httpx >= 0.23`
-- `grpcio >= 1.50.0`
-- `protobuf >= 4.21.0`
+- `grpcio >= 1.76.0`
+- `protobuf >= 6.31.1`
 
 ---
 

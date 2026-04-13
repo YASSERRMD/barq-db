@@ -3,13 +3,31 @@ syntax = "proto3";
 package barq;
 
 service Barq {
-  rpc Health (HealthRequest) returns (HealthResponse);
+  rpc Status (StatusRequest) returns (StatusResponse);
   rpc CreateCollection (CreateCollectionRequest) returns (CreateCollectionResponse);
-  rpc InsertDocument (InsertDocumentRequest) returns (InsertDocumentResponse);
+  rpc Insert (InsertRequest) returns (InsertResponse);
+  rpc InsertAsync (InsertRequest) returns (InsertAsyncResponse);
+  rpc GetInsertStatus (GetInsertStatusRequest) returns (GetInsertStatusResponse);
   rpc Search (SearchRequest) returns (SearchResponse);
+  rpc GetMetrics (GetMetricsRequest) returns (GetMetricsResponse);
+  rpc GetClusterStatus (GetClusterStatusRequest) returns (GetClusterStatusResponse);
+  rpc GetSegmentInfo (GetSegmentInfoRequest) returns (GetSegmentInfoResponse);
+
+  // Legacy RPCs kept temporarily while SDKs migrate to the canonical contract.
+  rpc Health (HealthRequest) returns (HealthResponse);
+  rpc InsertDocument (InsertDocumentRequest) returns (InsertDocumentResponse);
+  rpc BatchSearch (BatchSearchRequest) returns (BatchSearchResponse);
+}
+
+message StatusRequest {}
+
+message StatusResponse {
+  bool ok = 1;
+  string version = 2;
 }
 
 message HealthRequest {}
+
 message HealthResponse {
   bool ok = 1;
   string version = 2;
@@ -18,36 +36,233 @@ message HealthResponse {
 message CreateCollectionRequest {
   string name = 1;
   uint32 dimension = 2;
-  string metric = 3; // L2, Cosine, etc.
+  string metric = 3;
 }
+
 message CreateCollectionResponse {
   bool success = 1;
 }
 
+message InsertOptions {
+  bool wait_for_commit = 1;
+}
+
+message InsertRequest {
+  string collection = 1;
+  string id = 2;
+  repeated float vector = 3;
+  string payload_json = 4;
+  InsertOptions options = 5;
+}
+
+message InsertResponse {
+  bool success = 1;
+}
+
+message InsertAsyncResponse {
+  bool accepted = 1;
+  string request_id = 2;
+}
+
+message GetInsertStatusRequest {
+  string request_id = 1;
+}
+
+enum InsertStatusState {
+  INSERT_STATUS_STATE_UNSPECIFIED = 0;
+  INSERT_STATUS_STATE_QUEUED = 1;
+  INSERT_STATUS_STATE_PROCESSING = 2;
+  INSERT_STATUS_STATE_SUCCEEDED = 3;
+  INSERT_STATUS_STATE_FAILED = 4;
+}
+
+message GetInsertStatusResponse {
+  string request_id = 1;
+  InsertStatusState state = 2;
+  string error_message = 3;
+}
+
 message InsertDocumentRequest {
   string collection = 1;
-  // ID can be string or int in our system, but for proto let's use string for universality or specific one of
-  string id = 2; 
+  string id = 2;
   repeated float vector = 3;
-  // Payload as JSON string for now to avoid complexity of Struct
-  string payload_json = 4; 
+  string payload_json = 4;
 }
+
 message InsertDocumentResponse {
   bool success = 1;
+}
+
+enum Consistency {
+  CONSISTENCY_UNSPECIFIED = 0;
+  CONSISTENCY_PRIMARY = 1;
+  CONSISTENCY_FOLLOWERS = 2;
+  CONSISTENCY_ANY = 3;
+}
+
+message SearchOptions {
+  Consistency consistency = 1;
+  bool allow_fallback = 2;
 }
 
 message SearchRequest {
   string collection = 1;
   repeated float vector = 2;
   uint32 top_k = 3;
+  SearchOptions options = 4;
 }
 
 message SearchResult {
   string id = 1;
   float score = 2;
-  string payload_json = 3; 
+  string payload_json = 3;
 }
 
 message SearchResponse {
   repeated SearchResult results = 1;
+}
+
+message GetMetricsRequest {}
+
+enum MetricKind {
+  METRIC_KIND_UNSPECIFIED = 0;
+  METRIC_KIND_COUNTER = 1;
+  METRIC_KIND_GAUGE = 2;
+  METRIC_KIND_HISTOGRAM = 3;
+}
+
+message MetricDefinition {
+  string name = 1;
+  MetricKind kind = 2;
+  string description = 3;
+  string unit = 4;
+  repeated string labels = 5;
+}
+
+enum SegmentState {
+  SEGMENT_STATE_UNSPECIFIED = 0;
+  SEGMENT_STATE_GROWING = 1;
+  SEGMENT_STATE_SEALED = 2;
+  SEGMENT_STATE_COMPACTED = 3;
+}
+
+message TenantMemorySample {
+  string tenant = 1;
+  uint64 resident_vector_memory_bytes = 2;
+}
+
+message CollectionMemorySample {
+  string tenant = 1;
+  string collection = 2;
+  uint64 resident_vector_memory_bytes = 3;
+}
+
+message CollectionWalSample {
+  string tenant = 1;
+  string collection = 2;
+  uint64 entries = 3;
+  uint64 bytes = 4;
+}
+
+message CollectionSegmentFileSample {
+  string tenant = 1;
+  string collection = 2;
+  SegmentState state = 3;
+  uint64 count = 4;
+}
+
+message CollectionSegmentStateSample {
+  string tenant = 1;
+  string collection = 2;
+  SegmentState state = 3;
+  bool active = 4;
+}
+
+message StorageMetrics {
+  uint64 refresh_count = 1;
+  uint64 total_resident_vector_memory_bytes = 2;
+  uint64 wal_appends_total = 3;
+  uint64 wal_bytes_written_total = 4;
+  uint64 compactions_total = 5;
+  repeated TenantMemorySample tenant_memory_bytes = 6;
+  repeated CollectionMemorySample collection_memory_bytes = 7;
+  repeated CollectionWalSample collection_wal = 8;
+  repeated CollectionSegmentFileSample collection_segment_files = 9;
+  repeated CollectionSegmentStateSample collection_segment_states = 10;
+}
+
+message GetMetricsResponse {
+  repeated MetricDefinition definitions = 1;
+  StorageMetrics storage = 2;
+}
+
+message GetClusterStatusRequest {}
+
+enum ClusterMode {
+  CLUSTER_MODE_UNSPECIFIED = 0;
+  CLUSTER_MODE_SINGLE_NODE = 1;
+  CLUSTER_MODE_ROUTED_REPLICATION = 2;
+  CLUSTER_MODE_CONSENSUS_BACKED = 3;
+}
+
+enum WriteDurability {
+  WRITE_DURABILITY_UNSPECIFIED = 0;
+  WRITE_DURABILITY_NODE_LOCAL = 1;
+  WRITE_DURABILITY_PRIMARY_ONLY = 2;
+  WRITE_DURABILITY_CONSENSUS_QUORUM = 3;
+}
+
+message GetClusterStatusResponse {
+  string node_id = 1;
+  ClusterMode mode = 2;
+  WriteDurability write_durability = 3;
+  uint32 shard_count = 4;
+  uint64 node_count = 5;
+}
+
+enum IndexState {
+  INDEX_STATE_UNSPECIFIED = 0;
+  INDEX_STATE_BUILDING = 1;
+  INDEX_STATE_READY = 2;
+  INDEX_STATE_STALE = 3;
+}
+
+message GetSegmentInfoRequest {
+  string collection = 1;
+}
+
+message SegmentCount {
+  SegmentState state = 1;
+  uint64 count = 2;
+}
+
+message CollectionSegmentInfo {
+  string tenant = 1;
+  string collection = 2;
+  SegmentState current_state = 3;
+  IndexState index_state = 4;
+  repeated SegmentCount segment_counts = 5;
+}
+
+message GetSegmentInfoResponse {
+  repeated CollectionSegmentInfo collections = 1;
+}
+
+message SearchQuery {
+  repeated float vector = 1;
+  string filter_json = 2;
+}
+
+message BatchSearchRequest {
+  string collection = 1;
+  repeated SearchQuery queries = 2;
+  uint32 top_k = 3;
+}
+
+message QueryResults {
+  repeated SearchResult hits = 1;
+}
+
+message BatchSearchResponse {
+  repeated QueryResults results = 1;
 }

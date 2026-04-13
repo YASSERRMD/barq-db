@@ -1,4 +1,5 @@
 use barq_bench::report::{build_memory_report, render_csv, BenchmarkReport};
+use barq_bench::runtime::{current_rss_bytes, sample_memory_report};
 use serde_json::Value;
 
 #[test]
@@ -37,4 +38,17 @@ fn json_and_csv_schemas_are_valid() {
         "benchmark,format_version,rss_before_bytes,rss_after_bytes,rss_delta_bytes,peak_rss_bytes"
     );
     assert_eq!(row, "search,1,200,500,300,700");
+}
+
+#[test]
+fn rss_sampling_reports_live_process_memory() {
+    let rss = current_rss_bytes().expect("rss sampling should succeed");
+    assert!(rss > 0);
+
+    let (_value, report) =
+        sample_memory_report(|| Ok::<_, barq_bench::runtime::RuntimeBenchmarkError>(42))
+            .expect("memory sampling should succeed");
+    assert!(report.rss_before_bytes > 0);
+    assert!(report.rss_after_bytes > 0);
+    assert!(report.peak_rss_bytes > 0);
 }

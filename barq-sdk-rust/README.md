@@ -6,7 +6,7 @@
   <a href="https://github.com/YASSERRMD/barq-db/blob/main/LICENSE"><img src="https://img.shields.io/github/license/YASSERRMD/barq-db" alt="License"></a>
 </p>
 
-The official Rust SDK for [Barq DB](https://github.com/YASSERRMD/barq-db) - a high-performance vector database built in Rust.
+The official Rust SDK for [Barq DB](https://github.com/YASSERRMD/barq-db), compatible with the Barq v2 database engine release line.
 
 ---
 
@@ -20,6 +20,14 @@ barq-sdk-rust = { path = "../barq-sdk-rust" }
 # Or from crates.io when published:
 # barq-sdk-rust = "0.1"
 ```
+
+## API Contract
+
+`proto/barq.proto` in the repository root is the canonical Barq API contract.
+
+- `BarqGrpcClient` maps to that gRPC surface directly.
+- `BarqClient` remains available for compatibility with the current HTTP endpoints.
+- Performance benchmark docs for the Barq v2 database engine live in [Performance Benchmarks](../docs/src/reference/performance.md).
 
 ---
 
@@ -74,7 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ---
 
-## HTTP Client
+## Compatibility HTTP Client
 
 ### Initialization
 
@@ -258,15 +266,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Connect
     let mut client = BarqGrpcClient::connect("http://localhost:50051".into()).await?;
 
-    // Health check
-    let ok = client.health().await?;
+    // Status check
+    let ok = client.status().await?;
     println!("Healthy: {}", ok);
 
     // Create collection
     client.create_collection("vectors", 384, DistanceMetric::L2).await?;
 
     // Insert document
-    client.insert_document(
+    client.insert(
         "vectors",
         "doc-001",
         vec![0.1; 384],
@@ -326,16 +334,24 @@ pub enum BarqError {
 |--------|-----------|-------------|
 | `insert` | `(&self, id, vector, payload) -> Result<()>` | Insert document |
 | `search` | `(&self, vector, query, top_k, filter, weights) -> Result<Vec<Value>>` | Search |
+| `get_metrics` | `(&self) -> Result<GetMetricsResponse>` | Metrics catalog and storage snapshot |
+| `get_cluster_status` | `(&self) -> Result<GetClusterStatusResponse>` | Honest cluster capability report |
+| `get_segment_info` | `(&self, collection) -> Result<GetSegmentInfoResponse>` | Per-collection segment lifecycle state |
 
 ### `BarqGrpcClient`
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | `connect` | `(dst) -> Result<Self>` | Connect to server |
+| `status` | `(&mut self) -> Result<bool>` | Canonical status RPC |
 | `health` | `(&mut self) -> Result<bool>` | Health check |
 | `create_collection` | `(&mut self, name, dimension, metric) -> Result<()>` | Create collection |
+| `insert` | `(&mut self, collection, id, vector, payload) -> Result<()>` | Canonical insert RPC |
 | `insert_document` | `(&mut self, collection, id, vector, payload) -> Result<()>` | Insert |
 | `search` | `(&mut self, collection, vector, top_k) -> Result<Vec<Value>>` | Search |
+| `get_metrics` | `(&mut self) -> Result<GetMetricsResponse>` | Metrics catalog and storage snapshot |
+| `get_cluster_status` | `(&mut self) -> Result<GetClusterStatusResponse>` | Honest cluster capability report |
+| `get_segment_info` | `(&mut self, collection) -> Result<GetSegmentInfoResponse>` | Per-collection segment lifecycle state |
 
 ---
 

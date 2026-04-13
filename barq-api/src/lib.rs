@@ -10,7 +10,7 @@ use axum::{
     Json, Router,
 };
 use barq_bm25::Bm25Config;
-pub use barq_cluster::{ClusterConfig, ClusterError, ClusterRouter};
+pub use barq_cluster::{ClusterConfig, ClusterError, ClusterRouter, ReadPreference};
 use barq_core::{
     CollectionSchema, Document, FieldSchema, FieldType, Filter, HybridSearchResult, HybridWeights,
     PayloadValue, QueryExecutionPath, QueryPlan, QueryPlanner, TenantId,
@@ -240,6 +240,7 @@ impl AppState {
         collection: &str,
         document: Document,
         upsert: bool,
+        wait_for_commit: bool,
     ) -> Result<(), ApiError> {
         self.validate_insert_for_tenant(tenant, collection, &document)
             .await?;
@@ -265,10 +266,46 @@ impl AppState {
                 }
             })?;
 
-        completion
-            .await
-            .map_err(|_| ApiError::Busy("ingestion worker is unavailable".to_string()))??;
+        if wait_for_commit {
+            completion
+                .await
+                .map_err(|_| ApiError::Busy("ingestion worker is unavailable".to_string()))??;
+        }
         Ok(())
+    }
+
+    async fn enqueue_insert_for_tenant_async(
+        &self,
+        tenant: &TenantId,
+        collection: &str,
+        document: Document,
+        upsert: bool,
+    ) -> Result<String, ApiError> {
+        self.validate_insert_for_tenant(tenant, collection, &document)
+            .await?;
+
+        let (request_id, _completion) = self
+            .ingestion
+            .submit_tracked(IngestionInsertRequest {
+                tenant: tenant.clone(),
+                collection: collection.to_string(),
+                document,
+                upsert,
+            })
+            .await
+            .map_err(|err| match err {
+                QueueAdmissionError::Full { capacity } => {
+                    ApiError::Busy(format!("ingestion queue is full (capacity {capacity})"))
+                }
+                QueueAdmissionError::Dropped { capacity } => ApiError::Busy(format!(
+                    "ingestion queue dropped the write because policy=drop and capacity {capacity} is exhausted"
+                )),
+                QueueAdmissionError::Closed => {
+                    ApiError::Busy("ingestion worker is unavailable".to_string())
+                }
+            })?;
+
+        Ok(request_id)
     }
 
     fn ensure_primary_for_tenant(&self, tenant: &TenantId) -> Result<(), ApiError> {
@@ -286,6 +323,24 @@ impl AppState {
 
     fn ensure_local_for_tenant(&self, tenant: &TenantId) -> Result<(), ApiError> {
         self.map_cluster_local_result(self.cluster.ensure_local(tenant.as_str(), None))
+    }
+
+    fn ensure_read_target_for_tenant(
+        &self,
+        tenant: &TenantId,
+        preference: ReadPreference,
+    ) -> Result<(), ApiError> {
+        let routing = self.cluster.route(tenant.as_str(), Some(preference));
+        if routing.target == self.cluster.node_id {
+            Ok(())
+        } else {
+            self.map_cluster_local_result(Err(ClusterError::NotLocal {
+                shard: routing.shard,
+                node: self.cluster.node_id.clone(),
+                target: routing.target,
+                target_address: routing.target_address,
+            }))
+        }
     }
 
     fn map_cluster_local_result(&self, result: Result<(), ClusterError>) -> Result<(), ApiError> {
@@ -827,7 +882,7 @@ async fn insert_document(
         payload: payload.payload,
     };
     state
-        .enqueue_insert_for_tenant(&tenant, &name, document, payload.upsert)
+        .enqueue_insert_for_tenant(&tenant, &name, document, payload.upsert, true)
         .await?;
     audit_log(
         "insert-document",
