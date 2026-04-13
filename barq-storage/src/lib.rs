@@ -1,22 +1,27 @@
-use barq_core::{Catalog, CatalogError, CollectionSchema, Document, Filter, TenantId};
-use barq_index::{DocumentId, IndexType};
+use barq_core::{
+    Catalog, CatalogError, CollectionSchema, Document, Filter, IndexBuildSnapshot, IndexState,
+    TenantId,
+};
+use barq_index::{DocumentId, IndexType, VectorIndex};
 use chrono::{DateTime, Utc};
 use metrics::{counter, gauge};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
 pub mod object_store;
 pub use object_store::{
-    LocalObjectStore, ObjectStore, ObjectStoreError, ObjectMetadata,
-    StorageTier, TieringPolicy, TieringManager, TierConfig,
-    RetryConfig, RetryingObjectStore, with_retry, is_retryable,
+    is_retryable, with_retry, LocalObjectStore, ObjectMetadata, ObjectStore, ObjectStoreError,
+    RetryConfig, RetryingObjectStore, StorageTier, TierConfig, TieringManager, TieringPolicy,
 };
 
 #[cfg(feature = "s3")]
@@ -27,7 +32,6 @@ pub use object_store::GcsObjectStore;
 
 #[cfg(feature = "azure")]
 pub use object_store::AzureBlobStore;
-
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -50,7 +54,10 @@ pub enum StorageError {
     QuotaExceeded { tenant: TenantId, reason: String },
 
     #[error("segment for collection {collection} is not writable: {state:?}")]
-    SegmentNotWritable { collection: String, state: SegmentState },
+    SegmentNotWritable {
+        collection: String,
+        state: SegmentState,
+    },
 }
 
 impl From<ObjectStoreError> for StorageError {
@@ -58,7 +65,6 @@ impl From<ObjectStoreError> for StorageError {
         StorageError::ObjectStore(err.to_string())
     }
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct TenantQuota {
@@ -133,6 +139,10 @@ pub struct SegmentMetadata {
 pub struct SegmentIndexMetadata {
     pub file_name: String,
     pub state: SegmentState,
+    #[serde(default)]
+    pub index_state: IndexState,
+    #[serde(default)]
+    pub index_version: u64,
     pub index_built: bool,
     pub indexed_at: DateTime<Utc>,
 }
@@ -194,13 +204,118 @@ pub struct Storage {
     tenant_usage: HashMap<TenantId, TenantUsage>,
     tiering_manager: Option<Arc<TieringManager>>,
     collection_segment_states: HashMap<(TenantId, String), SegmentState>,
+    collection_index_states: HashMap<(TenantId, String), IndexState>,
+    collection_index_generations: HashMap<(TenantId, String), u64>,
+    collection_index_versions: HashMap<(TenantId, String), u64>,
+    collection_stale_segments: HashMap<(TenantId, String), BTreeSet<String>>,
     collection_write_counts: HashMap<(TenantId, String), usize>,
+    index_builds: IndexBuildCoordinator,
+    pending_index_builds: usize,
     auto_seal_threshold: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CollectionLifecycleState {
     segment_state: SegmentState,
+    #[serde(default)]
+    index_state: IndexState,
+    #[serde(default)]
+    index_version: u64,
+    #[serde(default)]
+    stale_segments: Vec<String>,
+}
+
+#[derive(Debug)]
+struct IndexBuildRequest {
+    tenant: TenantId,
+    collection: String,
+    segment_state: SegmentState,
+    planned_segments: Vec<String>,
+    generation: u64,
+    snapshot: IndexBuildSnapshot,
+}
+
+struct IndexBuildResult {
+    tenant: TenantId,
+    collection: String,
+    segment_state: SegmentState,
+    planned_segments: Vec<String>,
+    generation: u64,
+    index_type: IndexType,
+    index: Result<Box<dyn VectorIndex>, String>,
+}
+
+struct IndexBuildCoordinator {
+    request_tx: Sender<IndexBuildRequest>,
+    result_rx: Receiver<IndexBuildResult>,
+    #[cfg(test)]
+    pause_before_build: Arc<Mutex<Option<Arc<PauseBeforeIndexBuild>>>>,
+}
+
+impl std::fmt::Debug for IndexBuildCoordinator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IndexBuildCoordinator")
+            .finish_non_exhaustive()
+    }
+}
+
+impl IndexBuildCoordinator {
+    fn new() -> Self {
+        let (request_tx, request_rx) = mpsc::channel::<IndexBuildRequest>();
+        let (result_tx, result_rx) = mpsc::channel::<IndexBuildResult>();
+        #[cfg(test)]
+        let pause_before_build = Arc::new(Mutex::new(None::<Arc<PauseBeforeIndexBuild>>));
+        #[cfg(test)]
+        let worker_pause_before_build = Arc::clone(&pause_before_build);
+        thread::spawn(move || {
+            while let Ok(request) = request_rx.recv() {
+                #[cfg(test)]
+                if let Some(hook) = worker_pause_before_build
+                    .lock()
+                    .expect("pause hook lock poisoned")
+                    .take()
+                {
+                    hook.pause();
+                }
+                let index_type = request.snapshot.index_type.clone();
+                let index = if std::env::var("BARQ_FAIL_INDEX_BUILD").ok().as_deref() == Some("1") {
+                    Err("forced index build failure".to_string())
+                } else {
+                    request.snapshot.build().map_err(|err| err.to_string())
+                };
+                if result_tx
+                    .send(IndexBuildResult {
+                        tenant: request.tenant,
+                        collection: request.collection,
+                        segment_state: request.segment_state,
+                        planned_segments: request.planned_segments,
+                        generation: request.generation,
+                        index_type,
+                        index,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        Self {
+            request_tx,
+            result_rx,
+            #[cfg(test)]
+            pause_before_build,
+        }
+    }
+
+    #[cfg(test)]
+    fn install_pause_before_build(&self) -> Arc<PauseBeforeIndexBuild> {
+        let hook = Arc::new(PauseBeforeIndexBuild::default());
+        *self
+            .pause_before_build
+            .lock()
+            .expect("pause hook lock poisoned") = Some(Arc::clone(&hook));
+        hook
+    }
 }
 
 impl Storage {
@@ -231,10 +346,16 @@ impl Storage {
             tenant_usage: HashMap::new(),
             tiering_manager: None,
             collection_segment_states: HashMap::new(),
+            collection_index_states: HashMap::new(),
+            collection_index_generations: HashMap::new(),
+            collection_index_versions: HashMap::new(),
+            collection_stale_segments: HashMap::new(),
             collection_write_counts: HashMap::new(),
+            index_builds: IndexBuildCoordinator::new(),
+            pending_index_builds: 0,
             auto_seal_threshold: options.auto_seal_threshold,
         };
-        
+
         if let Some(tm) = options.tiering_manager {
             storage.set_tiering_manager(tm);
         }
@@ -323,7 +444,108 @@ impl Storage {
     ) -> Result<(), StorageError> {
         self.collection_segment_states
             .insert((tenant.clone(), collection.to_string()), state);
-        self.persist_collection_segment_state(tenant, collection, state)
+        self.persist_collection_lifecycle_state(tenant, collection)
+    }
+
+    fn collection_index_state(&self, tenant: &TenantId, collection: &str) -> IndexState {
+        self.collection_index_states
+            .get(&(tenant.clone(), collection.to_string()))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn set_collection_index_state(
+        &mut self,
+        tenant: &TenantId,
+        collection: &str,
+        state: IndexState,
+    ) -> Result<(), StorageError> {
+        self.collection_index_states
+            .insert((tenant.clone(), collection.to_string()), state);
+        self.persist_collection_lifecycle_state(tenant, collection)
+    }
+
+    fn transition_collection_index_state(
+        &mut self,
+        tenant: &TenantId,
+        collection: &str,
+        state: IndexState,
+    ) -> Result<(), StorageError> {
+        if self.collection_index_state(tenant, collection) == state {
+            return Ok(());
+        }
+        self.catalog
+            .collection_mut(tenant, collection)?
+            .set_index_state(state)?;
+        self.set_collection_index_state(tenant, collection, state)
+    }
+
+    fn collection_index_generation(&self, tenant: &TenantId, collection: &str) -> u64 {
+        self.collection_index_generations
+            .get(&(tenant.clone(), collection.to_string()))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn bump_collection_index_generation(&mut self, tenant: &TenantId, collection: &str) -> u64 {
+        let key = (tenant.clone(), collection.to_string());
+        let generation = self.collection_index_generations.entry(key).or_insert(0);
+        *generation += 1;
+        *generation
+    }
+
+    fn collection_index_version(&self, tenant: &TenantId, collection: &str) -> u64 {
+        self.collection_index_versions
+            .get(&(tenant.clone(), collection.to_string()))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn collection_stale_segments(&self, tenant: &TenantId, collection: &str) -> BTreeSet<String> {
+        self.collection_stale_segments
+            .get(&(tenant.clone(), collection.to_string()))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn insert_collection_stale_segment(
+        &mut self,
+        tenant: &TenantId,
+        collection: &str,
+        file_name: &str,
+    ) {
+        if file_name.is_empty() {
+            return;
+        }
+        self.collection_stale_segments
+            .entry((tenant.clone(), collection.to_string()))
+            .or_default()
+            .insert(file_name.to_string());
+    }
+
+    fn clear_collection_stale_segments(
+        &mut self,
+        tenant: &TenantId,
+        collection: &str,
+        file_names: &[String],
+    ) {
+        if let Some(stale) = self
+            .collection_stale_segments
+            .get_mut(&(tenant.clone(), collection.to_string()))
+        {
+            for file_name in file_names {
+                stale.remove(file_name);
+            }
+        }
+    }
+
+    fn mark_collection_index_stale(
+        &mut self,
+        tenant: &TenantId,
+        collection: &str,
+    ) -> Result<(), StorageError> {
+        self.bump_collection_index_generation(tenant, collection);
+        self.transition_collection_index_state(tenant, collection, IndexState::Stale)
     }
 
     fn record_collection_write(
@@ -331,6 +553,7 @@ impl Storage {
         tenant: &TenantId,
         collection: &str,
     ) -> Result<(), StorageError> {
+        self.mark_collection_index_stale(tenant, collection)?;
         let key = (tenant.clone(), collection.to_string());
         let writes = self.collection_write_counts.entry(key).or_default();
         *writes += 1;
@@ -350,8 +573,7 @@ impl Storage {
         current.transition_to(SegmentState::Sealed)?;
         self.set_collection_segment_state(tenant, collection, SegmentState::Sealed)?;
         let metadata = self.flush_wal_to_segment(tenant, collection)?;
-        let index_built = self.build_index_for_sealed_segment(tenant, collection);
-        self.persist_segment_index_metadata(tenant, collection, &metadata, index_built)?;
+        self.schedule_index_build_for_sealed_segment(tenant, collection, &metadata)?;
         self.collection_write_counts
             .insert((tenant.clone(), collection.to_string()), 0);
         if create_new_growing {
@@ -360,35 +582,193 @@ impl Storage {
         Ok(metadata)
     }
 
-    fn build_index_for_sealed_segment(&mut self, tenant: &TenantId, collection: &str) -> bool {
-        if std::env::var("BARQ_FAIL_INDEX_BUILD").ok().as_deref() == Some("1") {
-            return false;
-        }
-        self.catalog
-            .collection_mut(tenant, collection)
-            .and_then(|coll| coll.rebuild_index(None))
-            .is_ok()
-    }
-
-    fn persist_segment_index_metadata(
-        &self,
+    fn schedule_index_build_for_sealed_segment(
+        &mut self,
         tenant: &TenantId,
         collection: &str,
         metadata: &SegmentMetadata,
+    ) -> Result<(), StorageError> {
+        self.schedule_collection_index_build(
+            tenant,
+            collection,
+            None,
+            metadata.file_name.clone(),
+            metadata.state,
+        )
+    }
+
+    fn schedule_collection_index_build(
+        &mut self,
+        tenant: &TenantId,
+        collection: &str,
+        index: Option<IndexType>,
+        file_name: String,
+        segment_state: SegmentState,
+    ) -> Result<(), StorageError> {
+        let snapshot = self
+            .catalog
+            .collection(tenant, collection)?
+            .index_build_snapshot(index);
+        let generation = self.collection_index_generation(tenant, collection);
+        if !file_name.is_empty() {
+            self.insert_collection_stale_segment(tenant, collection, &file_name);
+        }
+        let planned_segments: Vec<_> = if file_name.is_empty() {
+            self.collection_stale_segments(tenant, collection)
+                .into_iter()
+                .collect()
+        } else {
+            vec![file_name.clone()]
+        };
+        self.transition_collection_index_state(tenant, collection, IndexState::Building)?;
+        self.persist_segment_index_metadata_for_file(
+            tenant,
+            collection,
+            &file_name,
+            segment_state,
+            IndexState::Building,
+            self.collection_index_version(tenant, collection),
+            false,
+        )?;
+        self.index_builds
+            .request_tx
+            .send(IndexBuildRequest {
+                tenant: tenant.clone(),
+                collection: collection.to_string(),
+                segment_state,
+                planned_segments,
+                generation,
+                snapshot,
+            })
+            .map_err(|_| StorageError::ObjectStore("index build worker is unavailable".into()))?;
+        self.pending_index_builds += 1;
+        Ok(())
+    }
+
+    fn apply_completed_index_builds(&mut self) -> Result<(), StorageError> {
+        loop {
+            match self.index_builds.result_rx.try_recv() {
+                Ok(result) => self.apply_index_build_result(result)?,
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    return Err(StorageError::ObjectStore(
+                        "index build worker disconnected".into(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn wait_for_pending_index_builds(&mut self) -> Result<(), StorageError> {
+        while self.pending_index_builds > 0 {
+            let result =
+                self.index_builds.result_rx.recv().map_err(|_| {
+                    StorageError::ObjectStore("index build worker disconnected".into())
+                })?;
+            self.apply_index_build_result(result)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn install_pause_before_index_build(&self) -> Arc<PauseBeforeIndexBuild> {
+        self.index_builds.install_pause_before_build()
+    }
+
+    fn apply_index_build_result(&mut self, result: IndexBuildResult) -> Result<(), StorageError> {
+        self.pending_index_builds = self.pending_index_builds.saturating_sub(1);
+        if result.generation != self.collection_index_generation(&result.tenant, &result.collection)
+        {
+            return Ok(());
+        }
+
+        match result.index {
+            Ok(index) => {
+                let next_version =
+                    self.collection_index_version(&result.tenant, &result.collection) + 1;
+                let schema = {
+                    let coll = self
+                        .catalog
+                        .collection_mut(&result.tenant, &result.collection)?;
+                    coll.install_rebuilt_index(result.index_type.clone(), index)?;
+                    coll.schema().clone()
+                };
+                self.collection_index_states.insert(
+                    (result.tenant.clone(), result.collection.clone()),
+                    IndexState::Ready,
+                );
+                self.collection_index_versions.insert(
+                    (result.tenant.clone(), result.collection.clone()),
+                    next_version,
+                );
+                self.clear_collection_stale_segments(
+                    &result.tenant,
+                    &result.collection,
+                    &result.planned_segments,
+                );
+                self.persist_schema(&result.tenant, &schema)?;
+                self.persist_collection_lifecycle_state(&result.tenant, &result.collection)?;
+                for file_name in &result.planned_segments {
+                    self.persist_segment_index_metadata_for_file(
+                        &result.tenant,
+                        &result.collection,
+                        file_name,
+                        result.segment_state,
+                        IndexState::Ready,
+                        next_version,
+                        true,
+                    )?;
+                }
+            }
+            Err(_) => {
+                self.transition_collection_index_state(
+                    &result.tenant,
+                    &result.collection,
+                    IndexState::Stale,
+                )?;
+                self.persist_collection_lifecycle_state(&result.tenant, &result.collection)?;
+                for file_name in &result.planned_segments {
+                    self.persist_segment_index_metadata_for_file(
+                        &result.tenant,
+                        &result.collection,
+                        file_name,
+                        result.segment_state,
+                        IndexState::Stale,
+                        self.collection_index_version(&result.tenant, &result.collection),
+                        false,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn persist_segment_index_metadata_for_file(
+        &self,
+        tenant: &TenantId,
+        collection: &str,
+        file_name: &str,
+        segment_state: SegmentState,
+        index_state: IndexState,
+        index_version: u64,
         index_built: bool,
     ) -> Result<(), StorageError> {
-        if metadata.file_name.is_empty() {
+        if file_name.is_empty() {
             return Ok(());
         }
         let meta_path = self
             .segments_dir(tenant, collection)
-            .join(format!("{}.meta.json", metadata.file_name));
+            .join(format!("{}.meta.json", file_name));
         let mut file = File::create(meta_path)?;
         serde_json::to_writer_pretty(
             &mut file,
             &SegmentIndexMetadata {
-                file_name: metadata.file_name.clone(),
-                state: metadata.state,
+                file_name: file_name.to_string(),
+                state: segment_state,
+                index_state,
+                index_version,
                 index_built,
                 indexed_at: Utc::now(),
             },
@@ -659,7 +1039,8 @@ impl Storage {
         let remote_prefix = remote_prefix.as_ref().to_path_buf();
         self.create_snapshot(&snapshot_dir)?;
         let handle = thread::spawn(move || {
-            object_store.upload_dir(&snapshot_dir, &remote_prefix)
+            object_store
+                .upload_dir(&snapshot_dir, &remote_prefix)
                 .map_err(StorageError::from)
         });
         Ok(handle)
@@ -707,7 +1088,9 @@ impl Storage {
             fs::remove_dir_all(snapshot_dir)?;
         }
         fs::create_dir_all(snapshot_dir)?;
-        object_store.download_dir(remote_prefix.as_ref(), snapshot_dir).map_err(StorageError::from)?;
+        object_store
+            .download_dir(remote_prefix.as_ref(), snapshot_dir)
+            .map_err(StorageError::from)?;
         Self::restore_snapshot(target_root, snapshot_dir)
     }
 
@@ -752,12 +1135,12 @@ impl Storage {
 
         if let Some(tm) = &self.tiering_manager {
             if let Some(key) = self.get_tiering_key(&segment_path) {
-                 let size = segment_file.metadata()?.len();
-                 // best effort registration
-                 if let Err(e) = tm.register_existing(&key, size) {
-                      // log error but don't fail flush
-                      eprintln!("Failed to register segment with tiering manager: {}", e);
-                 }
+                let size = segment_file.metadata()?.len();
+                // best effort registration
+                if let Err(e) = tm.register_existing(&key, size) {
+                    // log error but don't fail flush
+                    eprintln!("Failed to register segment with tiering manager: {}", e);
+                }
             }
         }
 
@@ -828,10 +1211,10 @@ impl Storage {
 
         if let Some(tm) = &self.tiering_manager {
             if let Some(key) = self.get_tiering_key(&compacted_path) {
-                 let size = compacted_file.metadata()?.len();
-                 if let Err(e) = tm.register_existing(&key, size) {
-                      eprintln!("Failed to register compacted segment: {}", e);
-                 }
+                let size = compacted_file.metadata()?.len();
+                if let Err(e) = tm.register_existing(&key, size) {
+                    eprintln!("Failed to register compacted segment: {}", e);
+                }
             }
         }
 
@@ -868,7 +1251,8 @@ impl Storage {
         let remote_prefix = remote_prefix.as_ref().to_path_buf();
         fs::create_dir_all(&local_segments)?;
         let handle = thread::spawn(move || {
-            object_store.upload_dir(&local_segments, &remote_prefix)
+            object_store
+                .upload_dir(&local_segments, &remote_prefix)
                 .map_err(StorageError::from)
         });
         Ok(handle)
@@ -957,6 +1341,7 @@ impl Storage {
         tenant: impl Into<TenantId>,
         mut schema: CollectionSchema,
     ) -> Result<(), StorageError> {
+        self.apply_completed_index_builds()?;
         let tenant = tenant.into();
         self.ensure_tenant_state(&tenant);
         self.enforce_qps(&tenant)?;
@@ -968,6 +1353,14 @@ impl Storage {
         self.catalog
             .create_collection(tenant.clone(), schema.clone())?;
         self.persist_schema(&tenant, &schema)?;
+        self.collection_index_states
+            .insert((tenant.clone(), schema.name.clone()), IndexState::Ready);
+        self.collection_index_generations
+            .insert((tenant.clone(), schema.name.clone()), 0);
+        self.collection_index_versions
+            .insert((tenant.clone(), schema.name.clone()), 0);
+        self.collection_stale_segments
+            .insert((tenant.clone(), schema.name.clone()), BTreeSet::new());
         self.set_collection_segment_state(&tenant, &schema.name, SegmentState::Growing)?;
         self.collection_write_counts
             .insert((tenant.clone(), schema.name.clone()), 0);
@@ -984,6 +1377,7 @@ impl Storage {
         tenant: &TenantId,
         name: &str,
     ) -> Result<(), StorageError> {
+        self.apply_completed_index_builds()?;
         self.ensure_tenant_state(tenant);
         self.enforce_qps(tenant)?;
         let (docs, bytes) = if let Ok(collection) = self.catalog.collection(tenant, name) {
@@ -996,6 +1390,18 @@ impl Storage {
         if dir.exists() {
             fs::remove_dir_all(dir)?;
         }
+        self.collection_segment_states
+            .remove(&(tenant.clone(), name.to_string()));
+        self.collection_index_states
+            .remove(&(tenant.clone(), name.to_string()));
+        self.collection_index_generations
+            .remove(&(tenant.clone(), name.to_string()));
+        self.collection_index_versions
+            .remove(&(tenant.clone(), name.to_string()));
+        self.collection_stale_segments
+            .remove(&(tenant.clone(), name.to_string()));
+        self.collection_write_counts
+            .remove(&(tenant.clone(), name.to_string()));
         self.adjust_usage(tenant, -1, -(docs as isize), -(bytes as isize));
         Ok(())
     }
@@ -1016,6 +1422,7 @@ impl Storage {
         document: Document,
         upsert: bool,
     ) -> Result<(), StorageError> {
+        self.apply_completed_index_builds()?;
         self.ensure_tenant_state(tenant);
         self.enforce_qps(tenant)?;
         let segment_state = self.collection_segment_state(tenant, collection);
@@ -1060,6 +1467,7 @@ impl Storage {
         collection: &str,
         id: DocumentId,
     ) -> Result<bool, StorageError> {
+        self.apply_completed_index_builds()?;
         self.ensure_tenant_state(tenant);
         self.enforce_qps(tenant)?;
         let segment_state = self.collection_segment_state(tenant, collection);
@@ -1097,6 +1505,7 @@ impl Storage {
         tenant: &TenantId,
         collection: &str,
     ) -> Result<SegmentMetadata, StorageError> {
+        self.apply_completed_index_builds()?;
         self.seal_current_segment_for_tenant(tenant, collection, false)
     }
 
@@ -1119,6 +1528,7 @@ impl Storage {
         top_k: usize,
         filter: Option<&Filter>,
     ) -> Result<Vec<barq_index::SearchResult>, StorageError> {
+        self.apply_completed_index_builds()?;
         self.enforce_qps(tenant)?;
         let coll = self.catalog.collection(tenant, collection)?;
         let mut results = coll.search_with_filter(query, top_k, filter)?;
@@ -1150,6 +1560,7 @@ impl Storage {
         top_k: usize,
         filter: Option<&Filter>,
     ) -> Result<Vec<barq_index::SearchResult>, StorageError> {
+        self.apply_completed_index_builds()?;
         self.enforce_qps(tenant)?;
         let coll = self.catalog.collection(tenant, collection)?;
         Ok(coll.search_text_with_filter(query, top_k, filter)?)
@@ -1178,6 +1589,7 @@ impl Storage {
         weights: Option<barq_core::HybridWeights>,
         filter: Option<&Filter>,
     ) -> Result<Vec<barq_core::HybridSearchResult>, StorageError> {
+        self.apply_completed_index_builds()?;
         self.enforce_qps(tenant)?;
         let coll = self.catalog.collection(tenant, collection)?;
         Ok(coll.search_hybrid(vector, query, top_k, weights, filter)?)
@@ -1206,6 +1618,7 @@ impl Storage {
         id: &barq_index::DocumentId,
         weights: Option<barq_core::HybridWeights>,
     ) -> Result<Option<barq_core::HybridSearchResult>, StorageError> {
+        self.apply_completed_index_builds()?;
         self.enforce_qps(tenant)?;
         let coll = self.catalog.collection(tenant, collection)?;
         Ok(coll.explain_hybrid(vector, query, top_k, id, weights)?)
@@ -1225,15 +1638,17 @@ impl Storage {
         collection: &str,
         index: Option<IndexType>,
     ) -> Result<(), StorageError> {
+        self.apply_completed_index_builds()?;
         self.ensure_tenant_state(tenant);
         self.enforce_qps(tenant)?;
-        {
-            let coll = self.catalog.collection_mut(tenant, collection)?;
-            coll.rebuild_index(index)?;
-            let schema = coll.schema().clone();
-            self.persist_schema(tenant, &schema)?;
-        }
-        Ok(())
+        let segment_state = self.collection_segment_state(tenant, collection);
+        self.schedule_collection_index_build(
+            tenant,
+            collection,
+            index,
+            String::new(),
+            segment_state,
+        )
     }
 
     pub fn collection_schema(&self, name: &str) -> Result<&CollectionSchema, StorageError> {
@@ -1318,14 +1733,34 @@ impl Storage {
                 }
                 self.catalog.create_collection(tenant.clone(), schema)?;
                 let persisted_state = self
-                    .load_collection_segment_state(&tenant, &name)?
-                    .unwrap_or(SegmentState::Growing);
-                self.collection_segment_states
-                    .insert((tenant.clone(), name.clone()), persisted_state);
+                    .load_collection_lifecycle_state(&tenant, &name)?
+                    .unwrap_or(CollectionLifecycleState {
+                        segment_state: SegmentState::Growing,
+                        index_state: IndexState::Ready,
+                        index_version: 0,
+                        stale_segments: Vec::new(),
+                    });
+                self.collection_segment_states.insert(
+                    (tenant.clone(), name.clone()),
+                    persisted_state.segment_state,
+                );
+                self.collection_index_states
+                    .insert((tenant.clone(), name.clone()), persisted_state.index_state);
+                self.collection_index_generations
+                    .insert((tenant.clone(), name.clone()), 0);
+                self.collection_index_versions
+                    .insert((tenant.clone(), name.clone()), persisted_state.index_version);
+                self.collection_stale_segments.insert(
+                    (tenant.clone(), name.clone()),
+                    persisted_state.stale_segments.into_iter().collect(),
+                );
                 self.collection_write_counts
                     .insert((tenant.clone(), name.clone()), 0);
                 self.replay_segments(&tenant, &name)?;
                 self.replay_wal(&tenant, &name)?;
+                self.catalog
+                    .collection_mut(&tenant, &name)?
+                    .set_index_state(persisted_state.index_state)?;
             }
         }
         Ok(())
@@ -1339,12 +1774,12 @@ impl Storage {
                 if let Some(tm) = &self.tiering_manager {
                     if let Some(key) = self.get_tiering_key(&segment) {
                         // This downloads to `segment` path (which is local hot path)
-                         if let Err(e) = tm.download(&key, &segment) {
-                             eprintln!("Failed to restore segment {}: {}", key, e);
-                             // If we can't restore, we probably should fail or skip?
-                             // Failing protects data consistency.
-                             return Err(StorageError::ObjectStore(e.to_string()));
-                         }
+                        if let Err(e) = tm.download(&key, &segment) {
+                            eprintln!("Failed to restore segment {}: {}", key, e);
+                            // If we can't restore, we probably should fail or skip?
+                            // Failing protects data consistency.
+                            return Err(StorageError::ObjectStore(e.to_string()));
+                        }
                     }
                 }
             }
@@ -1417,14 +1852,14 @@ impl Storage {
     }
 
     fn collection_lifecycle_state_path(&self, tenant: &TenantId, name: &str) -> PathBuf {
-        self.collection_dir(tenant, name).join("lifecycle_state.json")
+        self.collection_dir(tenant, name)
+            .join("lifecycle_state.json")
     }
 
-    fn persist_collection_segment_state(
+    fn persist_collection_lifecycle_state(
         &self,
         tenant: &TenantId,
         collection: &str,
-        state: SegmentState,
     ) -> Result<(), StorageError> {
         let collection_dir = self.collection_dir(tenant, collection);
         fs::create_dir_all(&collection_dir)?;
@@ -1433,25 +1868,31 @@ impl Storage {
         serde_json::to_writer_pretty(
             &mut file,
             &CollectionLifecycleState {
-                segment_state: state,
+                segment_state: self.collection_segment_state(tenant, collection),
+                index_state: self.collection_index_state(tenant, collection),
+                index_version: self.collection_index_version(tenant, collection),
+                stale_segments: self
+                    .collection_stale_segments(tenant, collection)
+                    .into_iter()
+                    .collect(),
             },
         )?;
         file.flush()?;
         Ok(())
     }
 
-    fn load_collection_segment_state(
+    fn load_collection_lifecycle_state(
         &self,
         tenant: &TenantId,
         collection: &str,
-    ) -> Result<Option<SegmentState>, StorageError> {
+    ) -> Result<Option<CollectionLifecycleState>, StorageError> {
         let state_path = self.collection_lifecycle_state_path(tenant, collection);
         if !state_path.exists() {
             return Ok(None);
         }
         let file = File::open(state_path)?;
         let state: CollectionLifecycleState = serde_json::from_reader(file)?;
-        Ok(Some(state.segment_state))
+        Ok(Some(state))
     }
 
     fn wal_path(&self, tenant: &TenantId, name: &str) -> PathBuf {
@@ -1467,7 +1908,7 @@ impl Storage {
         let mut files = std::collections::HashSet::new();
 
         if dir.exists() {
-             for entry in fs::read_dir(&dir)? {
+            for entry in fs::read_dir(&dir)? {
                 let entry = entry?;
                 if entry.file_type()?.is_file()
                     && entry
@@ -1479,13 +1920,17 @@ impl Storage {
                 {
                     files.insert(entry.path());
                 }
-             }
+            }
         }
 
         if let Some(tm) = &self.tiering_manager {
             if let Some(prefix) = self.get_tiering_key(&dir) {
                 // Ensure prefix ends with / to avoid partial matches on directory name if unrelated
-                let search_prefix = if prefix.ends_with('/') { prefix.clone() } else { format!("{}/", prefix) };
+                let search_prefix = if prefix.ends_with('/') {
+                    prefix.clone()
+                } else {
+                    format!("{}/", prefix)
+                };
                 let remote_keys = tm.list_keys_with_prefix(&search_prefix);
                 for key in remote_keys {
                     if key.ends_with(".jsonl") {
@@ -1519,7 +1964,42 @@ impl Storage {
     }
 
     fn get_tiering_key(&self, abs_path: &Path) -> Option<String> {
-        abs_path.strip_prefix(&self.root).ok().map(|p| p.to_string_lossy().to_string())
+        abs_path
+            .strip_prefix(&self.root)
+            .ok()
+            .map(|p| p.to_string_lossy().to_string())
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct PauseBeforeIndexBuild {
+    state: Mutex<(bool, bool)>,
+    changed: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl PauseBeforeIndexBuild {
+    fn pause(&self) {
+        let mut state = self.state.lock().expect("pause state lock poisoned");
+        state.0 = true;
+        self.changed.notify_all();
+        while !state.1 {
+            state = self.changed.wait(state).expect("pause state wait poisoned");
+        }
+    }
+
+    fn wait_until_reached(&self) {
+        let mut state = self.state.lock().expect("pause state lock poisoned");
+        while !state.0 {
+            state = self.changed.wait(state).expect("pause state wait poisoned");
+        }
+    }
+
+    fn release(&self) {
+        let mut state = self.state.lock().expect("pause state lock poisoned");
+        state.1 = true;
+        self.changed.notify_all();
     }
 }
 
@@ -1530,6 +2010,12 @@ mod tests {
     use barq_index::{DistanceMetric, DocumentId, HnswParams, IndexType};
     use proptest::prelude::*;
     use std::path::Path;
+    use std::sync::{Mutex as StdMutex, OnceLock};
+
+    fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| StdMutex::new(())).lock().unwrap()
+    }
 
     fn sample_schema(name: &str) -> CollectionSchema {
         CollectionSchema {
@@ -1562,6 +2048,19 @@ mod tests {
             vector: vec![1.0, 0.0, 0.0],
             payload: Some(PayloadValue::String("x".repeat(payload_size))),
         }
+    }
+
+    fn read_segment_index_metadata(
+        root: &tempfile::TempDir,
+        collection: &str,
+        file_name: &str,
+    ) -> SegmentIndexMetadata {
+        let metadata_path = root
+            .path()
+            .join(format!(
+                "tenants/default/collections/{collection}/segments/{file_name}.meta.json"
+            ));
+        serde_json::from_str(&std::fs::read_to_string(metadata_path).unwrap()).unwrap()
     }
 
     #[test]
@@ -1639,6 +2138,7 @@ mod tests {
         storage
             .rebuild_index("items", Some(IndexType::Hnsw(HnswParams::default())))
             .unwrap();
+        storage.wait_for_pending_index_builds().unwrap();
 
         let (_, _, index_type) = storage
             .collection_schema("items")
@@ -1646,6 +2146,113 @@ mod tests {
             .vector_config()
             .unwrap();
         assert!(matches!(index_type, IndexType::Hnsw(_)));
+    }
+
+    #[test]
+    fn explicit_reindex_transitions_ready_to_building_to_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut storage = Storage::open(dir.path()).unwrap();
+        storage.create_collection(sample_schema("items")).unwrap();
+        storage.insert("items", sample_document(1), false).unwrap();
+
+        storage.rebuild_index("items", Some(IndexType::Flat)).unwrap();
+        storage.wait_for_pending_index_builds().unwrap();
+        assert_eq!(
+            storage.collection_index_state(&TenantId::default(), "items"),
+            IndexState::Ready
+        );
+        assert_eq!(
+            storage.collection_index_version(&TenantId::default(), "items"),
+            1
+        );
+
+        let hook = storage.install_pause_before_index_build();
+        storage
+            .rebuild_index("items", Some(IndexType::Hnsw(HnswParams::default())))
+            .unwrap();
+        hook.wait_until_reached();
+        assert_eq!(
+            storage.collection_index_state(&TenantId::default(), "items"),
+            IndexState::Building
+        );
+
+        hook.release();
+        storage.wait_for_pending_index_builds().unwrap();
+        assert_eq!(
+            storage.collection_index_state(&TenantId::default(), "items"),
+            IndexState::Ready
+        );
+        assert_eq!(
+            storage.collection_index_version(&TenantId::default(), "items"),
+            2
+        );
+
+        let (_, _, index_type) = storage
+            .collection_schema("items")
+            .unwrap()
+            .vector_config()
+            .unwrap();
+        assert!(matches!(index_type, IndexType::Hnsw(_)));
+    }
+
+    #[test]
+    fn explicit_reindex_preserves_search_correctness() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut storage = Storage::open(dir.path()).unwrap();
+        storage.create_collection(sample_schema("items")).unwrap();
+        storage.insert("items", sample_document(1), false).unwrap();
+        storage
+            .insert(
+                "items",
+                Document {
+                    id: DocumentId::U64(2),
+                    vector: vec![0.0, 1.0, 0.0],
+                    payload: None,
+                },
+                false,
+            )
+            .unwrap();
+
+        let baseline = storage.search("items", &[0.0, 1.0, 0.0], 2, None).unwrap();
+
+        storage.rebuild_index("items", Some(IndexType::Flat)).unwrap();
+        storage.wait_for_pending_index_builds().unwrap();
+
+        let rebuilt = storage.search("items", &[0.0, 1.0, 0.0], 2, None).unwrap();
+        assert_eq!(rebuilt, baseline);
+    }
+
+    #[test]
+    fn index_version_increments_after_successful_rebuilds() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut storage = Storage::open(dir.path()).unwrap();
+        storage.create_collection(sample_schema("versioned")).unwrap();
+        storage.insert("versioned", sample_document(1), false).unwrap();
+
+        storage
+            .rebuild_index("versioned", Some(IndexType::Flat))
+            .unwrap();
+        storage.wait_for_pending_index_builds().unwrap();
+        assert_eq!(
+            storage.collection_index_version(&TenantId::default(), "versioned"),
+            1
+        );
+
+        storage
+            .rebuild_index("versioned", Some(IndexType::Hnsw(HnswParams::default())))
+            .unwrap();
+        storage.wait_for_pending_index_builds().unwrap();
+        assert_eq!(
+            storage.collection_index_version(&TenantId::default(), "versioned"),
+            2
+        );
+
+        let lifecycle = storage
+            .load_collection_lifecycle_state(&TenantId::default(), "versioned")
+            .unwrap()
+            .unwrap();
+        assert_eq!(lifecycle.index_version, 2);
+        assert_eq!(lifecycle.index_state, IndexState::Ready);
     }
 
     #[test]
@@ -1946,7 +2553,10 @@ mod tests {
         assert!(deleted, "existing document should be deleted");
         let _ = storage.delete("grow2", DocumentId::U64(5)).unwrap();
         let results = storage.search("grow2", &[5.0, 0.0, 0.0], 1, None).unwrap();
-        assert!(results.is_empty(), "document should not remain after deletes");
+        assert!(
+            results.is_empty(),
+            "document should not remain after deletes"
+        );
     }
 
     #[test]
@@ -1960,13 +2570,19 @@ mod tests {
             },
         )
         .unwrap();
-        storage.create_collection(sample_schema("seal_auto")).unwrap();
-        storage.insert("seal_auto", sample_document(1), false).unwrap();
+        storage
+            .create_collection(sample_schema("seal_auto"))
+            .unwrap();
+        storage
+            .insert("seal_auto", sample_document(1), false)
+            .unwrap();
         assert_eq!(
             storage.segment_state_for_tenant(&TenantId::default(), "seal_auto"),
             SegmentState::Growing
         );
-        storage.insert("seal_auto", sample_document(2), false).unwrap();
+        storage
+            .insert("seal_auto", sample_document(2), false)
+            .unwrap();
         assert_eq!(
             storage.segment_state_for_tenant(&TenantId::default(), "seal_auto"),
             SegmentState::Growing,
@@ -1978,7 +2594,9 @@ mod tests {
     fn segment_can_be_manually_sealed_and_becomes_read_only() {
         let root = tempfile::tempdir().unwrap();
         let mut storage = Storage::open(root.path()).unwrap();
-        storage.create_collection(sample_schema("seal_manual")).unwrap();
+        storage
+            .create_collection(sample_schema("seal_manual"))
+            .unwrap();
         storage
             .insert("seal_manual", sample_document(3), false)
             .unwrap();
@@ -1996,36 +2614,296 @@ mod tests {
             Err(StorageError::SegmentNotWritable { .. })
         ));
 
-        let results = storage.search("seal_manual", &[3.0, 0.0, 0.0], 1, None).unwrap();
+        let results = storage
+            .search("seal_manual", &[3.0, 0.0, 0.0], 1, None)
+            .unwrap();
         assert_eq!(results.len(), 1, "reads still work after sealing");
     }
 
     #[test]
-    fn sealing_builds_index_and_persists_metadata() {
+    fn collection_lifecycle_persists_index_state_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let tenant = TenantId::default();
+        let mut storage = Storage::open(root.path()).unwrap();
+        storage
+            .create_collection(sample_schema("lifecycle"))
+            .unwrap();
+
+        storage
+            .set_collection_index_state(&tenant, "lifecycle", IndexState::Stale)
+            .unwrap();
+
+        let lifecycle = storage
+            .load_collection_lifecycle_state(&tenant, "lifecycle")
+            .unwrap()
+            .unwrap();
+        assert_eq!(lifecycle.segment_state, SegmentState::Growing);
+        assert_eq!(lifecycle.index_state, IndexState::Stale);
+        assert_eq!(lifecycle.index_version, 0);
+    }
+
+    #[test]
+    fn legacy_lifecycle_metadata_without_version_loads_safely() {
+        let root = tempfile::tempdir().unwrap();
+        {
+            let mut storage = Storage::open(root.path()).unwrap();
+            storage.create_collection(sample_schema("legacy")).unwrap();
+        }
+
+        let lifecycle_path = root
+            .path()
+            .join("tenants/default/collections/legacy/lifecycle_state.json");
+        std::fs::write(
+            &lifecycle_path,
+            r#"{
+  "segment_state": "Growing",
+  "index_state": "Ready"
+}"#,
+        )
+        .unwrap();
+
+        let reopened = Storage::open(root.path()).unwrap();
+        assert_eq!(
+            reopened.collection_index_state(&TenantId::default(), "legacy"),
+            IndexState::Ready
+        );
+        assert_eq!(
+            reopened.collection_index_version(&TenantId::default(), "legacy"),
+            0
+        );
+    }
+
+    #[test]
+    fn sealing_starts_async_index_build_and_persists_building_metadata() {
         let root = tempfile::tempdir().unwrap();
         let mut storage = Storage::open(root.path()).unwrap();
         storage.create_collection(sample_schema("indexed")).unwrap();
-        storage.insert("indexed", sample_document(8), false).unwrap();
+        storage
+            .insert("indexed", sample_document(8), false)
+            .unwrap();
+        let hook = storage.install_pause_before_index_build();
         let sealed = storage
             .seal_segment_for_tenant(&TenantId::default(), "indexed")
             .unwrap();
         assert_eq!(sealed.state, SegmentState::Sealed);
+        hook.wait_until_reached();
 
         let metadata_path = root
             .path()
             .join("tenants/default/collections/indexed/segments")
             .join(format!("{}.meta.json", sealed.file_name));
-        assert!(metadata_path.exists(), "sealed metadata should be persisted");
+        assert!(
+            metadata_path.exists(),
+            "sealed metadata should be persisted"
+        );
         let data = std::fs::read_to_string(metadata_path).unwrap();
         let parsed: SegmentIndexMetadata = serde_json::from_str(&data).unwrap();
-        assert!(parsed.index_built, "sealing should trigger index build");
+        assert!(!parsed.index_built, "async build should still be pending");
+        assert_eq!(parsed.index_state, IndexState::Building);
+        assert_eq!(
+            storage.collection_index_state(&TenantId::default(), "indexed"),
+            IndexState::Building
+        );
+
+        hook.release();
+        storage.wait_for_pending_index_builds().unwrap();
+    }
+
+    #[test]
+    fn segment_is_searchable_after_async_index_build_completes() {
+        let root = tempfile::tempdir().unwrap();
+        let mut storage = Storage::open(root.path()).unwrap();
+        storage
+            .create_collection(sample_schema("indexed_ready"))
+            .unwrap();
+        storage
+            .insert("indexed_ready", sample_document(12), false)
+            .unwrap();
+        storage
+            .seal_segment_for_tenant(&TenantId::default(), "indexed_ready")
+            .unwrap();
+
+        storage.wait_for_pending_index_builds().unwrap();
+
+        let results = storage
+            .search("indexed_ready", &[1.0, 0.0, 0.0], 1, None)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, DocumentId::U64(12));
+    }
+
+    #[test]
+    fn async_index_build_transitions_to_ready_after_success() {
+        let root = tempfile::tempdir().unwrap();
+        let mut storage = Storage::open(root.path()).unwrap();
+        storage
+            .create_collection(sample_schema("indexed_ready_state"))
+            .unwrap();
+        storage
+            .insert("indexed_ready_state", sample_document(14), false)
+            .unwrap();
+        let sealed = storage
+            .seal_segment_for_tenant(&TenantId::default(), "indexed_ready_state")
+            .unwrap();
+
+        storage.wait_for_pending_index_builds().unwrap();
+
+        let metadata_path = root
+            .path()
+            .join("tenants/default/collections/indexed_ready_state/segments")
+            .join(format!("{}.meta.json", sealed.file_name));
+        let parsed: SegmentIndexMetadata =
+            serde_json::from_str(&std::fs::read_to_string(metadata_path).unwrap()).unwrap();
+        assert!(parsed.index_built);
+        assert_eq!(parsed.index_state, IndexState::Ready);
+        assert_eq!(parsed.index_version, 1);
+        assert_eq!(
+            storage.collection_index_state(&TenantId::default(), "indexed_ready_state"),
+            IndexState::Ready
+        );
+        assert_eq!(
+            storage.collection_index_version(&TenantId::default(), "indexed_ready_state"),
+            1
+        );
+    }
+
+    #[test]
+    fn newly_sealed_segment_is_marked_stale_until_build_completes() {
+        let root = tempfile::tempdir().unwrap();
+        let tenant = TenantId::default();
+        let mut storage = Storage::open(root.path()).unwrap();
+        storage.create_collection(sample_schema("stale_plan")).unwrap();
+        storage.insert("stale_plan", sample_document(1), false).unwrap();
+        let first = storage
+            .seal_current_segment_for_tenant(&tenant, "stale_plan", true)
+            .unwrap();
+        storage.wait_for_pending_index_builds().unwrap();
+
+        storage
+            .insert(
+                "stale_plan",
+                Document {
+                    id: DocumentId::U64(2),
+                    vector: vec![0.0, 1.0, 0.0],
+                    payload: None,
+                },
+                false,
+            )
+            .unwrap();
+        let hook = storage.install_pause_before_index_build();
+        let second = storage
+            .seal_segment_for_tenant(&tenant, "stale_plan")
+            .unwrap();
+        hook.wait_until_reached();
+
+        let lifecycle = storage
+            .load_collection_lifecycle_state(&tenant, "stale_plan")
+            .unwrap()
+            .unwrap();
+        assert_eq!(lifecycle.stale_segments, vec![second.file_name.clone()]);
+
+        let first_meta = read_segment_index_metadata(&root, "stale_plan", &first.file_name);
+        let second_meta = read_segment_index_metadata(&root, "stale_plan", &second.file_name);
+        assert_eq!(first_meta.index_state, IndexState::Ready);
+        assert_eq!(first_meta.index_version, 1);
+        assert_eq!(second_meta.index_state, IndexState::Building);
+        assert_eq!(second_meta.index_version, 1);
+
+        hook.release();
+        storage.wait_for_pending_index_builds().unwrap();
+    }
+
+    #[test]
+    fn only_stale_segment_metadata_is_advanced_on_rebuild_completion() {
+        let root = tempfile::tempdir().unwrap();
+        let tenant = TenantId::default();
+        let mut storage = Storage::open(root.path()).unwrap();
+        storage.create_collection(sample_schema("stale_apply")).unwrap();
+        storage.insert("stale_apply", sample_document(1), false).unwrap();
+        let first = storage
+            .seal_current_segment_for_tenant(&tenant, "stale_apply", true)
+            .unwrap();
+        storage.wait_for_pending_index_builds().unwrap();
+
+        storage
+            .insert(
+                "stale_apply",
+                Document {
+                    id: DocumentId::U64(2),
+                    vector: vec![0.0, 1.0, 0.0],
+                    payload: None,
+                },
+                false,
+            )
+            .unwrap();
+        let second = storage
+            .seal_segment_for_tenant(&tenant, "stale_apply")
+            .unwrap();
+        storage.wait_for_pending_index_builds().unwrap();
+
+        let lifecycle = storage
+            .load_collection_lifecycle_state(&tenant, "stale_apply")
+            .unwrap()
+            .unwrap();
+        assert!(lifecycle.stale_segments.is_empty());
+
+        let first_meta = read_segment_index_metadata(&root, "stale_apply", &first.file_name);
+        let second_meta = read_segment_index_metadata(&root, "stale_apply", &second.file_name);
+        assert_eq!(first_meta.index_version, 1);
+        assert_eq!(first_meta.index_state, IndexState::Ready);
+        assert_eq!(second_meta.index_version, 2);
+        assert_eq!(second_meta.index_state, IndexState::Ready);
+    }
+
+    #[test]
+    fn search_stays_correct_while_new_segment_build_is_in_flight() {
+        let tenant = TenantId::default();
+        let root = tempfile::tempdir().unwrap();
+        let mut storage = Storage::open(root.path()).unwrap();
+        storage.create_collection(sample_schema("search_during_build")).unwrap();
+        storage
+            .insert("search_during_build", sample_document(1), false)
+            .unwrap();
+        storage
+            .seal_current_segment_for_tenant(&tenant, "search_during_build", true)
+            .unwrap();
+        storage.wait_for_pending_index_builds().unwrap();
+
+        storage
+            .insert(
+                "search_during_build",
+                Document {
+                    id: DocumentId::U64(2),
+                    vector: vec![0.0, 1.0, 0.0],
+                    payload: None,
+                },
+                false,
+            )
+            .unwrap();
+        let hook = storage.install_pause_before_index_build();
+        storage
+            .seal_segment_for_tenant(&tenant, "search_during_build")
+            .unwrap();
+        hook.wait_until_reached();
+
+        let results = storage
+            .search("search_during_build", &[0.0, 1.0, 0.0], 2, None)
+            .unwrap();
+        let ids: Vec<_> = results.into_iter().map(|result| result.id).collect();
+        assert_eq!(ids, vec![DocumentId::U64(2), DocumentId::U64(1)]);
+
+        hook.release();
+        storage.wait_for_pending_index_builds().unwrap();
     }
 
     #[test]
     fn index_build_failure_falls_back_without_breaking_search() {
+        let _guard = env_test_lock();
         let root = tempfile::tempdir().unwrap();
         let mut storage = Storage::open(root.path()).unwrap();
-        storage.create_collection(sample_schema("indexed_fallback")).unwrap();
+        storage
+            .create_collection(sample_schema("indexed_fallback"))
+            .unwrap();
         storage
             .insert("indexed_fallback", sample_document(10), false)
             .unwrap();
@@ -2033,6 +2911,7 @@ mod tests {
         let sealed = storage
             .seal_segment_for_tenant(&TenantId::default(), "indexed_fallback")
             .unwrap();
+        storage.wait_for_pending_index_builds().unwrap();
         std::env::remove_var("BARQ_FAIL_INDEX_BUILD");
 
         let metadata_path = root
@@ -2042,6 +2921,16 @@ mod tests {
         let parsed: SegmentIndexMetadata =
             serde_json::from_str(&std::fs::read_to_string(metadata_path).unwrap()).unwrap();
         assert!(!parsed.index_built);
+        assert_eq!(parsed.index_state, IndexState::Stale);
+        assert_eq!(parsed.index_version, 0);
+        assert_eq!(
+            storage.collection_index_state(&TenantId::default(), "indexed_fallback"),
+            IndexState::Stale
+        );
+        assert_eq!(
+            storage.collection_index_version(&TenantId::default(), "indexed_fallback"),
+            0
+        );
 
         let results = storage
             .search("indexed_fallback", &[10.0, 0.0, 0.0], 1, None)
@@ -2055,19 +2944,31 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let tenant = TenantId::default();
         let mut storage = Storage::open(root.path()).unwrap();
-        storage.create_collection(sample_schema("compact_live")).unwrap();
+        storage
+            .create_collection(sample_schema("compact_live"))
+            .unwrap();
 
-        storage.insert("compact_live", sample_document(1), false).unwrap();
-        storage.insert("compact_live", sample_document(2), false).unwrap();
-        storage.flush_wal_to_segment(&tenant, "compact_live").unwrap();
+        storage
+            .insert("compact_live", sample_document(1), false)
+            .unwrap();
+        storage
+            .insert("compact_live", sample_document(2), false)
+            .unwrap();
+        storage
+            .flush_wal_to_segment(&tenant, "compact_live")
+            .unwrap();
         storage.delete("compact_live", DocumentId::U64(1)).unwrap();
-        storage.flush_wal_to_segment(&tenant, "compact_live").unwrap();
+        storage
+            .flush_wal_to_segment(&tenant, "compact_live")
+            .unwrap();
 
         storage.compact_segments(&tenant, "compact_live").unwrap();
         let missing = storage
             .get_document(&tenant, "compact_live", &DocumentId::U64(1))
             .unwrap();
-        let live = storage.search("compact_live", &[2.0, 0.0, 0.0], 1, None).unwrap();
+        let live = storage
+            .search("compact_live", &[2.0, 0.0, 0.0], 1, None)
+            .unwrap();
         assert!(missing.is_none(), "deleted documents must not reappear");
         assert_eq!(live.len(), 1, "live documents must survive compaction");
     }
@@ -2077,7 +2978,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let tenant = TenantId::default();
         let mut storage = Storage::open(root.path()).unwrap();
-        storage.create_collection(sample_schema("compact_empty")).unwrap();
+        storage
+            .create_collection(sample_schema("compact_empty"))
+            .unwrap();
         let metadata = storage.compact_segments(&tenant, "compact_empty").unwrap();
         assert_eq!(metadata.entries, 0);
         assert!(metadata.file_name.is_empty());
@@ -2088,15 +2991,27 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let tenant = TenantId::default();
         let mut storage = Storage::open(root.path()).unwrap();
-        storage.create_collection(sample_schema("multi_seg")).unwrap();
+        storage
+            .create_collection(sample_schema("multi_seg"))
+            .unwrap();
 
-        storage.insert("multi_seg", sample_document(1), false).unwrap();
-        storage.insert("multi_seg", sample_document(2), false).unwrap();
+        storage
+            .insert("multi_seg", sample_document(1), false)
+            .unwrap();
+        storage
+            .insert("multi_seg", sample_document(2), false)
+            .unwrap();
         storage.flush_wal_to_segment(&tenant, "multi_seg").unwrap();
-        storage.insert("multi_seg", sample_document(3), false).unwrap(); // growing
+        storage
+            .insert("multi_seg", sample_document(3), false)
+            .unwrap(); // growing
 
-        let first = storage.search("multi_seg", &[2.5, 0.0, 0.0], 3, None).unwrap();
-        let second = storage.search("multi_seg", &[2.5, 0.0, 0.0], 3, None).unwrap();
+        let first = storage
+            .search("multi_seg", &[2.5, 0.0, 0.0], 3, None)
+            .unwrap();
+        let second = storage
+            .search("multi_seg", &[2.5, 0.0, 0.0], 3, None)
+            .unwrap();
         assert_eq!(first.len(), 3);
         assert_eq!(first, second, "merged top-k ordering must be deterministic");
     }
@@ -2106,14 +3021,26 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let tenant = TenantId::default();
         let mut storage = Storage::open(root.path()).unwrap();
-        storage.create_collection(sample_schema("multi_sealed")).unwrap();
+        storage
+            .create_collection(sample_schema("multi_sealed"))
+            .unwrap();
 
-        storage.insert("multi_sealed", sample_document(10), false).unwrap();
-        storage.flush_wal_to_segment(&tenant, "multi_sealed").unwrap();
-        storage.insert("multi_sealed", sample_document(11), false).unwrap();
-        storage.flush_wal_to_segment(&tenant, "multi_sealed").unwrap();
+        storage
+            .insert("multi_sealed", sample_document(10), false)
+            .unwrap();
+        storage
+            .flush_wal_to_segment(&tenant, "multi_sealed")
+            .unwrap();
+        storage
+            .insert("multi_sealed", sample_document(11), false)
+            .unwrap();
+        storage
+            .flush_wal_to_segment(&tenant, "multi_sealed")
+            .unwrap();
 
-        let results = storage.search("multi_sealed", &[11.0, 0.0, 0.0], 2, None).unwrap();
+        let results = storage
+            .search("multi_sealed", &[11.0, 0.0, 0.0], 2, None)
+            .unwrap();
         assert_eq!(results.len(), 2);
     }
 
@@ -2122,11 +3049,17 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let tenant = TenantId::default();
         let mut storage = Storage::open(root.path()).unwrap();
-        storage.create_collection(sample_schema("bg_compact")).unwrap();
-        storage.insert("bg_compact", sample_document(1), false).unwrap();
+        storage
+            .create_collection(sample_schema("bg_compact"))
+            .unwrap();
+        storage
+            .insert("bg_compact", sample_document(1), false)
+            .unwrap();
         storage.flush_wal_to_segment(&tenant, "bg_compact").unwrap();
         std::thread::sleep(Duration::from_millis(2));
-        storage.insert("bg_compact", sample_document(2), false).unwrap();
+        storage
+            .insert("bg_compact", sample_document(2), false)
+            .unwrap();
         storage.flush_wal_to_segment(&tenant, "bg_compact").unwrap();
 
         let compacted = storage
@@ -2143,7 +3076,9 @@ mod tests {
         let tenant = TenantId::default();
         let mut storage = Storage::open(root.path()).unwrap();
         storage.create_collection(sample_schema("bg_skip")).unwrap();
-        storage.insert("bg_skip", sample_document(1), false).unwrap();
+        storage
+            .insert("bg_skip", sample_document(1), false)
+            .unwrap();
         storage.flush_wal_to_segment(&tenant, "bg_skip").unwrap();
 
         let compacted = storage
@@ -2159,10 +3094,16 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let tenant = TenantId::default();
         let mut storage = Storage::open(root.path()).unwrap();
-        storage.create_collection(sample_schema("bg_concurrent")).unwrap();
+        storage
+            .create_collection(sample_schema("bg_concurrent"))
+            .unwrap();
         for id in 1..=4 {
-            storage.insert("bg_concurrent", sample_document(id), false).unwrap();
-            storage.flush_wal_to_segment(&tenant, "bg_concurrent").unwrap();
+            storage
+                .insert("bg_concurrent", sample_document(id), false)
+                .unwrap();
+            storage
+                .flush_wal_to_segment(&tenant, "bg_concurrent")
+                .unwrap();
         }
 
         let path = root.path().to_path_buf();
@@ -2188,10 +3129,14 @@ mod tests {
         let tenant = TenantId::default();
         let mut storage = Storage::open(root.path()).unwrap();
         storage.create_collection(sample_schema("bg_fail")).unwrap();
-        storage.insert("bg_fail", sample_document(1), false).unwrap();
+        storage
+            .insert("bg_fail", sample_document(1), false)
+            .unwrap();
         storage.flush_wal_to_segment(&tenant, "bg_fail").unwrap();
         std::thread::sleep(Duration::from_millis(2));
-        storage.insert("bg_fail", sample_document(2), false).unwrap();
+        storage
+            .insert("bg_fail", sample_document(2), false)
+            .unwrap();
         storage.flush_wal_to_segment(&tenant, "bg_fail").unwrap();
 
         let before = storage.segment_files(&tenant, "bg_fail").unwrap().len();
@@ -2204,7 +3149,10 @@ mod tests {
         std::env::remove_var("BARQ_FAIL_COMPACTION");
         assert!(outcome.is_err());
         let after = storage.segment_files(&tenant, "bg_fail").unwrap().len();
-        assert_eq!(before, after, "failed compaction should not delete originals");
+        assert_eq!(
+            before, after,
+            "failed compaction should not delete originals"
+        );
     }
 
     #[test]
@@ -2213,9 +3161,13 @@ mod tests {
         let tenant = TenantId::default();
         let mut storage = Storage::open(root.path()).unwrap();
         storage.create_collection(sample_schema("bg_loop")).unwrap();
-        storage.insert("bg_loop", sample_document(1), false).unwrap();
+        storage
+            .insert("bg_loop", sample_document(1), false)
+            .unwrap();
         storage.flush_wal_to_segment(&tenant, "bg_loop").unwrap();
-        storage.insert("bg_loop", sample_document(2), false).unwrap();
+        storage
+            .insert("bg_loop", sample_document(2), false)
+            .unwrap();
         storage.flush_wal_to_segment(&tenant, "bg_loop").unwrap();
 
         let stop = Arc::new(AtomicBool::new(false));
@@ -2239,11 +3191,15 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let tenant = TenantId::default();
         let mut storage = Storage::open(root.path()).unwrap();
-        storage.create_collection(sample_schema("bg_loop_skip")).unwrap();
+        storage
+            .create_collection(sample_schema("bg_loop_skip"))
+            .unwrap();
         storage
             .insert("bg_loop_skip", sample_document(1), false)
             .unwrap();
-        storage.flush_wal_to_segment(&tenant, "bg_loop_skip").unwrap();
+        storage
+            .flush_wal_to_segment(&tenant, "bg_loop_skip")
+            .unwrap();
 
         let stop = Arc::new(AtomicBool::new(false));
         let handle = storage.run_background_compaction_loop(
@@ -2289,7 +3245,10 @@ mod tests {
             SegmentState::Sealed
         );
         let write = reopened.insert("mixed", sample_document(99), false);
-        assert!(matches!(write, Err(StorageError::SegmentNotWritable { .. })));
+        assert!(matches!(
+            write,
+            Err(StorageError::SegmentNotWritable { .. })
+        ));
 
         let results = reopened.search("mixed", &[3.0, 0.0, 0.0], 3, None).unwrap();
         assert_eq!(results.len(), 3);
@@ -2307,7 +3266,9 @@ mod tests {
             },
         )
         .unwrap();
-        storage.create_collection(sample_schema("mem_limit")).unwrap();
+        storage
+            .create_collection(sample_schema("mem_limit"))
+            .unwrap();
         storage.set_tenant_quota(
             tenant.clone(),
             TenantQuota {
