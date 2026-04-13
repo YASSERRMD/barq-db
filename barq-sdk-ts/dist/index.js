@@ -34,6 +34,12 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.GrpcClient = exports.Collection = exports.BarqClient = void 0;
+function ensureSupportedApiVersion() {
+    const version = process.env.API_VERSION ?? "v1";
+    if (version !== "v1") {
+        throw new Error(`unsupported API_VERSION: ${version}`);
+    }
+}
 function compatDocumentId(value) {
     const numeric = Number(value);
     if (Number.isInteger(numeric) && String(numeric) === value) {
@@ -79,6 +85,7 @@ class BarqClient {
     }
     async health() {
         try {
+            ensureSupportedApiVersion();
             return await this.grpc().status();
         }
         catch {
@@ -86,6 +93,7 @@ class BarqClient {
         }
     }
     async createCollection(req) {
+        ensureSupportedApiVersion();
         if (!req.index && !(req.text_fields && req.text_fields.length > 0)) {
             await this.grpc().createCollection(req.name, req.dimension, req.metric);
             return;
@@ -112,9 +120,11 @@ class Collection {
         this.name = name;
     }
     async insert(id, vector, payload) {
+        ensureSupportedApiVersion();
         await this.client.grpc().insert(this.name, id, vector, payload ?? {});
     }
     async search(vector, query, topK = 10, filter) {
+        ensureSupportedApiVersion();
         if (vector && !query && !filter) {
             const results = await this.client.grpc().search(this.name, vector, topK);
             return results.map((result) => ({

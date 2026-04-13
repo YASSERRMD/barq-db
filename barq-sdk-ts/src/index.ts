@@ -17,6 +17,13 @@ export interface SearchResult {
     payload?: any;
 }
 
+function ensureSupportedApiVersion(): void {
+    const version = process.env.API_VERSION ?? "v1";
+    if (version !== "v1") {
+        throw new Error(`unsupported API_VERSION: ${version}`);
+    }
+}
+
 function compatDocumentId(value: string): Record<string, string | number> {
     const numeric = Number(value);
     if (Number.isInteger(numeric) && String(numeric) === value) {
@@ -71,6 +78,7 @@ export class BarqClient {
 
     async health(): Promise<boolean> {
         try {
+            ensureSupportedApiVersion();
             return await this.grpc().status();
         } catch {
             return false;
@@ -78,6 +86,7 @@ export class BarqClient {
     }
 
     async createCollection(req: CreateCollectionRequest): Promise<void> {
+        ensureSupportedApiVersion();
         if (!req.index && !(req.text_fields && req.text_fields.length > 0)) {
             await this.grpc().createCollection(req.name, req.dimension, req.metric);
             return;
@@ -108,6 +117,7 @@ export class Collection {
     constructor(private client: BarqClient, private name: string) { }
 
     async insert(id: string | number, vector: number[], payload?: any): Promise<void> {
+        ensureSupportedApiVersion();
         await this.client.grpc().insert(this.name, id, vector, payload ?? {});
     }
 
@@ -117,6 +127,7 @@ export class Collection {
         topK: number = 10,
         filter?: any
     ): Promise<SearchResult[]> {
+        ensureSupportedApiVersion();
         if (vector && !query && !filter) {
             const results = await this.client.grpc().search(this.name, vector, topK);
             return results.map((result) => ({

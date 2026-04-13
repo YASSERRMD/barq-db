@@ -29,6 +29,14 @@ type Client struct {
 	http   *http.Client
 }
 
+func requireSupportedAPIVersion() error {
+	version := os.Getenv("API_VERSION")
+	if version == "" || version == "v1" {
+		return nil
+	}
+	return fmt.Errorf("unsupported API_VERSION: %s", version)
+}
+
 func NewClient(config Config) *Client {
 	return &Client{
 		config: config,
@@ -40,7 +48,7 @@ func NewClient(config Config) *Client {
 
 func (c *Client) request(ctx context.Context, method, path string, body interface{}) ([]byte, error) {
 	url := fmt.Sprintf("%s%s", strings.TrimRight(c.config.BaseURL, "/"), path)
-	
+
 	var bodyReader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -91,6 +99,9 @@ type TextField struct {
 }
 
 func (c *Client) CreateCollection(ctx context.Context, req CreateCollectionRequest) error {
+	if err := requireSupportedAPIVersion(); err != nil {
+		return err
+	}
 	if req.Index == nil && len(req.TextFields) == 0 {
 		grpcClient, err := NewGrpcClientWithAPIKey(c.grpcTarget(), c.config.APIKey)
 		if err != nil {
@@ -111,6 +122,9 @@ type InsertRequest struct {
 }
 
 func (c *Client) Insert(ctx context.Context, collection string, req InsertRequest) error {
+	if err := requireSupportedAPIVersion(); err != nil {
+		return err
+	}
 	grpcClient, err := NewGrpcClientWithAPIKey(c.grpcTarget(), c.config.APIKey)
 	if err != nil {
 		return err
@@ -136,6 +150,9 @@ type SearchResult struct {
 }
 
 func (c *Client) Search(ctx context.Context, collection string, req SearchRequest) ([]SearchResult, error) {
+	if err := requireSupportedAPIVersion(); err != nil {
+		return nil, err
+	}
 	if req.Query == "" && req.Filter == nil {
 		grpcClient, err := NewGrpcClientWithAPIKey(c.grpcTarget(), c.config.APIKey)
 		if err != nil {
@@ -224,7 +241,7 @@ func (c *GrpcClient) CreateCollection(ctx context.Context, name string, dimensio
 
 func (c *GrpcClient) Insert(ctx context.Context, collection string, id interface{}, vector []float32, payload interface{}) error {
 	idStr := fmt.Sprintf("%v", id)
-	
+
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
 		return err

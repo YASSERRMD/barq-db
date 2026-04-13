@@ -13,6 +13,12 @@ def _compat_document_id(value: str) -> Dict[str, Union[int, str]]:
         return {"Str": value}
 
 
+def _require_supported_api_version() -> None:
+    version = os.getenv("API_VERSION", "v1")
+    if version != "v1":
+        raise ValueError(f"unsupported API_VERSION: {version}")
+
+
 class BarqClient:
     def __init__(self, base_url: str, api_key: str):
         self.base_url = base_url.rstrip("/")
@@ -50,6 +56,7 @@ class BarqClient:
         return self._http_client
 
     def health(self) -> bool:
+        _require_supported_api_version()
         return self._grpc().status()
 
     def create_collection(
@@ -60,6 +67,7 @@ class BarqClient:
         index: Optional[Union[str, Dict]] = None,
         text_fields: list = None,
     ) -> Dict:
+        _require_supported_api_version()
         if index is None and not text_fields:
             self._grpc().create_collection(name=name, dimension=dimension, metric=metric)
             return {}
@@ -83,6 +91,7 @@ class BarqClient:
         vector: List[float],
         payload: Optional[Dict] = None,
     ):
+        _require_supported_api_version()
         self._grpc().insert(collection, id, vector, payload or {})
         return {}
 
@@ -94,6 +103,7 @@ class BarqClient:
         top_k: int = 10,
         filter: Optional[Dict] = None,
     ) -> List[Dict]:
+        _require_supported_api_version()
         if vector and not query and filter is None:
             results = self._grpc().search(collection=collection, vector=vector, top_k=top_k)
             return [
