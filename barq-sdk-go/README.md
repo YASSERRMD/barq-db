@@ -1,11 +1,11 @@
-# Barq SDK for Go
+# Barq v2 SDK for Go
 
 <p align="center">
   <a href="https://pkg.go.dev/github.com/YASSERRMD/barq-db/barq-sdk-go"><img src="https://pkg.go.dev/badge/github.com/YASSERRMD/barq-db/barq-sdk-go.svg" alt="Go Reference"></a>
   <a href="https://github.com/YASSERRMD/barq-db/blob/main/LICENSE"><img src="https://img.shields.io/github/license/YASSERRMD/barq-db" alt="License"></a>
 </p>
 
-The official Go SDK for [Barq DB](https://github.com/YASSERRMD/barq-db) - a high-performance vector database built in Rust.
+The official Go SDK for [Barq DB](https://github.com/YASSERRMD/barq-db) - the Barq v2 release line for the gRPC-first vector database built in Rust.
 
 ---
 
@@ -21,6 +21,7 @@ go get github.com/YASSERRMD/barq-db/barq-sdk-go
 
 - `GrpcClient` follows that gRPC surface directly.
 - `Client` remains available for compatibility with the current HTTP endpoints.
+- Performance benchmark docs for Barq v2 live in [Performance Benchmarks](../docs/src/reference/performance.md).
 
 ---
 

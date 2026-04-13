@@ -1,4 +1,4 @@
-# Barq SDK for Rust
+# Barq v2 SDK for Rust
 
 <p align="center">
   <a href="https://crates.io/crates/barq-sdk-rust"><img src="https://img.shields.io/crates/v/barq-sdk-rust.svg" alt="crates.io"></a>
@@ -6,7 +6,7 @@
   <a href="https://github.com/YASSERRMD/barq-db/blob/main/LICENSE"><img src="https://img.shields.io/github/license/YASSERRMD/barq-db" alt="License"></a>
 </p>
 
-The official Rust SDK for [Barq DB](https://github.com/YASSERRMD/barq-db) - a high-performance vector database built in Rust.
+The official Rust SDK for [Barq DB](https://github.com/YASSERRMD/barq-db) - the Barq v2 release line for the gRPC-first vector database built in Rust.
 
 ---
 
@@ -27,6 +27,7 @@ barq-sdk-rust = { path = "../barq-sdk-rust" }
 
 - `BarqGrpcClient` maps to that gRPC surface directly.
 - `BarqClient` remains available for compatibility with the current HTTP endpoints.
+- Performance benchmark docs for Barq v2 live in [Performance Benchmarks](../docs/src/reference/performance.md).
 
 ---
 

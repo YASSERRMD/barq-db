@@ -1,11 +1,11 @@
-# Barq SDK for TypeScript / Node.js
+# Barq v2 SDK for TypeScript / Node.js
 
 <p align="center">
   <a href="https://www.npmjs.com/package/barq-sdk-ts"><img src="https://img.shields.io/npm/v/barq-sdk-ts.svg" alt="npm"></a>
   <a href="https://github.com/YASSERRMD/barq-db/blob/main/LICENSE"><img src="https://img.shields.io/github/license/YASSERRMD/barq-db" alt="License"></a>
 </p>
 
-The official TypeScript/Node.js SDK for [Barq DB](https://github.com/YASSERRMD/barq-db) - a high-performance vector database built in Rust.
+The official TypeScript/Node.js SDK for [Barq DB](https://github.com/YASSERRMD/barq-db) - the Barq v2 release line for the gRPC-first vector database built in Rust.
 
 ---
 
@@ -25,6 +25,7 @@ pnpm add barq-sdk-ts
 
 - `GrpcClient` follows that gRPC surface directly.
 - `BarqClient` remains available for compatibility with the current HTTP endpoints.
+- Performance benchmark docs for Barq v2 live in [Performance Benchmarks](../docs/src/reference/performance.md).
 
 ---
 
