@@ -250,6 +250,9 @@ interface SearchResult {
 |--------|------------|---------|-------------|
 | `insert()` | `id`, `vector`, `payload?` | `Promise<void>` | Insert document |
 | `search()` | `vector?`, `query?`, `topK`, `filter?` | `Promise<SearchResult[]>` | Search |
+| `getMetrics()` | - | `Promise<Metrics>` | Structured metrics catalog and storage snapshot |
+| `getClusterStatus()` | - | `Promise<ClusterStatus>` | Honest cluster capability report |
+| `getSegmentInfo()` | `collection?` | `Promise<SegmentInfo>` | Per-collection segment lifecycle state |
 
 ### `GrpcClient`
 
@@ -261,6 +264,9 @@ interface SearchResult {
 | `insert()` | `collection`, `id`, `vector`, `payload` | `Promise<void>` | Canonical insert RPC |
 | `insertDocument()` | `collection`, `id`, `vector`, `payload` | `Promise<void>` | Insert |
 | `search()` | `collection`, `vector`, `topK` | `Promise<SearchResult[]>` | Search |
+| `getMetrics()` | - | `Promise<Metrics>` | Structured metrics catalog and storage snapshot |
+| `getClusterStatus()` | - | `Promise<ClusterStatus>` | Honest cluster capability report |
+| `getSegmentInfo()` | `collection?` | `Promise<SegmentInfo>` | Per-collection segment lifecycle state |
 
 ---
 
