@@ -2,7 +2,10 @@ pub use barq_core::{
     CollectionSchema, DistanceMetric, DocumentId, Filter, HybridWeights, PayloadValue,
 };
 use barq_proto::barq::barq_client::BarqClient as TonicBarqClient;
-use barq_proto::barq::{CreateCollectionRequest, InsertRequest, SearchRequest, StatusRequest};
+use barq_proto::barq::{
+    Consistency as ProtoConsistency, CreateCollectionRequest, InsertOptions as ProtoInsertOptions,
+    InsertRequest, SearchOptions as ProtoSearchOptions, SearchRequest, StatusRequest,
+};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -67,6 +70,80 @@ fn compat_document_id_json(id: &str) -> serde_json::Value {
         json!({ "U64": value })
     } else {
         json!({ "Str": id })
+    }
+}
+
+/// Optional insert controls for the canonical gRPC API.
+#[derive(Clone, Debug, Default)]
+pub struct InsertOptions {
+    wait_for_commit: Option<bool>,
+}
+
+impl InsertOptions {
+    /// Creates an empty insert options builder that preserves existing defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Controls whether the server waits for the write to be applied before returning.
+    pub fn wait_for_commit(mut self, wait_for_commit: bool) -> Self {
+        self.wait_for_commit = Some(wait_for_commit);
+        self
+    }
+
+    fn into_proto(self) -> Option<ProtoInsertOptions> {
+        self.wait_for_commit
+            .map(|wait_for_commit| ProtoInsertOptions { wait_for_commit })
+    }
+}
+
+/// Read-routing preference for vector search requests.
+#[derive(Clone, Copy, Debug)]
+pub enum SearchConsistency {
+    Primary,
+    Followers,
+    Any,
+}
+
+/// Optional search controls for the canonical gRPC API.
+#[derive(Clone, Debug, Default)]
+pub struct SearchOptions {
+    consistency: Option<SearchConsistency>,
+    allow_fallback: Option<bool>,
+}
+
+impl SearchOptions {
+    /// Creates an empty search options builder that preserves existing defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Selects the preferred routing target for the search request.
+    pub fn consistency(mut self, consistency: SearchConsistency) -> Self {
+        self.consistency = Some(consistency);
+        self
+    }
+
+    /// Controls whether the server may fall back to brute-force search when the index is not ready.
+    pub fn allow_fallback(mut self, allow_fallback: bool) -> Self {
+        self.allow_fallback = Some(allow_fallback);
+        self
+    }
+
+    fn into_proto(self) -> Option<ProtoSearchOptions> {
+        if self.consistency.is_none() && self.allow_fallback.is_none() {
+            return None;
+        }
+
+        Some(ProtoSearchOptions {
+            consistency: match self.consistency {
+                Some(SearchConsistency::Primary) => ProtoConsistency::Primary as i32,
+                Some(SearchConsistency::Followers) => ProtoConsistency::Followers as i32,
+                Some(SearchConsistency::Any) => ProtoConsistency::Any as i32,
+                None => ProtoConsistency::Unspecified as i32,
+            },
+            allow_fallback: self.allow_fallback.unwrap_or(true),
+        })
     }
 }
 
@@ -174,6 +251,17 @@ impl Collection {
         vector: Vec<f32>,
         payload: Option<serde_json::Value>,
     ) -> Result<()> {
+        self.insert_with_options(id, vector, payload, InsertOptions::new())
+            .await
+    }
+
+    pub async fn insert_with_options(
+        &self,
+        id: impl Into<DocumentId>,
+        vector: Vec<f32>,
+        payload: Option<serde_json::Value>,
+        options: InsertOptions,
+    ) -> Result<()> {
         ensure_supported_api_version()?;
         let id_obj = id.into();
         let mut client = BarqGrpcClient::connect_with_api_key(
@@ -182,11 +270,12 @@ impl Collection {
         )
         .await?;
         client
-            .insert(
+            .insert_with_options(
                 &self.name,
                 id_obj,
                 vector,
                 payload.unwrap_or_else(|| json!({})),
+                options.into_proto(),
             )
             .await
     }
@@ -199,27 +288,13 @@ impl Collection {
         filter: Option<Filter>,
         weights: Option<HybridWeights>,
     ) -> Result<Vec<serde_json::Value>> {
-        ensure_supported_api_version()?;
         if vector.is_some() && query.is_none() && filter.is_none() && weights.is_none() {
-            let mut client = BarqGrpcClient::connect_with_api_key(
-                grpc_endpoint(&self.client.base_url)?,
-                self.client.api_key.clone(),
-            )
-            .await?;
-            let results = client
-                .search(&self.name, vector.unwrap_or_default(), top_k as u32)
-                .await?;
-            return Ok(results
-                .into_iter()
-                .map(|result| {
-                    json!({
-                        "id": compat_document_id_json(result["id"].as_str().unwrap_or_default()),
-                        "score": result["score"],
-                    })
-                })
-                .collect());
+            return self
+                .search_with_options(vector.unwrap_or_default(), top_k, SearchOptions::new())
+                .await;
         }
 
+        ensure_supported_api_version()?;
         let mut url = format!("{}/collections/{}/search", self.client.base_url, self.name);
 
         if vector.is_some() && query.is_some() {
@@ -258,6 +333,32 @@ impl Collection {
                 message: res.text().await?,
             })
         }
+    }
+
+    pub async fn search_with_options(
+        &self,
+        vector: Vec<f32>,
+        top_k: usize,
+        options: SearchOptions,
+    ) -> Result<Vec<serde_json::Value>> {
+        ensure_supported_api_version()?;
+        let mut client = BarqGrpcClient::connect_with_api_key(
+            grpc_endpoint(&self.client.base_url)?,
+            self.client.api_key.clone(),
+        )
+        .await?;
+        let results = client
+            .search_with_options(&self.name, vector, top_k as u32, options.into_proto())
+            .await?;
+        Ok(results
+            .into_iter()
+            .map(|result| {
+                json!({
+                    "id": compat_document_id_json(result["id"].as_str().unwrap_or_default()),
+                    "score": result["score"],
+                })
+            })
+            .collect())
     }
 
     pub async fn batch_search(
@@ -301,6 +402,44 @@ impl Collection {
                 message: res.text().await?,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{InsertOptions, ProtoConsistency, SearchConsistency, SearchOptions};
+
+    #[test]
+    fn insert_options_encode_wait_for_commit() {
+        let proto = InsertOptions::new()
+            .wait_for_commit(false)
+            .into_proto()
+            .expect("insert options should encode");
+
+        assert!(!proto.wait_for_commit);
+    }
+
+    #[test]
+    fn search_options_default_allow_fallback_when_present() {
+        let proto = SearchOptions::new()
+            .consistency(SearchConsistency::Followers)
+            .into_proto()
+            .expect("search options should encode");
+
+        assert_eq!(proto.consistency, ProtoConsistency::Followers as i32);
+        assert!(proto.allow_fallback);
+    }
+
+    #[test]
+    fn search_options_can_disable_fallback_explicitly() {
+        let proto = SearchOptions::new()
+            .consistency(SearchConsistency::Primary)
+            .allow_fallback(false)
+            .into_proto()
+            .expect("search options should encode");
+
+        assert_eq!(proto.consistency, ProtoConsistency::Primary as i32);
+        assert!(!proto.allow_fallback);
     }
 }
 
@@ -413,6 +552,18 @@ impl BarqGrpcClient {
         vector: Vec<f32>,
         payload: serde_json::Value,
     ) -> Result<()> {
+        self.insert_with_options(collection, id, vector, payload, None)
+            .await
+    }
+
+    pub async fn insert_with_options(
+        &mut self,
+        collection: &str,
+        id: impl Into<DocumentId>,
+        vector: Vec<f32>,
+        payload: serde_json::Value,
+        options: Option<ProtoInsertOptions>,
+    ) -> Result<()> {
         let id_str = match id.into() {
             DocumentId::U64(v) => v.to_string(),
             DocumentId::Str(s) => s,
@@ -424,7 +575,7 @@ impl BarqGrpcClient {
                 id: id_str,
                 vector,
                 payload_json: payload.to_string(),
-                options: None,
+                options,
             })?)
             .await?;
         Ok(())
@@ -446,14 +597,24 @@ impl BarqGrpcClient {
         vector: Vec<f32>,
         top_k: u32,
     ) -> Result<Vec<serde_json::Value>> {
-        // Simplification: return basic result
+        self.search_with_options(collection, vector, top_k, None)
+            .await
+    }
+
+    pub async fn search_with_options(
+        &mut self,
+        collection: &str,
+        vector: Vec<f32>,
+        top_k: u32,
+        options: Option<ProtoSearchOptions>,
+    ) -> Result<Vec<serde_json::Value>> {
         let res = self
             .client
             .search(self.request(SearchRequest {
                 collection: collection.to_string(),
                 vector,
                 top_k,
-                options: None,
+                options,
             })?)
             .await?;
 

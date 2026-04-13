@@ -17,6 +17,17 @@ export interface SearchResult {
     payload?: any;
 }
 
+export interface InsertOptions {
+    waitForCommit?: boolean;
+}
+
+export type SearchConsistency = "primary" | "followers" | "any";
+
+export interface SearchOptions {
+    consistency?: SearchConsistency;
+    allowFallback?: boolean;
+}
+
 function ensureSupportedApiVersion(): void {
     const version = process.env.API_VERSION ?? "v1";
     if (version !== "v1") {
@@ -30,6 +41,42 @@ function compatDocumentId(value: string): Record<string, string | number> {
         return { U64: numeric };
     }
     return { Str: value };
+}
+
+function grpcInsertOptions(options?: InsertOptions): { waitForCommit: boolean } | undefined {
+    if (!options || options.waitForCommit === undefined) {
+        return undefined;
+    }
+
+    return {
+        waitForCommit: options.waitForCommit,
+    };
+}
+
+function grpcSearchOptions(
+    options?: SearchOptions,
+): { consistency: "CONSISTENCY_UNSPECIFIED" | "CONSISTENCY_PRIMARY" | "CONSISTENCY_FOLLOWERS" | "CONSISTENCY_ANY"; allowFallback: boolean } | undefined {
+    if (!options || (options.consistency === undefined && options.allowFallback === undefined)) {
+        return undefined;
+    }
+
+    const consistency = (() => {
+        switch (options.consistency) {
+            case "primary":
+                return "CONSISTENCY_PRIMARY";
+            case "followers":
+                return "CONSISTENCY_FOLLOWERS";
+            case "any":
+                return "CONSISTENCY_ANY";
+            default:
+                return "CONSISTENCY_UNSPECIFIED";
+        }
+    })();
+
+    return {
+        consistency,
+        allowFallback: options.allowFallback ?? true,
+    };
 }
 
 function grpcTargetFromBaseUrl(baseUrl: string): string {
@@ -116,24 +163,29 @@ export class BarqClient {
 export class Collection {
     constructor(private client: BarqClient, private name: string) { }
 
-    async insert(id: string | number, vector: number[], payload?: any): Promise<void> {
+    async insert(id: string | number, vector: number[], payload?: any, options?: InsertOptions): Promise<void> {
         ensureSupportedApiVersion();
-        await this.client.grpc().insert(this.name, id, vector, payload ?? {});
+        await this.client.grpc().insert(this.name, id, vector, payload ?? {}, options);
     }
 
     async search(
         vector?: number[],
         query?: string,
         topK: number = 10,
-        filter?: any
+        filter?: any,
+        options?: SearchOptions,
     ): Promise<SearchResult[]> {
         ensureSupportedApiVersion();
         if (vector && !query && !filter) {
-            const results = await this.client.grpc().search(this.name, vector, topK);
+            const results = await this.client.grpc().search(this.name, vector, topK, options);
             return results.map((result) => ({
                 id: compatDocumentId(String(result.id)),
                 score: result.score,
             })) as SearchResult[];
+        }
+
+        if (options) {
+            throw new Error("advanced search options are only supported for vector-only gRPC search");
         }
 
         let path = `/collections/${this.name}/search`;
@@ -214,12 +266,13 @@ export class GrpcClient {
         });
     }
 
-    insert(collection: string, id: string | number, vector: number[], payload: any = {}): Promise<void> {
+    insert(collection: string, id: string | number, vector: number[], payload: any = {}, options?: InsertOptions): Promise<void> {
         const request: InsertRequest = {
             collection,
             id: String(id),
             vector,
             payloadJson: JSON.stringify(payload),
+            options: grpcInsertOptions(options),
         };
 
         return new Promise((resolve, reject) => {
@@ -230,16 +283,23 @@ export class GrpcClient {
         });
     }
 
-    insertDocument(collection: string, id: string | number, vector: number[], payload: any = {}): Promise<void> {
-        return this.insert(collection, id, vector, payload);
+    insertDocument(
+        collection: string,
+        id: string | number,
+        vector: number[],
+        payload: any = {},
+        options?: InsertOptions,
+    ): Promise<void> {
+        return this.insert(collection, id, vector, payload, options);
     }
 
-    search(collection: string, vector: number[], topK: number = 10): Promise<SearchResult[]> {
+    search(collection: string, vector: number[], topK: number = 10, options?: SearchOptions): Promise<SearchResult[]> {
         return new Promise((resolve, reject) => {
             this.client.search({
                 collection,
                 vector,
-                topK
+                topK,
+                options: grpcSearchOptions(options),
             }, this.metadata, (err, response?: SearchResponse__Output) => {
                 if (err) return reject(err);
                 const results = (response?.results ?? []).map((r) => ({
