@@ -18,8 +18,8 @@ use barq_core::{
 use barq_index::{DistanceMetric, DocumentId, DocumentIdError, IndexType};
 use barq_storage::{SegmentState, Storage, StorageError, TenantQuota, TenantUsageReport};
 use ingest::{
-    validate_insert_document, IngestionInsertRequest, IngestionService, QueueAdmissionError,
-    DEFAULT_INGEST_BATCH_SIZE, DEFAULT_INGEST_QUEUE_CAPACITY,
+    validate_insert_document, IngestionConfig, IngestionInsertRequest, IngestionService,
+    QueueAdmissionError,
 };
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use serde::{Deserialize, Serialize};
@@ -48,23 +48,14 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(storage: Storage, auth: ApiAuth, cluster: ClusterRouter) -> Self {
-        Self::new_with_ingestion_queue_capacity(
+        let config = IngestionConfig::from_env();
+        Self::new_with_ingestion_settings(
             storage,
             auth,
             cluster,
-            DEFAULT_INGEST_QUEUE_CAPACITY,
-            DEFAULT_INGEST_BATCH_SIZE,
+            config.queue_capacity,
+            config.batch_size,
         )
-    }
-
-    fn new_with_ingestion_queue_capacity(
-        storage: Storage,
-        auth: ApiAuth,
-        cluster: ClusterRouter,
-        queue_capacity: usize,
-        batch_size: usize,
-    ) -> Self {
-        Self::new_with_ingestion_settings(storage, auth, cluster, queue_capacity, batch_size)
     }
 
     fn new_with_ingestion_settings(

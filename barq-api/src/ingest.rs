@@ -11,6 +11,34 @@ use tokio::sync::{
 pub(crate) const DEFAULT_INGEST_BATCH_SIZE: usize = 16;
 pub(crate) const DEFAULT_INGEST_QUEUE_CAPACITY: usize = 64;
 
+/// Runtime configuration for the asynchronous ingestion worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct IngestionConfig {
+    pub(crate) batch_size: usize,
+    pub(crate) queue_capacity: usize,
+}
+
+impl Default for IngestionConfig {
+    fn default() -> Self {
+        Self {
+            batch_size: DEFAULT_INGEST_BATCH_SIZE,
+            queue_capacity: DEFAULT_INGEST_QUEUE_CAPACITY,
+        }
+    }
+}
+
+impl IngestionConfig {
+    pub(crate) fn from_env() -> Self {
+        Self {
+            batch_size: parse_env_usize("BARQ_INGEST_BATCH_SIZE", DEFAULT_INGEST_BATCH_SIZE),
+            queue_capacity: parse_env_usize(
+                "BARQ_INGEST_QUEUE_CAPACITY",
+                DEFAULT_INGEST_QUEUE_CAPACITY,
+            ),
+        }
+    }
+}
+
 /// Bounded FIFO queue used by the asynchronous ingestion pipeline.
 #[derive(Debug)]
 pub struct IngestionQueue<T> {
@@ -91,6 +119,14 @@ impl std::fmt::Display for QueueAdmissionError {
 }
 
 impl std::error::Error for QueueAdmissionError {}
+
+fn parse_env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
 
 #[derive(Debug)]
 struct PendingInsert {
@@ -364,7 +400,10 @@ impl PauseBeforeDequeue {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_insert_document, IngestionQueue, DEFAULT_INGEST_QUEUE_CAPACITY};
+    use super::{
+        validate_insert_document, IngestionConfig, IngestionQueue, DEFAULT_INGEST_BATCH_SIZE,
+        DEFAULT_INGEST_QUEUE_CAPACITY,
+    };
     use crate::{
         insert_document, ApiAuth, ApiError, ApiRole, AppState, ClusterConfig, ClusterRouter,
         DocumentIdInput, InsertDocumentRequest,
@@ -378,7 +417,10 @@ mod tests {
     use barq_core::{Document, FieldType};
     use barq_storage::Storage;
     use proptest::prelude::*;
+    use std::sync::Mutex;
     use tempfile::TempDir;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn build_state(queue_capacity: usize, batch_size: usize) -> (TempDir, AppState, TenantId) {
         let dir = TempDir::new().unwrap();
@@ -506,6 +548,90 @@ mod tests {
         .unwrap_err();
 
         assert!(err.contains("missing required text field title"));
+    }
+
+    fn with_ingestion_env<F>(vars: &[(&str, Option<&str>)], f: F)
+    where
+        F: FnOnce(),
+    {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let saved: Vec<_> = vars
+            .iter()
+            .map(|(key, _)| ((*key).to_string(), std::env::var(key).ok()))
+            .collect();
+
+        for (key, value) in vars {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+
+        f();
+
+        for (key, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+
+    #[test]
+    fn ingestion_config_uses_defaults_when_env_is_missing() {
+        with_ingestion_env(
+            &[
+                ("BARQ_INGEST_BATCH_SIZE", None),
+                ("BARQ_INGEST_QUEUE_CAPACITY", None),
+            ],
+            || {
+                assert_eq!(
+                    IngestionConfig::from_env(),
+                    IngestionConfig {
+                        batch_size: DEFAULT_INGEST_BATCH_SIZE,
+                        queue_capacity: DEFAULT_INGEST_QUEUE_CAPACITY,
+                    }
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn ingestion_config_reads_custom_env_values() {
+        with_ingestion_env(
+            &[
+                ("BARQ_INGEST_BATCH_SIZE", Some("7")),
+                ("BARQ_INGEST_QUEUE_CAPACITY", Some("19")),
+            ],
+            || {
+                assert_eq!(
+                    IngestionConfig::from_env(),
+                    IngestionConfig {
+                        batch_size: 7,
+                        queue_capacity: 19,
+                    }
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn ingestion_config_invalid_values_fall_back_safely() {
+        with_ingestion_env(
+            &[
+                ("BARQ_INGEST_BATCH_SIZE", Some("0")),
+                ("BARQ_INGEST_QUEUE_CAPACITY", Some("not-a-number")),
+            ],
+            || {
+                assert_eq!(
+                    IngestionConfig::from_env(),
+                    IngestionConfig {
+                        batch_size: DEFAULT_INGEST_BATCH_SIZE,
+                        queue_capacity: DEFAULT_INGEST_QUEUE_CAPACITY,
+                    }
+                );
+            },
+        );
     }
 
     #[tokio::test]
