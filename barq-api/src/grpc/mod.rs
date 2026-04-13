@@ -425,6 +425,7 @@ mod tests {
                 id: "doc-1".to_string(),
                 vector: vec![1.0, 0.0],
                 payload_json: "{\"kind\":\"grpc\"}".to_string(),
+                options: None,
             }))
             .await
             .unwrap();
@@ -455,6 +456,7 @@ mod tests {
                     id: id.to_string(),
                     vector,
                     payload_json: "{}".to_string(),
+                    options: None,
                 }))
                 .await
                 .unwrap();
@@ -465,6 +467,7 @@ mod tests {
                 collection: "docs".to_string(),
                 vector: vec![1.0, 0.0],
                 top_k: 1,
+                options: None,
             }))
             .await
             .unwrap()
@@ -486,6 +489,7 @@ mod tests {
                 id: "doc-1".to_string(),
                 vector: vec![1.0, 0.0],
                 payload_json: "{not-json}".to_string(),
+                options: None,
             }))
             .await
             .unwrap_err();
@@ -496,6 +500,7 @@ mod tests {
                 collection: "docs".to_string(),
                 vector: vec![1.0, 0.0],
                 top_k: 0,
+                options: None,
             }))
             .await
             .unwrap_err();

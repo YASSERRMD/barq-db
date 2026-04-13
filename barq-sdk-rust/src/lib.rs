@@ -424,6 +424,7 @@ impl BarqGrpcClient {
                 id: id_str,
                 vector,
                 payload_json: payload.to_string(),
+                options: None,
             })?)
             .await?;
         Ok(())
@@ -452,6 +453,7 @@ impl BarqGrpcClient {
                 collection: collection.to_string(),
                 vector,
                 top_k,
+                options: None,
             })?)
             .await?;
 
