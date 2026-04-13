@@ -961,7 +961,7 @@ impl Collection {
         if let Some(f) = filter {
             self.validate_filter(f)?;
         }
-        let candidates = filter.and_then(|f| self.metadata_index.candidates(f));
+        let candidates = self.filter_candidates(filter);
         let use_vector_fallback = self.index_state != IndexState::Ready;
 
         let mut results = if let Some(ids) = &candidates {
@@ -1091,6 +1091,10 @@ impl Collection {
         results
     }
 
+    fn filter_candidates(&self, filter: Option<&Filter>) -> Option<HashSet<DocumentId>> {
+        filter.and_then(|candidate_filter| self.metadata_index.candidates(candidate_filter))
+    }
+
     fn matches_filter(&self, id: &DocumentId, filter: &Filter) -> bool {
         let payload = self.payloads.get(id);
         evaluate_filter(filter, payload)
@@ -1119,10 +1123,12 @@ impl Collection {
             .text_index
             .as_ref()
             .ok_or_else(|| CatalogError::InvalidSchema("collection has no text index".into()))?;
-        let mut results = index.search(query, top_k * 2)?;
+        let candidates = self.filter_candidates(filter);
+        let mut results = index.search_with_candidates(query, top_k * 2, candidates.as_ref())?;
         results = self.filter_results(results, filter);
         if results.len() < top_k {
-            let mut fallback = index.search(query, top_k * 4)?;
+            let mut fallback =
+                index.search_with_candidates(query, top_k * 4, candidates.as_ref())?;
             fallback = self.filter_results(fallback, filter);
             results.extend(fallback);
         }
@@ -2173,6 +2179,203 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, DocumentId::U64(1));
+    }
+
+    #[test]
+    fn text_search_filter_pushdown_matches_post_filter_baseline() {
+        let mut schema = text_schema();
+        schema.name = "articles_text_filter".to_string();
+        schema.fields.push(FieldSchema {
+            name: "meta".to_string(),
+            field_type: FieldType::Json,
+            required: false,
+        });
+
+        let mut catalog = Catalog::new();
+        let tenant = default_tenant();
+        catalog.create_collection(tenant.clone(), schema).unwrap();
+        let collection = catalog
+            .collection_mut(&tenant, "articles_text_filter")
+            .unwrap();
+
+        let docs = [
+            (
+                1,
+                vec![0.9, 0.1, 0.0],
+                "Rust systems programming guide",
+                "tech",
+            ),
+            (2, vec![0.8, 0.2, 0.0], "Rust cookbook", "tech"),
+            (3, vec![0.1, 0.9, 0.0], "Garden cookbook", "home"),
+        ];
+
+        for (id, vector, body, category) in docs {
+            let mut payload = HashMap::new();
+            payload.insert("body".to_string(), PayloadValue::String(body.into()));
+            payload.insert(
+                "meta".to_string(),
+                PayloadValue::Object({
+                    let mut meta = HashMap::new();
+                    meta.insert("category".to_string(), PayloadValue::String(category.into()));
+                    meta
+                }),
+            );
+            collection
+                .insert(Document {
+                    id: DocumentId::U64(id),
+                    vector,
+                    payload: Some(PayloadValue::Object(payload)),
+                })
+                .unwrap();
+        }
+
+        let filter = Filter::Eq {
+            field: "meta.category".to_string(),
+            value: PayloadValue::String("tech".into()),
+        };
+
+        let actual = collection
+            .search_text_with_filter("rust guide", 2, Some(&filter))
+            .unwrap();
+
+        let mut expected = collection
+            .text_index
+            .as_ref()
+            .unwrap()
+            .search("rust guide", collection.document_count())
+            .unwrap();
+        expected = collection.filter_results(expected, Some(&filter));
+        expected.truncate(2);
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn hybrid_filter_pushdown_matches_post_filter_baseline() {
+        let mut schema = text_schema();
+        schema.name = "articles_hybrid_filter".to_string();
+        schema.fields.push(FieldSchema {
+            name: "meta".to_string(),
+            field_type: FieldType::Json,
+            required: false,
+        });
+
+        let mut catalog = Catalog::new();
+        let tenant = default_tenant();
+        catalog.create_collection(tenant.clone(), schema).unwrap();
+        let collection = catalog
+            .collection_mut(&tenant, "articles_hybrid_filter")
+            .unwrap();
+
+        let docs = [
+            (
+                1,
+                vec![1.0, 0.0, 0.0],
+                "Rust systems programming guide",
+                "tech",
+            ),
+            (2, vec![0.8, 0.2, 0.0], "Rust cookbook", "tech"),
+            (3, vec![0.0, 1.0, 0.0], "Garden cookbook", "home"),
+        ];
+
+        for (id, vector, body, category) in docs {
+            let mut payload = HashMap::new();
+            payload.insert("body".to_string(), PayloadValue::String(body.into()));
+            payload.insert(
+                "meta".to_string(),
+                PayloadValue::Object({
+                    let mut meta = HashMap::new();
+                    meta.insert("category".to_string(), PayloadValue::String(category.into()));
+                    meta
+                }),
+            );
+            collection
+                .insert(Document {
+                    id: DocumentId::U64(id),
+                    vector,
+                    payload: Some(PayloadValue::Object(payload)),
+                })
+                .unwrap();
+        }
+
+        let filter = Filter::Eq {
+            field: "meta.category".to_string(),
+            value: PayloadValue::String("tech".into()),
+        };
+        let weights = HybridWeights {
+            bm25: 0.6,
+            vector: 0.4,
+        };
+
+        let actual = collection
+            .search_hybrid(
+                &[1.0, 0.0, 0.0],
+                "rust guide",
+                2,
+                Some(weights),
+                Some(&filter),
+            )
+            .unwrap();
+
+        let mut bm25_results = collection
+            .text_index
+            .as_ref()
+            .unwrap()
+            .search("rust guide", collection.document_count())
+            .unwrap();
+        bm25_results = collection.filter_results(bm25_results, Some(&filter));
+        bm25_results.truncate(4);
+
+        let mut vector_results = collection.search_all_vectors(&[1.0, 0.0, 0.0]);
+        vector_results = collection.filter_results(vector_results, Some(&filter));
+        vector_results.truncate(4);
+
+        let normalized_bm25 = normalize_scores(&bm25_results);
+        let normalized_vectors = normalize_scores(&vector_results);
+        let mut combined: HashMap<DocumentId, HybridSearchResult> = HashMap::new();
+
+        for result in bm25_results {
+            let normalized = *normalized_bm25.get(&result.id).unwrap_or(&0.0);
+            combined
+                .entry(result.id.clone())
+                .and_modify(|entry| {
+                    entry.bm25_score = Some(result.score);
+                    entry.score += weights.bm25 * normalized;
+                })
+                .or_insert(HybridSearchResult {
+                    id: result.id,
+                    bm25_score: Some(result.score),
+                    vector_score: None,
+                    score: weights.bm25 * normalized,
+                });
+        }
+
+        for result in vector_results {
+            let normalized = *normalized_vectors.get(&result.id).unwrap_or(&0.0);
+            combined
+                .entry(result.id.clone())
+                .and_modify(|entry| {
+                    entry.vector_score = Some(result.score);
+                    entry.score += weights.vector * normalized;
+                })
+                .or_insert(HybridSearchResult {
+                    id: result.id,
+                    bm25_score: None,
+                    vector_score: Some(result.score),
+                    score: weights.vector * normalized,
+                });
+        }
+
+        let mut expected: Vec<_> = combined.into_values().collect();
+        expected.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        expected.truncate(2);
+
+        assert_eq!(actual, expected);
     }
 
     #[test]
