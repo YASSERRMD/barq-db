@@ -16,7 +16,11 @@ use barq_core::{
     PayloadValue, TenantId,
 };
 use barq_index::{DistanceMetric, DocumentId, DocumentIdError, IndexType};
-use barq_storage::{Storage, TenantQuota, TenantUsageReport};
+use barq_storage::{SegmentState, Storage, StorageError, TenantQuota, TenantUsageReport};
+use ingest::{
+    validate_insert_document, IngestionInsertRequest, IngestionService, QueueAdmissionError,
+    DEFAULT_INGEST_QUEUE_CAPACITY,
+};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use serde::{Deserialize, Serialize};
 use tokio::{net::TcpListener, sync::Mutex, task::JoinHandle};
@@ -39,12 +43,29 @@ pub struct AppState {
     pub auth: ApiAuth,
     pub metrics: PrometheusHandle,
     pub cluster: ClusterRouter,
+    ingestion: Arc<IngestionService>,
 }
 
 impl AppState {
     pub fn new(storage: Storage, auth: ApiAuth, cluster: ClusterRouter) -> Self {
+        Self::new_with_ingestion_queue_capacity(
+            storage,
+            auth,
+            cluster,
+            DEFAULT_INGEST_QUEUE_CAPACITY,
+        )
+    }
+
+    fn new_with_ingestion_queue_capacity(
+        storage: Storage,
+        auth: ApiAuth,
+        cluster: ClusterRouter,
+        queue_capacity: usize,
+    ) -> Self {
+        let storage = Arc::new(Mutex::new(storage));
         Self {
-            storage: Arc::new(Mutex::new(storage)),
+            ingestion: IngestionService::new(storage.clone(), queue_capacity),
+            storage,
             auth,
             metrics: init_metrics_recorder(),
             cluster,
@@ -94,6 +115,63 @@ fn audit_log(action: &str, identity: &ApiIdentity, details: &str) {
 // ApiIdentity struct fields are pub in barq-admin.
 
 impl AppState {
+    async fn validate_insert_for_tenant(
+        &self,
+        tenant: &TenantId,
+        collection: &str,
+        document: &Document,
+    ) -> Result<(), ApiError> {
+        let storage = self.storage.lock().await;
+        let segment_state = storage.segment_state_for_tenant(tenant, collection);
+        if segment_state != SegmentState::Growing {
+            return Err(ApiError::Storage(StorageError::SegmentNotWritable {
+                collection: collection.to_string(),
+                state: segment_state,
+            }));
+        }
+
+        let collection = storage
+            .catalog()
+            .collection(tenant, collection)
+            .map_err(StorageError::Catalog)?;
+        validate_insert_document(collection.schema(), collection.vector_dimension(), document)
+            .map_err(ApiError::BadRequest)
+    }
+
+    async fn enqueue_insert_for_tenant(
+        &self,
+        tenant: &TenantId,
+        collection: &str,
+        document: Document,
+        upsert: bool,
+    ) -> Result<(), ApiError> {
+        self.validate_insert_for_tenant(tenant, collection, &document)
+            .await?;
+
+        let completion = self
+            .ingestion
+            .submit(IngestionInsertRequest {
+                tenant: tenant.clone(),
+                collection: collection.to_string(),
+                document,
+                upsert,
+            })
+            .await
+            .map_err(|err| match err {
+                QueueAdmissionError::Full { capacity } => {
+                    ApiError::Busy(format!("ingestion queue is full (capacity {capacity})"))
+                }
+                QueueAdmissionError::Closed => {
+                    ApiError::Busy("ingestion worker is unavailable".to_string())
+                }
+            })?;
+
+        completion
+            .await
+            .map_err(|_| ApiError::Busy("ingestion worker is unavailable".to_string()))??;
+        Ok(())
+    }
+
     fn ensure_primary_for_tenant(&self, tenant: &TenantId) -> Result<(), ApiError> {
         self.map_cluster_local_result(self.cluster.ensure_primary(tenant.as_str()))
     }
@@ -632,8 +710,9 @@ async fn insert_document(
         vector: payload.vector,
         payload: payload.payload,
     };
-    let mut storage = state.storage.lock().await;
-    storage.insert_for_tenant(&tenant, &name, document, payload.upsert)?;
+    state
+        .enqueue_insert_for_tenant(&tenant, &name, document, payload.upsert)
+        .await?;
     audit_log(
         "insert-document",
         &identity,

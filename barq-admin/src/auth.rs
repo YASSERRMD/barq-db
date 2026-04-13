@@ -382,6 +382,9 @@ pub enum ApiError {
 
     #[error("redirecting to leader at {0}")]
     Redirect(String),
+
+    #[error("busy: {0}")]
+    Busy(String),
 }
 
 impl IntoResponse for ApiError {
@@ -390,6 +393,7 @@ impl IntoResponse for ApiError {
             ApiError::Storage(barq_storage::StorageError::Catalog(_))
             | ApiError::DocumentId(_)
             | ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            ApiError::Busy(_) => StatusCode::TOO_MANY_REQUESTS,
             ApiError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
             ApiError::Redirect(_) => StatusCode::TEMPORARY_REDIRECT,
