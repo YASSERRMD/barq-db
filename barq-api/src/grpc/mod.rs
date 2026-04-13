@@ -1,3 +1,5 @@
+pub mod compat;
+
 use crate::{ApiError, AppState};
 use barq_core::{
     CatalogError, CollectionSchema, DistanceMetric, Document, DocumentId, FieldSchema, FieldType,
