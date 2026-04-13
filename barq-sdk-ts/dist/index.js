@@ -112,33 +112,49 @@ class Collection {
 exports.Collection = Collection;
 const grpc = __importStar(require("@grpc/grpc-js"));
 const protoLoader = __importStar(require("@grpc/proto-loader"));
+const path = __importStar(require("path"));
 class GrpcClient {
-    constructor(address, protoPath) {
-        // Resolve proto path relative to current execution or package
-        // For SDK, user might pass absolute path or we can try to resolve it
-        this.packageDefinition = protoLoader.loadSync(protoPath, {
-            keepCase: true,
+    constructor(address, protoPath = path.resolve(__dirname, "../proto/barq.proto")) {
+        const packageDefinition = protoLoader.loadSync(protoPath, {
             longs: String,
             enums: String,
             defaults: true,
             oneofs: true
         });
-        this.protoDescriptor = grpc.loadPackageDefinition(this.packageDefinition);
-        const BarqService = this.protoDescriptor.barq.Barq;
+        const protoDescriptor = grpc.loadPackageDefinition(packageDefinition);
+        const BarqService = protoDescriptor.barq.Barq;
         this.client = new BarqService(address, grpc.credentials.createInsecure());
     }
-    health() {
+    status() {
         return new Promise((resolve, reject) => {
-            this.client.Health({}, (err, response) => {
+            this.client.status({}, (err, response) => {
                 if (err)
                     return reject(err);
-                resolve(response.ok);
+                resolve(Boolean(response?.ok));
             });
         });
     }
+    health() {
+        return this.status();
+    }
     createCollection(name, dimension, metric = "L2") {
         return new Promise((resolve, reject) => {
-            this.client.CreateCollection({ name, dimension, metric }, (err, response) => {
+            this.client.createCollection({ name, dimension, metric }, (err) => {
+                if (err)
+                    return reject(err);
+                resolve();
+            });
+        });
+    }
+    insert(collection, id, vector, payload = {}) {
+        const request = {
+            collection,
+            id: String(id),
+            vector,
+            payloadJson: JSON.stringify(payload),
+        };
+        return new Promise((resolve, reject) => {
+            this.client.insert(request, (err) => {
                 if (err)
                     return reject(err);
                 resolve();
@@ -146,33 +162,21 @@ class GrpcClient {
         });
     }
     insertDocument(collection, id, vector, payload = {}) {
-        const payloadJson = JSON.stringify(payload);
-        return new Promise((resolve, reject) => {
-            this.client.InsertDocument({
-                collection,
-                id: String(id),
-                vector,
-                payload_json: payloadJson
-            }, (err, response) => {
-                if (err)
-                    return reject(err);
-                resolve();
-            });
-        });
+        return this.insert(collection, id, vector, payload);
     }
     search(collection, vector, topK = 10) {
         return new Promise((resolve, reject) => {
-            this.client.Search({
+            this.client.search({
                 collection,
                 vector,
-                top_k: topK
+                topK
             }, (err, response) => {
                 if (err)
                     return reject(err);
-                const results = response.results.map((r) => ({
-                    id: r.id,
-                    score: r.score,
-                    payload: JSON.parse(r.payload_json || "{}")
+                const results = (response?.results ?? []).map((r) => ({
+                    id: r.id ?? "",
+                    score: r.score ?? 0,
+                    payload: JSON.parse(r.payloadJson || "{}")
                 }));
                 resolve(results);
             });

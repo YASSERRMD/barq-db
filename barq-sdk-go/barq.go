@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	pb "github.com/YASSERRMD/barq-db/barq-sdk-go/proto/barq"
+	pb "github.com/YASSERRMD/barq-db/barq-sdk-go/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -159,12 +159,16 @@ func (c *GrpcClient) Close() error {
 	return c.conn.Close()
 }
 
-func (c *GrpcClient) Health(ctx context.Context) (bool, error) {
-	resp, err := c.client.Health(ctx, &pb.HealthRequest{})
+func (c *GrpcClient) Status(ctx context.Context) (bool, error) {
+	resp, err := c.client.Status(ctx, &pb.StatusRequest{})
 	if err != nil {
 		return false, err
 	}
 	return resp.Ok, nil
+}
+
+func (c *GrpcClient) Health(ctx context.Context) (bool, error) {
+	return c.Status(ctx)
 }
 
 func (c *GrpcClient) CreateCollection(ctx context.Context, name string, dimension int, metric string) error {
@@ -176,7 +180,7 @@ func (c *GrpcClient) CreateCollection(ctx context.Context, name string, dimensio
 	return err
 }
 
-func (c *GrpcClient) InsertDocument(ctx context.Context, collection string, id interface{}, vector []float32, payload interface{}) error {
+func (c *GrpcClient) Insert(ctx context.Context, collection string, id interface{}, vector []float32, payload interface{}) error {
 	idStr := fmt.Sprintf("%v", id)
 	
 	payloadBytes, err := json.Marshal(payload)
@@ -184,13 +188,17 @@ func (c *GrpcClient) InsertDocument(ctx context.Context, collection string, id i
 		return err
 	}
 
-	_, err = c.client.InsertDocument(ctx, &pb.InsertDocumentRequest{
+	_, err = c.client.Insert(ctx, &pb.InsertRequest{
 		Collection:  collection,
 		Id:          idStr,
 		Vector:      vector,
 		PayloadJson: string(payloadBytes),
 	})
 	return err
+}
+
+func (c *GrpcClient) InsertDocument(ctx context.Context, collection string, id interface{}, vector []float32, payload interface{}) error {
+	return c.Insert(ctx, collection, id, vector, payload)
 }
 
 func (c *GrpcClient) Search(ctx context.Context, collection string, vector []float32, topK int) ([]SearchResult, error) {

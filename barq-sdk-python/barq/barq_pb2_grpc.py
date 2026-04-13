@@ -34,32 +34,47 @@ class BarqStub(object):
         Args:
             channel: A grpc.Channel.
         """
-        self.Health = channel.unary_unary(
-                '/barq.Barq/Health',
-                request_serializer=barq__pb2.HealthRequest.SerializeToString,
-                response_deserializer=barq__pb2.HealthResponse.FromString,
+        self.Status = channel.unary_unary(
+                '/barq.Barq/Status',
+                request_serializer=barq__pb2.StatusRequest.SerializeToString,
+                response_deserializer=barq__pb2.StatusResponse.FromString,
                 _registered_method=True)
         self.CreateCollection = channel.unary_unary(
                 '/barq.Barq/CreateCollection',
                 request_serializer=barq__pb2.CreateCollectionRequest.SerializeToString,
                 response_deserializer=barq__pb2.CreateCollectionResponse.FromString,
                 _registered_method=True)
-        self.InsertDocument = channel.unary_unary(
-                '/barq.Barq/InsertDocument',
-                request_serializer=barq__pb2.InsertDocumentRequest.SerializeToString,
-                response_deserializer=barq__pb2.InsertDocumentResponse.FromString,
+        self.Insert = channel.unary_unary(
+                '/barq.Barq/Insert',
+                request_serializer=barq__pb2.InsertRequest.SerializeToString,
+                response_deserializer=barq__pb2.InsertResponse.FromString,
                 _registered_method=True)
         self.Search = channel.unary_unary(
                 '/barq.Barq/Search',
                 request_serializer=barq__pb2.SearchRequest.SerializeToString,
                 response_deserializer=barq__pb2.SearchResponse.FromString,
                 _registered_method=True)
+        self.Health = channel.unary_unary(
+                '/barq.Barq/Health',
+                request_serializer=barq__pb2.HealthRequest.SerializeToString,
+                response_deserializer=barq__pb2.HealthResponse.FromString,
+                _registered_method=True)
+        self.InsertDocument = channel.unary_unary(
+                '/barq.Barq/InsertDocument',
+                request_serializer=barq__pb2.InsertDocumentRequest.SerializeToString,
+                response_deserializer=barq__pb2.InsertDocumentResponse.FromString,
+                _registered_method=True)
+        self.BatchSearch = channel.unary_unary(
+                '/barq.Barq/BatchSearch',
+                request_serializer=barq__pb2.BatchSearchRequest.SerializeToString,
+                response_deserializer=barq__pb2.BatchSearchResponse.FromString,
+                _registered_method=True)
 
 
 class BarqServicer(object):
     """Missing associated documentation comment in .proto file."""
 
-    def Health(self, request, context):
+    def Status(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -71,7 +86,7 @@ class BarqServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def InsertDocument(self, request, context):
+    def Insert(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -83,28 +98,62 @@ class BarqServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def Health(self, request, context):
+        """Legacy RPCs kept temporarily while SDKs migrate to the canonical contract.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def InsertDocument(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def BatchSearch(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_BarqServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'Health': grpc.unary_unary_rpc_method_handler(
-                    servicer.Health,
-                    request_deserializer=barq__pb2.HealthRequest.FromString,
-                    response_serializer=barq__pb2.HealthResponse.SerializeToString,
+            'Status': grpc.unary_unary_rpc_method_handler(
+                    servicer.Status,
+                    request_deserializer=barq__pb2.StatusRequest.FromString,
+                    response_serializer=barq__pb2.StatusResponse.SerializeToString,
             ),
             'CreateCollection': grpc.unary_unary_rpc_method_handler(
                     servicer.CreateCollection,
                     request_deserializer=barq__pb2.CreateCollectionRequest.FromString,
                     response_serializer=barq__pb2.CreateCollectionResponse.SerializeToString,
             ),
-            'InsertDocument': grpc.unary_unary_rpc_method_handler(
-                    servicer.InsertDocument,
-                    request_deserializer=barq__pb2.InsertDocumentRequest.FromString,
-                    response_serializer=barq__pb2.InsertDocumentResponse.SerializeToString,
+            'Insert': grpc.unary_unary_rpc_method_handler(
+                    servicer.Insert,
+                    request_deserializer=barq__pb2.InsertRequest.FromString,
+                    response_serializer=barq__pb2.InsertResponse.SerializeToString,
             ),
             'Search': grpc.unary_unary_rpc_method_handler(
                     servicer.Search,
                     request_deserializer=barq__pb2.SearchRequest.FromString,
                     response_serializer=barq__pb2.SearchResponse.SerializeToString,
+            ),
+            'Health': grpc.unary_unary_rpc_method_handler(
+                    servicer.Health,
+                    request_deserializer=barq__pb2.HealthRequest.FromString,
+                    response_serializer=barq__pb2.HealthResponse.SerializeToString,
+            ),
+            'InsertDocument': grpc.unary_unary_rpc_method_handler(
+                    servicer.InsertDocument,
+                    request_deserializer=barq__pb2.InsertDocumentRequest.FromString,
+                    response_serializer=barq__pb2.InsertDocumentResponse.SerializeToString,
+            ),
+            'BatchSearch': grpc.unary_unary_rpc_method_handler(
+                    servicer.BatchSearch,
+                    request_deserializer=barq__pb2.BatchSearchRequest.FromString,
+                    response_serializer=barq__pb2.BatchSearchResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -118,7 +167,7 @@ class Barq(object):
     """Missing associated documentation comment in .proto file."""
 
     @staticmethod
-    def Health(request,
+    def Status(request,
             target,
             options=(),
             channel_credentials=None,
@@ -131,9 +180,9 @@ class Barq(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/barq.Barq/Health',
-            barq__pb2.HealthRequest.SerializeToString,
-            barq__pb2.HealthResponse.FromString,
+            '/barq.Barq/Status',
+            barq__pb2.StatusRequest.SerializeToString,
+            barq__pb2.StatusResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -172,7 +221,7 @@ class Barq(object):
             _registered_method=True)
 
     @staticmethod
-    def InsertDocument(request,
+    def Insert(request,
             target,
             options=(),
             channel_credentials=None,
@@ -185,9 +234,9 @@ class Barq(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/barq.Barq/InsertDocument',
-            barq__pb2.InsertDocumentRequest.SerializeToString,
-            barq__pb2.InsertDocumentResponse.FromString,
+            '/barq.Barq/Insert',
+            barq__pb2.InsertRequest.SerializeToString,
+            barq__pb2.InsertResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -215,6 +264,87 @@ class Barq(object):
             '/barq.Barq/Search',
             barq__pb2.SearchRequest.SerializeToString,
             barq__pb2.SearchResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Health(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/barq.Barq/Health',
+            barq__pb2.HealthRequest.SerializeToString,
+            barq__pb2.HealthResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def InsertDocument(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/barq.Barq/InsertDocument',
+            barq__pb2.InsertDocumentRequest.SerializeToString,
+            barq__pb2.InsertDocumentResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def BatchSearch(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/barq.Barq/BatchSearch',
+            barq__pb2.BatchSearchRequest.SerializeToString,
+            barq__pb2.BatchSearchResponse.FromString,
             options,
             channel_credentials,
             insecure,
