@@ -413,7 +413,7 @@ impl ClusterRouter {
         Ok(())
     }
 
-    #[cfg(test)]
+    /// Isolate a node within the consensus group for a shard.
     pub fn isolate_consensus_node(&self, shard: ShardId, node: &NodeId) -> Result<(), ClusterError> {
         let consensus = self
             .consensus
@@ -424,7 +424,7 @@ impl ClusterRouter {
             .map_err(|source| ClusterError::Consensus { shard, source })
     }
 
-    #[cfg(test)]
+    /// Restore connectivity for a previously isolated consensus node.
     pub fn heal_consensus_node(&self, shard: ShardId, node: &NodeId) -> Result<(), ClusterError> {
         let consensus = self
             .consensus
@@ -435,7 +435,7 @@ impl ClusterRouter {
             .map_err(|source| ClusterError::Consensus { shard, source })
     }
 
-    #[cfg(test)]
+    /// Inspect the per-node Raft state for a shard's consensus group.
     pub fn consensus_state(
         &self,
         shard: ShardId,
@@ -493,7 +493,6 @@ impl ConsensusRuntime {
         cluster.append_entry(leader, payload)
     }
 
-    #[cfg(test)]
     fn isolate(&self, shard: ShardId, node: &NodeId) -> Result<(), RaftError> {
         let mut shards = self.shards.lock().expect("consensus runtime lock poisoned");
         let cluster = shards
@@ -502,7 +501,6 @@ impl ConsensusRuntime {
         cluster.isolate(node)
     }
 
-    #[cfg(test)]
     fn heal(&self, shard: ShardId, node: &NodeId) -> Result<(), RaftError> {
         let mut shards = self.shards.lock().expect("consensus runtime lock poisoned");
         let cluster = shards
@@ -511,7 +509,6 @@ impl ConsensusRuntime {
         cluster.heal(node)
     }
 
-    #[cfg(test)]
     fn state(&self, shard: ShardId, node: &NodeId) -> Result<RaftNodeState, RaftError> {
         let shards = self.shards.lock().expect("consensus runtime lock poisoned");
         let cluster = shards

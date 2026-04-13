@@ -20,15 +20,14 @@ The repository currently implements:
   partition/heal simulation coverage
 
 These capabilities provide concrete consensus behavior inside `barq-cluster`,
-but the API/runtime write path is still primarily routed replication unless a
-consensus-backed integration is added on top.
+and replicated runtime write paths now use those quorum commits before
+acknowledging a successful write.
 
 ## Missing Consensus Requirements
 
 The repository does not currently implement:
 
 - Durable on-disk persistence for Raft term, vote, and log state
-- Runtime/API integration that routes client writes through the Raft engine
 - Membership changes with consensus safety
 - Crash recovery for in-flight consensus state
 - Snapshotting/log compaction for the Raft log
@@ -39,28 +38,26 @@ Raft-equivalent production deployment semantics across the full database.
 
 ## Current Write Semantics
 
-Current API writes are still routed to the configured primary for a shard. The
-cluster crate now also exposes a deterministic Raft engine, but API write
-acceptance is not yet wired to that quorum commit path.
-
-The present runtime behavior is best described as static shard routing with
-replication helpers, plus an in-crate consensus engine available for simulation
-and verification.
+Replicated runtime API writes are routed to the shard primary and then committed
+through the per-shard in-memory Raft engine before the server acknowledges
+success. Multi-node deployments with `replication_factor = 1` still use routed
+replication without quorum durability.
 
 The current write durability should be reported explicitly as:
 
 - `NodeLocal` for single-node deployments
-- `PrimaryOnly` for routed multi-node deployments
-- never `ConsensusQuorum` in the current implementation
+- `PrimaryOnly` for single-replica multi-node deployments
+- `ConsensusQuorum` for replicated multi-node deployments
 
 ## Honest Capability Statement
 
 The current cluster model should be described as:
 
 - `SingleNode` when only one node is configured
-- `RoutedReplication` when multiple nodes are configured and requests are routed
-  to primaries/replicas without consensus
-- not `ConsensusBacked`
+- `RoutedReplication` when multiple nodes are configured with
+  `replication_factor = 1`
+- `ConsensusBacked` when multiple nodes are configured with
+  `replication_factor > 1`
 
 ## Recommended Documentation Language
 
@@ -68,10 +65,11 @@ Use wording such as:
 
 - "sharding and routed replication"
 - "static primary/replica placement"
+- "per-shard quorum-committed writes"
 - "log-shipping style replication helpers"
 
 Avoid wording such as:
 
-- "Raft consensus"
-- "consensus-backed replication"
-- "quorum-committed distributed writes"
+- "fully durable Raft consensus"
+- "production-hardened distributed consensus"
+- "quorum-committed distributed writes across real networked nodes"
