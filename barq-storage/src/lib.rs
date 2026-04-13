@@ -141,6 +141,8 @@ pub struct SegmentIndexMetadata {
     pub state: SegmentState,
     #[serde(default)]
     pub index_state: IndexState,
+    #[serde(default)]
+    pub index_version: u64,
     pub index_built: bool,
     pub indexed_at: DateTime<Utc>,
 }
@@ -204,6 +206,7 @@ pub struct Storage {
     collection_segment_states: HashMap<(TenantId, String), SegmentState>,
     collection_index_states: HashMap<(TenantId, String), IndexState>,
     collection_index_generations: HashMap<(TenantId, String), u64>,
+    collection_index_versions: HashMap<(TenantId, String), u64>,
     collection_write_counts: HashMap<(TenantId, String), usize>,
     index_builds: IndexBuildCoordinator,
     pending_index_builds: usize,
@@ -215,6 +218,8 @@ struct CollectionLifecycleState {
     segment_state: SegmentState,
     #[serde(default)]
     index_state: IndexState,
+    #[serde(default)]
+    index_version: u64,
 }
 
 #[derive(Debug)]
@@ -340,6 +345,7 @@ impl Storage {
             collection_segment_states: HashMap::new(),
             collection_index_states: HashMap::new(),
             collection_index_generations: HashMap::new(),
+            collection_index_versions: HashMap::new(),
             collection_write_counts: HashMap::new(),
             index_builds: IndexBuildCoordinator::new(),
             pending_index_builds: 0,
@@ -484,6 +490,13 @@ impl Storage {
         *generation
     }
 
+    fn collection_index_version(&self, tenant: &TenantId, collection: &str) -> u64 {
+        self.collection_index_versions
+            .get(&(tenant.clone(), collection.to_string()))
+            .copied()
+            .unwrap_or(0)
+    }
+
     fn mark_collection_index_stale(
         &mut self,
         tenant: &TenantId,
@@ -562,6 +575,7 @@ impl Storage {
             &file_name,
             segment_state,
             IndexState::Building,
+            self.collection_index_version(tenant, collection),
             false,
         )?;
         self.index_builds
@@ -620,6 +634,8 @@ impl Storage {
 
         match result.index {
             Ok(index) => {
+                let next_version =
+                    self.collection_index_version(&result.tenant, &result.collection) + 1;
                 let schema = {
                     let coll = self
                         .catalog
@@ -631,6 +647,10 @@ impl Storage {
                     (result.tenant.clone(), result.collection.clone()),
                     IndexState::Ready,
                 );
+                self.collection_index_versions.insert(
+                    (result.tenant.clone(), result.collection.clone()),
+                    next_version,
+                );
                 self.persist_schema(&result.tenant, &schema)?;
                 self.persist_collection_lifecycle_state(&result.tenant, &result.collection)?;
                 self.persist_segment_index_metadata_for_file(
@@ -639,6 +659,7 @@ impl Storage {
                     &result.file_name,
                     result.segment_state,
                     IndexState::Ready,
+                    next_version,
                     true,
                 )?;
             }
@@ -654,6 +675,7 @@ impl Storage {
                     &result.file_name,
                     result.segment_state,
                     IndexState::Stale,
+                    self.collection_index_version(&result.tenant, &result.collection),
                     false,
                 )?;
             }
@@ -668,6 +690,7 @@ impl Storage {
         file_name: &str,
         segment_state: SegmentState,
         index_state: IndexState,
+        index_version: u64,
         index_built: bool,
     ) -> Result<(), StorageError> {
         if file_name.is_empty() {
@@ -683,6 +706,7 @@ impl Storage {
                 file_name: file_name.to_string(),
                 state: segment_state,
                 index_state,
+                index_version,
                 index_built,
                 indexed_at: Utc::now(),
             },
@@ -1271,6 +1295,8 @@ impl Storage {
             .insert((tenant.clone(), schema.name.clone()), IndexState::Ready);
         self.collection_index_generations
             .insert((tenant.clone(), schema.name.clone()), 0);
+        self.collection_index_versions
+            .insert((tenant.clone(), schema.name.clone()), 0);
         self.set_collection_segment_state(&tenant, &schema.name, SegmentState::Growing)?;
         self.collection_write_counts
             .insert((tenant.clone(), schema.name.clone()), 0);
@@ -1305,6 +1331,8 @@ impl Storage {
         self.collection_index_states
             .remove(&(tenant.clone(), name.to_string()));
         self.collection_index_generations
+            .remove(&(tenant.clone(), name.to_string()));
+        self.collection_index_versions
             .remove(&(tenant.clone(), name.to_string()));
         self.collection_write_counts
             .remove(&(tenant.clone(), name.to_string()));
@@ -1643,6 +1671,7 @@ impl Storage {
                     .unwrap_or(CollectionLifecycleState {
                         segment_state: SegmentState::Growing,
                         index_state: IndexState::Ready,
+                        index_version: 0,
                     });
                 self.collection_segment_states.insert(
                     (tenant.clone(), name.clone()),
@@ -1652,6 +1681,8 @@ impl Storage {
                     .insert((tenant.clone(), name.clone()), persisted_state.index_state);
                 self.collection_index_generations
                     .insert((tenant.clone(), name.clone()), 0);
+                self.collection_index_versions
+                    .insert((tenant.clone(), name.clone()), persisted_state.index_version);
                 self.collection_write_counts
                     .insert((tenant.clone(), name.clone()), 0);
                 self.replay_segments(&tenant, &name)?;
@@ -1768,6 +1799,7 @@ impl Storage {
             &CollectionLifecycleState {
                 segment_state: self.collection_segment_state(tenant, collection),
                 index_state: self.collection_index_state(tenant, collection),
+                index_version: self.collection_index_version(tenant, collection),
             },
         )?;
         file.flush()?;
@@ -2041,6 +2073,10 @@ mod tests {
             storage.collection_index_state(&TenantId::default(), "items"),
             IndexState::Ready
         );
+        assert_eq!(
+            storage.collection_index_version(&TenantId::default(), "items"),
+            1
+        );
 
         let hook = storage.install_pause_before_index_build();
         storage
@@ -2057,6 +2093,10 @@ mod tests {
         assert_eq!(
             storage.collection_index_state(&TenantId::default(), "items"),
             IndexState::Ready
+        );
+        assert_eq!(
+            storage.collection_index_version(&TenantId::default(), "items"),
+            2
         );
 
         let (_, _, index_type) = storage
@@ -2092,6 +2132,39 @@ mod tests {
 
         let rebuilt = storage.search("items", &[0.0, 1.0, 0.0], 2, None).unwrap();
         assert_eq!(rebuilt, baseline);
+    }
+
+    #[test]
+    fn index_version_increments_after_successful_rebuilds() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut storage = Storage::open(dir.path()).unwrap();
+        storage.create_collection(sample_schema("versioned")).unwrap();
+        storage.insert("versioned", sample_document(1), false).unwrap();
+
+        storage
+            .rebuild_index("versioned", Some(IndexType::Flat))
+            .unwrap();
+        storage.wait_for_pending_index_builds().unwrap();
+        assert_eq!(
+            storage.collection_index_version(&TenantId::default(), "versioned"),
+            1
+        );
+
+        storage
+            .rebuild_index("versioned", Some(IndexType::Hnsw(HnswParams::default())))
+            .unwrap();
+        storage.wait_for_pending_index_builds().unwrap();
+        assert_eq!(
+            storage.collection_index_version(&TenantId::default(), "versioned"),
+            2
+        );
+
+        let lifecycle = storage
+            .load_collection_lifecycle_state(&TenantId::default(), "versioned")
+            .unwrap()
+            .unwrap();
+        assert_eq!(lifecycle.index_version, 2);
+        assert_eq!(lifecycle.index_state, IndexState::Ready);
     }
 
     #[test]
@@ -2478,6 +2551,38 @@ mod tests {
             .unwrap();
         assert_eq!(lifecycle.segment_state, SegmentState::Growing);
         assert_eq!(lifecycle.index_state, IndexState::Stale);
+        assert_eq!(lifecycle.index_version, 0);
+    }
+
+    #[test]
+    fn legacy_lifecycle_metadata_without_version_loads_safely() {
+        let root = tempfile::tempdir().unwrap();
+        {
+            let mut storage = Storage::open(root.path()).unwrap();
+            storage.create_collection(sample_schema("legacy")).unwrap();
+        }
+
+        let lifecycle_path = root
+            .path()
+            .join("tenants/default/collections/legacy/lifecycle_state.json");
+        std::fs::write(
+            &lifecycle_path,
+            r#"{
+  "segment_state": "Growing",
+  "index_state": "Ready"
+}"#,
+        )
+        .unwrap();
+
+        let reopened = Storage::open(root.path()).unwrap();
+        assert_eq!(
+            reopened.collection_index_state(&TenantId::default(), "legacy"),
+            IndexState::Ready
+        );
+        assert_eq!(
+            reopened.collection_index_version(&TenantId::default(), "legacy"),
+            0
+        );
     }
 
     #[test]
@@ -2563,9 +2668,14 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(metadata_path).unwrap()).unwrap();
         assert!(parsed.index_built);
         assert_eq!(parsed.index_state, IndexState::Ready);
+        assert_eq!(parsed.index_version, 1);
         assert_eq!(
             storage.collection_index_state(&TenantId::default(), "indexed_ready_state"),
             IndexState::Ready
+        );
+        assert_eq!(
+            storage.collection_index_version(&TenantId::default(), "indexed_ready_state"),
+            1
         );
     }
 
@@ -2595,9 +2705,14 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(metadata_path).unwrap()).unwrap();
         assert!(!parsed.index_built);
         assert_eq!(parsed.index_state, IndexState::Stale);
+        assert_eq!(parsed.index_version, 0);
         assert_eq!(
             storage.collection_index_state(&TenantId::default(), "indexed_fallback"),
             IndexState::Stale
+        );
+        assert_eq!(
+            storage.collection_index_version(&TenantId::default(), "indexed_fallback"),
+            0
         );
 
         let results = storage
