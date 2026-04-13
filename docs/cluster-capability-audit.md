@@ -47,6 +47,12 @@ nodes.
 The present behavior is best described as static shard routing with optional
 replication helpers, not consensus-backed distributed writes.
 
+The current write durability should be reported explicitly as:
+
+- `NodeLocal` for single-node deployments
+- `PrimaryOnly` for routed multi-node deployments
+- never `ConsensusQuorum` in the current implementation
+
 ## Honest Capability Statement
 
 The current cluster model should be described as:

@@ -32,11 +32,24 @@ pub enum ClusterMode {
     ConsensusBacked,
 }
 
+/// Durability level implied by a successful write acknowledgement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WriteDurability {
+    /// The write is durable only on the local node.
+    NodeLocal,
+    /// The write is acknowledged after the shard primary applies it locally.
+    PrimaryOnly,
+    /// The write is acknowledged after a consensus quorum commits it.
+    ConsensusQuorum,
+}
+
 /// Runtime status that describes the current cluster capability honestly.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ClusterStatus {
     pub node_id: NodeId,
     pub mode: ClusterMode,
+    pub write_durability: WriteDurability,
     pub shard_count: u32,
     pub node_count: usize,
 }
@@ -237,11 +250,21 @@ impl ClusterRouter {
         }
     }
 
+    /// Return the durability implied by a successful write acknowledgement.
+    pub fn write_durability(&self) -> WriteDurability {
+        match self.mode() {
+            ClusterMode::SingleNode => WriteDurability::NodeLocal,
+            ClusterMode::RoutedReplication => WriteDurability::PrimaryOnly,
+            ClusterMode::ConsensusBacked => WriteDurability::ConsensusQuorum,
+        }
+    }
+
     /// Return runtime status describing the currently supported cluster mode.
     pub fn status(&self) -> ClusterStatus {
         ClusterStatus {
             node_id: self.node_id.clone(),
             mode: self.mode(),
+            write_durability: self.write_durability(),
             shard_count: self.placements.len() as u32,
             node_count: self.node_addresses.len(),
         }
@@ -779,7 +802,47 @@ mod tests {
         let router = ClusterRouter::from_config(test_config()).unwrap();
         let status = router.status();
         assert_eq!(status.mode, ClusterMode::RoutedReplication);
+        assert_eq!(status.write_durability, WriteDurability::PrimaryOnly);
         assert_eq!(status.node_count, 3);
         assert_eq!(status.shard_count, 4);
+    }
+
+    #[test]
+    fn replication_log_append_advances_indices_in_order() {
+        let config = test_config();
+        let router = ClusterRouter::from_config(config.clone()).unwrap();
+        let placement = router.placement(ShardId(0)).unwrap();
+        let mut manager = ReplicationManager::new(
+            &config
+                .nodes
+                .iter()
+                .map(|node| node.id.clone())
+                .collect::<Vec<_>>(),
+            config.shard_count,
+        );
+
+        let first = manager.replicate(&placement, b"first".to_vec(), 7);
+        let second = manager.replicate(&placement, b"second".to_vec(), 7);
+
+        assert_eq!(first.index, 1);
+        assert_eq!(second.index, 2);
+        assert_eq!(second.acked.len(), 2);
+
+        let primary_log = manager
+            .log_for(&placement.primary, placement.shard)
+            .expect("primary log");
+        assert_eq!(primary_log.committed_index(), 2);
+        assert_eq!(primary_log.entries().len(), 2);
+        assert_eq!(primary_log.entries()[0].payload, b"first".to_vec());
+        assert_eq!(primary_log.entries()[1].payload, b"second".to_vec());
+
+        let follower = placement.replicas.first().expect("follower");
+        let follower_log = manager
+            .log_for(follower, placement.shard)
+            .expect("follower log");
+        assert_eq!(follower_log.committed_index(), 2);
+        assert_eq!(follower_log.entries().len(), 2);
+        assert_eq!(follower_log.entries()[0].index, 1);
+        assert_eq!(follower_log.entries()[1].index, 2);
     }
 }
