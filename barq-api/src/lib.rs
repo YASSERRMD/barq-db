@@ -13,25 +13,27 @@ use barq_bm25::Bm25Config;
 pub use barq_cluster::{ClusterConfig, ClusterError, ClusterRouter};
 use barq_core::{
     CollectionSchema, Document, FieldSchema, FieldType, Filter, HybridSearchResult, HybridWeights,
-    PayloadValue, TenantId,
+    PayloadValue, QueryExecutionPath, QueryPlan, QueryPlanner, TenantId,
 };
 use barq_index::{DistanceMetric, DocumentId, DocumentIdError, IndexType};
+use barq_metrics::MetricDefinition;
+use barq_metrics::MetricsRegistry;
 use barq_storage::{SegmentState, Storage, StorageError, TenantQuota, TenantUsageReport};
 use ingest::{
-    validate_insert_document, IngestionConfig, IngestionInsertRequest, IngestionService,
-    QueueAdmissionError,
+    ingestion_metric_definitions, validate_insert_document, IngestionConfig,
+    IngestionInsertRequest, IngestionService, QueueAdmissionError,
 };
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use serde::{Deserialize, Serialize};
+use std::time::Instant;
 use tokio::{net::TcpListener, sync::Mutex, task::JoinHandle};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
-use std::time::Instant;
-use utoipa::{ToSchema, OpenApi};
+use utoipa::{OpenApi, ToSchema};
 use utoipa_swagger_ui::SwaggerUi;
 
 // Re-export auth types for convenience and backward compatibility
-pub use barq_admin::auth::{ApiAuth, ApiError, ApiPermission, ApiRole, ApiIdentity, TlsConfig};
+pub use barq_admin::auth::{ApiAuth, ApiError, ApiIdentity, ApiPermission, ApiRole, TlsConfig};
 pub use barq_admin::{admin_routes, AdminState};
 pub mod grpc;
 mod ingest;
@@ -44,6 +46,8 @@ pub struct AppState {
     pub metrics: PrometheusHandle,
     pub cluster: ClusterRouter,
     ingestion: Arc<IngestionService>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    metric_registry: MetricsRegistry,
 }
 
 impl AppState {
@@ -58,13 +62,20 @@ impl AppState {
         config: IngestionConfig,
     ) -> Self {
         let storage = Arc::new(Mutex::new(storage));
+        let metric_registry = init_metric_registry();
         Self {
             ingestion: IngestionService::new(storage.clone(), config),
             storage,
             auth,
             metrics: init_metrics_recorder(),
             cluster,
+            metric_registry,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn metric_definitions(&self) -> Vec<MetricDefinition> {
+        self.metric_registry.definitions()
     }
 }
 
@@ -88,6 +99,96 @@ fn init_metrics_recorder() -> PrometheusHandle {
                 .expect("failed to install metrics recorder")
         })
         .clone()
+}
+
+fn init_metric_registry() -> MetricsRegistry {
+    let registry = MetricsRegistry::new();
+    registry
+        .register_all(ingestion_metric_definitions())
+        .expect("failed to register ingestion metrics");
+    registry
+        .register_all(search_metric_definitions())
+        .expect("failed to register search metrics");
+    registry
+}
+
+fn search_metric_definitions() -> Vec<MetricDefinition> {
+    vec![
+        MetricDefinition::new(
+            "search_duration_seconds",
+            barq_metrics::MetricKind::Histogram,
+            "Observed latency for vector, text, and hybrid search requests",
+        )
+        .with_unit("seconds")
+        .with_labels(["collection", "planner_path", "tenant", "type"]),
+        MetricDefinition::new(
+            "search_requests_total",
+            barq_metrics::MetricKind::Counter,
+            "Total number of vector, text, and hybrid search requests",
+        )
+        .with_labels(["collection", "planner_path", "tenant", "type"]),
+        MetricDefinition::new(
+            "batch_search_duration_seconds",
+            barq_metrics::MetricKind::Histogram,
+            "Observed latency for batch search requests",
+        )
+        .with_unit("seconds"),
+    ]
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AdminMetricsResponse {
+    definitions: Vec<MetricDefinition>,
+    storage: serde_json::Value,
+}
+
+fn execution_path_label(path: QueryExecutionPath) -> &'static str {
+    match path {
+        QueryExecutionPath::VectorIndex => "vector_index",
+        QueryExecutionPath::VectorFilterScan => "vector_filter_scan",
+        QueryExecutionPath::VectorFullScan => "vector_full_scan",
+        QueryExecutionPath::TextIndex => "text_index",
+        QueryExecutionPath::TextFilterScan => "text_filter_scan",
+    }
+}
+
+fn planner_path_label(plan: QueryPlan) -> String {
+    match (plan.vector_path(), plan.text_path()) {
+        (Some(vector_path), Some(text_path)) => format!(
+            "{}+{}",
+            execution_path_label(vector_path),
+            execution_path_label(text_path)
+        ),
+        (Some(vector_path), None) => execution_path_label(vector_path).to_string(),
+        (None, Some(text_path)) => execution_path_label(text_path).to_string(),
+        (None, None) => "none".to_string(),
+    }
+}
+
+fn record_search_metrics(
+    query_type: &'static str,
+    collection: &str,
+    tenant: &TenantId,
+    duration: f64,
+    plan: QueryPlan,
+) {
+    let planner_path = planner_path_label(plan);
+    metrics::histogram!(
+        "search_duration_seconds",
+        "type" => query_type,
+        "collection" => collection.to_string(),
+        "tenant" => tenant.as_str().to_string(),
+        "planner_path" => planner_path.clone()
+    )
+    .record(duration);
+    metrics::counter!(
+        "search_requests_total",
+        "type" => query_type,
+        "collection" => collection.to_string(),
+        "tenant" => tenant.as_str().to_string(),
+        "planner_path" => planner_path
+    )
+    .increment(1);
 }
 
 fn audit_log(action: &str, identity: &ApiIdentity, details: &str) {
@@ -443,13 +544,13 @@ fn build_router_with_state(storage: Storage, auth: ApiAuth, cluster: ClusterRout
 }
 
 pub fn build_router_from_state(state: AppState) -> Router {
-
     let admin_state = AdminState::from(state.clone());
 
     Router::new()
         .route("/health", get(health))
         .route("/info", get(info))
         .route("/metrics", get(render_metrics))
+        .route("/admin/metrics", get(admin_metrics))
         .route("/collections", post(create_collection))
         .route("/collections/:name", delete(drop_collection))
         .route("/collections/:name/documents", post(insert_document))
@@ -462,7 +563,10 @@ pub fn build_router_from_state(state: AppState) -> Router {
             post(rebuild_collection_index),
         )
         .route("/collections/:name/search", post(search_collection))
-        .route("/collections/:name/batch_search", post(batch_search_collection))
+        .route(
+            "/collections/:name/batch_search",
+            post(batch_search_collection),
+        )
         .route(
             "/collections/:name/search/text",
             post(search_text_collection),
@@ -485,7 +589,6 @@ pub fn build_router_from_state(state: AppState) -> Router {
 }
 
 // ... Rest of handlers (health, info, etc.) ...
-
 
 pub async fn start_server(
     listener: TcpListener,
@@ -554,6 +657,20 @@ async fn render_metrics(
         .authenticate(&headers, ApiPermission::Ops, None)?;
     let body = state.metrics.render();
     Ok((StatusCode::OK, body).into_response())
+}
+
+async fn admin_metrics(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AdminMetricsResponse>, ApiError> {
+    state
+        .auth
+        .authenticate(&headers, ApiPermission::Admin, None)?;
+    let storage = state.storage.lock().await;
+    Ok(Json(AdminMetricsResponse {
+        definitions: state.metric_registry.definitions(),
+        storage: storage.metrics_report_json(),
+    }))
 }
 
 async fn info(
@@ -641,7 +758,8 @@ async fn create_collection(
         "collection_operations_total",
         "operation" => "create",
         "tenant" => identity.tenant.as_str().to_string()
-    ).increment(1);
+    )
+    .increment(1);
     Ok(StatusCode::CREATED)
 }
 
@@ -721,7 +839,8 @@ async fn insert_document(
         "operation" => "insert",
         "collection" => name.clone(),
         "tenant" => identity.tenant.as_str().to_string()
-    ).increment(1);
+    )
+    .increment(1);
     Ok(StatusCode::CREATED)
 }
 
@@ -786,18 +905,17 @@ async fn get_document(
         .auth
         .authenticate(&headers, ApiPermission::Read, None)?;
     let tenant = identity.tenant.clone();
-    
+
     // Check if primary? Read can usually be from anywhere, but consistent read might need primary.
     // For now, simple read.
-    
+
     let storage = state.storage.lock().await; // Acquire lock
-    // Note: Storage::get_document is synchronous? Yes.
-    
+                                              // Note: Storage::get_document is synchronous? Yes.
+
     let doc = storage.get_document(&tenant, &name, &document_id)?;
-    
+
     Ok(Json(GetDocumentResponse { document: doc }))
 }
-
 
 #[utoipa::path(
     post,
@@ -862,6 +980,21 @@ async fn search_collection(
     }
     let start = Instant::now();
     let mut storage = state.storage.lock().await;
+    let plan = {
+        let collection = storage
+            .catalog()
+            .collection(&tenant, &name)
+            .map_err(StorageError::Catalog)?;
+        QueryPlanner::default()
+            .plan_collection(
+                collection,
+                Some(&payload.vector),
+                None,
+                payload.filter.as_ref(),
+                payload.top_k,
+            )
+            .map_err(StorageError::Catalog)?
+    };
     let results = storage.search_for_tenant(
         &tenant,
         &name,
@@ -870,13 +1003,7 @@ async fn search_collection(
         payload.filter.as_ref(),
     )?;
     let duration = start.elapsed().as_secs_f64();
-    metrics::histogram!("search_duration_seconds").record(duration);
-    metrics::counter!(
-        "search_requests_total",
-        "type" => "vector",
-        "collection" => name.clone(),
-        "tenant" => tenant.as_str().to_string()
-    ).increment(1);
+    record_search_metrics("vector", &name, &tenant, duration, plan);
     Ok(Json(SearchResponse { results }))
 }
 
@@ -906,29 +1033,36 @@ async fn batch_search_collection(
     if payload.top_k == 0 {
         return Err(ApiError::BadRequest("top_k must be positive".into()));
     }
-    
-    let queries: Vec<(Vec<f32>, Option<Filter>)> = payload.queries.into_iter()
+
+    let queries: Vec<(Vec<f32>, Option<Filter>)> = payload
+        .queries
+        .into_iter()
         .map(|q| (q.vector, q.filter))
         .collect();
-        
+
     let start = Instant::now();
     let storage = state.storage.lock().await;
-    
-    // We access collection directly via catalog. 
+
+    // We access collection directly via catalog.
     // This requires mapping CatalogError to StorageError to ApiError.
     // Assuming ApiError::from(StorageError) exists.
     let catalog = storage.catalog();
-    let collection = catalog.collection(&tenant, &name)
+    let collection = catalog
+        .collection(&tenant, &name)
         .map_err(|e| barq_storage::StorageError::Catalog(e))?;
-        
-    let results_vec = collection.batch_search(&queries, payload.top_k)
+
+    let results_vec = collection
+        .batch_search(&queries, payload.top_k)
         .map_err(|e| barq_storage::StorageError::Catalog(e))?;
-        
+
     let duration = start.elapsed().as_secs_f64();
     metrics::histogram!("batch_search_duration_seconds").record(duration);
-    
+
     let resp = BatchSearchResponse {
-        results: results_vec.into_iter().map(|hits| BatchSearchResults { hits }).collect()
+        results: results_vec
+            .into_iter()
+            .map(|hits| BatchSearchResults { hits })
+            .collect(),
     };
     Ok(Json(resp))
 }
@@ -961,6 +1095,21 @@ async fn search_text_collection(
     }
     let start = Instant::now();
     let mut storage = state.storage.lock().await;
+    let plan = {
+        let collection = storage
+            .catalog()
+            .collection(&tenant, &name)
+            .map_err(StorageError::Catalog)?;
+        QueryPlanner::default()
+            .plan_collection(
+                collection,
+                None,
+                Some(&payload.query),
+                payload.filter.as_ref(),
+                payload.top_k,
+            )
+            .map_err(StorageError::Catalog)?
+    };
     let results = storage.search_text_for_tenant(
         &tenant,
         &name,
@@ -969,13 +1118,7 @@ async fn search_text_collection(
         payload.filter.as_ref(),
     )?;
     let duration = start.elapsed().as_secs_f64();
-    metrics::histogram!("search_duration_seconds").record(duration);
-    metrics::counter!(
-        "search_requests_total",
-        "type" => "text",
-        "collection" => name.clone(),
-        "tenant" => tenant.as_str().to_string()
-    ).increment(1);
+    record_search_metrics("text", &name, &tenant, duration, plan);
     Ok(Json(TextSearchResponse { results }))
 }
 
@@ -1005,7 +1148,23 @@ async fn search_hybrid_collection(
     if payload.top_k == 0 {
         return Err(ApiError::BadRequest("top_k must be positive".into()));
     }
+    let start = Instant::now();
     let mut storage = state.storage.lock().await;
+    let plan = {
+        let collection = storage
+            .catalog()
+            .collection(&tenant, &name)
+            .map_err(StorageError::Catalog)?;
+        QueryPlanner::default()
+            .plan_collection(
+                collection,
+                Some(&payload.vector),
+                Some(&payload.query),
+                payload.filter.as_ref(),
+                payload.top_k,
+            )
+            .map_err(StorageError::Catalog)?
+    };
     let results = storage.search_hybrid_for_tenant(
         &tenant,
         &name,
@@ -1015,6 +1174,8 @@ async fn search_hybrid_collection(
         payload.weights,
         payload.filter.as_ref(),
     )?;
+    let duration = start.elapsed().as_secs_f64();
+    record_search_metrics("hybrid", &name, &tenant, duration, plan);
     Ok(Json(HybridSearchResponse { results }))
 }
 
@@ -1163,13 +1324,13 @@ pub fn init_tracing() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::{header, HeaderMap, HeaderValue};
     use barq_admin::auth::{AuthMethod, JwtClaims, JwtVerifier};
     use barq_cluster::{
         ClusterMode, ClusterStatus, NodeConfig, NodeId, ReadPreference, ShardId, ShardPlacement,
     };
     use barq_core::TenantId;
     use barq_index::DocumentId;
-    use axum::http::{header, HeaderMap, HeaderValue};
     use reqwest::{Client, StatusCode};
     use std::collections::HashMap;
     use std::net::SocketAddr;
@@ -1180,6 +1341,68 @@ mod tests {
 
     fn sample_storage(dir: &Path) -> Storage {
         Storage::open(dir).unwrap()
+    }
+
+    fn seeded_search_storage(dir: &Path, collection: &str) -> Storage {
+        let tenant = TenantId::default();
+        let mut storage = sample_storage(dir);
+        storage
+            .create_collection_for_tenant(
+                tenant.clone(),
+                CollectionSchema {
+                    name: collection.to_string(),
+                    fields: vec![
+                        FieldSchema {
+                            name: "vector".to_string(),
+                            field_type: FieldType::Vector {
+                                dimension: 3,
+                                metric: DistanceMetric::Cosine,
+                                index: Some(IndexType::Flat),
+                            },
+                            required: true,
+                        },
+                        FieldSchema {
+                            name: "body".to_string(),
+                            field_type: FieldType::Text { indexed: true },
+                            required: true,
+                        },
+                    ],
+                    bm25_config: None,
+                    tenant_id: tenant.clone(),
+                },
+            )
+            .unwrap();
+
+        for (id, vector, body) in [
+            (1_u64, vec![0.0, 1.0, 0.0], "Rust systems programming"),
+            (2_u64, vec![1.0, 0.0, 0.0], "Database systems"),
+        ] {
+            storage
+                .insert_for_tenant(
+                    &tenant,
+                    collection,
+                    Document {
+                        id: DocumentId::U64(id),
+                        vector,
+                        payload: Some(PayloadValue::Object(HashMap::from([(
+                            "body".to_string(),
+                            PayloadValue::String(body.to_string()),
+                        )]))),
+                    },
+                    false,
+                )
+                .unwrap();
+        }
+
+        storage
+    }
+
+    fn metric_value(line: &str) -> f64 {
+        line.rsplit_once(' ')
+            .unwrap_or_else(|| panic!("metric line missing value: {line}"))
+            .1
+            .parse()
+            .unwrap_or_else(|_| panic!("invalid metric value in line: {line}"))
     }
 
     async fn start_test_server(
@@ -1245,6 +1468,29 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let app = super::build_router_with_state(storage, ApiAuth::new(), cluster);
+        let (tx, rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = rx.await;
+                })
+                .await
+        });
+        (addr, tx, handle)
+    }
+
+    async fn start_test_server_with_storage_auth_and_cluster(
+        storage: Storage,
+        auth: ApiAuth,
+        cluster: ClusterRouter,
+    ) -> (
+        SocketAddr,
+        oneshot::Sender<()>,
+        JoinHandle<Result<(), std::io::Error>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = super::build_router_with_state(storage, auth, cluster);
         let (tx, rx) = oneshot::channel();
         let handle = tokio::spawn(async move {
             axum::serve(listener, app)
@@ -1364,10 +1610,7 @@ mod tests {
             header::AUTHORIZATION,
             HeaderValue::from_static("Bearer jwt-token"),
         );
-        headers.insert(
-            "x-tenant-id",
-            HeaderValue::from_static("tenant-b"),
-        );
+        headers.insert("x-tenant-id", HeaderValue::from_static("tenant-b"));
 
         let err = auth
             .authenticate(&headers, ApiPermission::Read, None)
@@ -1426,7 +1669,8 @@ mod tests {
         std::fs::write(&cert_path, b"dummy").unwrap();
         std::fs::write(&key_path, b"dummy").unwrap();
 
-        let tls = TlsConfig::new(&cert_path, &key_path).with_client_ca(tempdir.path().join("missing-ca.pem"));
+        let tls = TlsConfig::new(&cert_path, &key_path)
+            .with_client_ca(tempdir.path().join("missing-ca.pem"));
 
         let err = tls
             .validate()
@@ -1698,7 +1942,10 @@ mod tests {
             .unwrap();
         let status: ClusterStatus = response.json().await.unwrap();
         assert_eq!(status.mode, ClusterMode::SingleNode);
-        assert_eq!(status.write_durability, barq_cluster::WriteDurability::NodeLocal);
+        assert_eq!(
+            status.write_durability,
+            barq_cluster::WriteDurability::NodeLocal
+        );
         assert_eq!(status.node_count, 1);
         assert_eq!(status.shard_count, 1);
 
@@ -1757,12 +2004,11 @@ mod tests {
     async fn local_primary_write_is_visible_immediately_after_ack() {
         init_tracing();
         let dir = tempfile::tempdir().unwrap();
-        let (addr, shutdown, handle) =
-            start_test_server_with_cluster(
-                dir.path(),
-                ClusterRouter::from_config(ClusterConfig::single_node()).unwrap(),
-            )
-            .await;
+        let (addr, shutdown, handle) = start_test_server_with_cluster(
+            dir.path(),
+            ClusterRouter::from_config(ClusterConfig::single_node()).unwrap(),
+        )
+        .await;
         let client = Client::new();
 
         let create = serde_json::json!({
@@ -1802,7 +2048,10 @@ mod tests {
             .json()
             .await
             .unwrap();
-        assert!(document.document.is_some(), "document should exist after ack");
+        assert!(
+            document.document.is_some(),
+            "document should exist after ack"
+        );
 
         shutdown.send(()).unwrap();
         handle.await.unwrap().unwrap();
@@ -2075,6 +2324,100 @@ mod tests {
 
         assert!(metrics_text.contains("tenant_usage_documents{tenant=\"metrics-tenant\"}"));
         assert!(metrics_text.contains("tenant_requests_total{tenant=\"metrics-tenant\"}"));
+
+        shutdown.send(()).unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn admin_metrics_endpoint_exposes_catalog_and_storage_snapshot() {
+        init_tracing();
+        let dir = tempfile::tempdir().unwrap();
+        let tenant = TenantId::default();
+        let storage = seeded_search_storage(dir.path(), "admin_metrics_docs");
+        let auth = ApiAuth::new().require_keys();
+        auth.insert("admin-metrics-key", tenant.clone(), ApiRole::Admin);
+        let (addr, shutdown, handle) = start_test_server_with_storage_auth_and_cluster(
+            storage,
+            auth,
+            ClusterRouter::from_config(ClusterConfig::single_node()).unwrap(),
+        )
+        .await;
+        let client = Client::new();
+
+        let response = client
+            .get(format!("http://{}/admin/metrics", addr))
+            .header("x-api-key", "admin-metrics-key")
+            .header("x-tenant-id", tenant.as_str())
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+
+        let definitions = response["definitions"].as_array().unwrap();
+        assert!(definitions.iter().any(|definition| {
+            definition["name"] == serde_json::json!("ingestion_queue_size")
+                && definition["kind"] == serde_json::json!("gauge")
+        }));
+        assert!(definitions.iter().any(|definition| {
+            definition["name"] == serde_json::json!("search_requests_total")
+                && definition["labels"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|label| label == "planner_path")
+        }));
+
+        let storage = &response["storage"];
+        assert!(
+            storage["total_resident_vector_memory_bytes"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert!(storage["wal_appends_total"].as_u64().unwrap() >= 2);
+        assert!(storage["collection_wal"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|sample| {
+                sample["tenant"] == serde_json::json!(tenant.as_str())
+                    && sample["collection"] == serde_json::json!("admin_metrics_docs")
+                    && sample["entries"].as_u64().unwrap() >= 2
+            }));
+
+        shutdown.send(()).unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn admin_metrics_endpoint_requires_admin_role() {
+        init_tracing();
+        let dir = tempfile::tempdir().unwrap();
+        let tenant = TenantId::default();
+        let storage = seeded_search_storage(dir.path(), "admin_metrics_denied");
+        let auth = ApiAuth::new().require_keys();
+        auth.insert("writer-metrics-key", tenant.clone(), ApiRole::Writer);
+        let (addr, shutdown, handle) = start_test_server_with_storage_auth_and_cluster(
+            storage,
+            auth,
+            ClusterRouter::from_config(ClusterConfig::single_node()).unwrap(),
+        )
+        .await;
+        let client = Client::new();
+
+        let response = client
+            .get(format!("http://{}/admin/metrics", addr))
+            .header("x-api-key", "writer-metrics-key")
+            .header("x-tenant-id", tenant.as_str())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
 
         shutdown.send(()).unwrap();
         handle.await.unwrap().unwrap();
@@ -2396,7 +2739,11 @@ mod tests {
         let client = Client::new();
 
         let forbidden = client
-            .get(format!("http://{}/tenants/{}/usage", addr, tenant_b.as_str()))
+            .get(format!(
+                "http://{}/tenants/{}/usage",
+                addr,
+                tenant_b.as_str()
+            ))
             .header("x-api-key", "tenant-a-key")
             .send()
             .await
@@ -2537,6 +2884,242 @@ mod tests {
             .await
             .unwrap();
         assert!(explain_response.result.is_some());
+
+        shutdown.send(()).unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn search_metrics_include_query_type_and_planner_path_labels() {
+        init_tracing();
+        let dir = tempfile::tempdir().unwrap();
+        let collection = "search_metrics_docs";
+        let storage = seeded_search_storage(dir.path(), collection);
+        let (addr, shutdown, handle) = start_test_server_with_storage_and_cluster(
+            storage,
+            ClusterRouter::from_config(ClusterConfig::single_node()).unwrap(),
+        )
+        .await;
+        let client = Client::new();
+
+        client
+            .post(format!("http://{}/collections/{collection}/search", addr))
+            .json(&serde_json::json!({"vector": [0.0, 1.0, 0.0], "top_k": 1}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+
+        client
+            .post(format!(
+                "http://{}/collections/{collection}/search/text",
+                addr
+            ))
+            .json(&serde_json::json!({"query": "rust systems", "top_k": 1}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+
+        client
+            .post(format!(
+                "http://{}/collections/{collection}/search/hybrid",
+                addr
+            ))
+            .json(&serde_json::json!({
+                "vector": [0.0, 1.0, 0.0],
+                "query": "rust systems",
+                "top_k": 1
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+
+        let metrics_text = client
+            .get(format!("http://{}/metrics", addr))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+
+        let vector_counter = metrics_text
+            .lines()
+            .find(|line| {
+                line.starts_with("search_requests_total{")
+                    && line.contains("type=\"vector\"")
+                    && line.contains("planner_path=\"vector_full_scan\"")
+                    && line.contains(&format!("collection=\"{collection}\""))
+            })
+            .expect("vector search counter line");
+        assert!(metric_value(vector_counter) >= 1.0);
+
+        let text_counter = metrics_text
+            .lines()
+            .find(|line| {
+                line.starts_with("search_requests_total{")
+                    && line.contains("type=\"text\"")
+                    && line.contains("planner_path=\"text_index\"")
+                    && line.contains(&format!("collection=\"{collection}\""))
+            })
+            .expect("text search counter line");
+        assert!(metric_value(text_counter) >= 1.0);
+
+        let hybrid_counter = metrics_text
+            .lines()
+            .find(|line| {
+                line.starts_with("search_requests_total{")
+                    && line.contains("type=\"hybrid\"")
+                    && line.contains("planner_path=\"vector_full_scan+text_index\"")
+                    && line.contains(&format!("collection=\"{collection}\""))
+            })
+            .expect("hybrid search counter line");
+        assert!(metric_value(hybrid_counter) >= 1.0);
+
+        assert!(metrics_text.lines().any(|line| {
+            line.starts_with("search_duration_seconds_count{")
+                && line.contains("type=\"vector\"")
+                && line.contains("planner_path=\"vector_full_scan\"")
+                && line.contains(&format!("collection=\"{collection}\""))
+                && metric_value(line) >= 1.0
+        }));
+        assert!(metrics_text.lines().any(|line| {
+            line.starts_with("search_duration_seconds_count{")
+                && line.contains("type=\"text\"")
+                && line.contains("planner_path=\"text_index\"")
+                && line.contains(&format!("collection=\"{collection}\""))
+                && metric_value(line) >= 1.0
+        }));
+        assert!(metrics_text.lines().any(|line| {
+            line.starts_with("search_duration_seconds_count{")
+                && line.contains("type=\"hybrid\"")
+                && line.contains("planner_path=\"vector_full_scan+text_index\"")
+                && line.contains(&format!("collection=\"{collection}\""))
+                && metric_value(line) >= 1.0
+        }));
+
+        shutdown.send(()).unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn batch_search_metrics_record_latency_histogram() {
+        init_tracing();
+        let dir = tempfile::tempdir().unwrap();
+        let storage = seeded_search_storage(dir.path(), "batch_metrics_docs");
+        let (addr, shutdown, handle) = start_test_server_with_storage_and_cluster(
+            storage,
+            ClusterRouter::from_config(ClusterConfig::single_node()).unwrap(),
+        )
+        .await;
+        let client = Client::new();
+
+        client
+            .post(format!(
+                "http://{}/collections/batch_metrics_docs/batch_search",
+                addr
+            ))
+            .json(&serde_json::json!({
+                "top_k": 1,
+                "queries": [
+                    {"vector": [0.0, 1.0, 0.0]},
+                    {"vector": [1.0, 0.0, 0.0]}
+                ]
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+
+        let metrics_text = client
+            .get(format!("http://{}/metrics", addr))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+
+        assert!(metrics_text.lines().any(|line| {
+            (line.starts_with("batch_search_duration_seconds_count ")
+                || line.starts_with("batch_search_duration_seconds_count{"))
+                && metric_value(line) >= 1.0
+        }));
+
+        shutdown.send(()).unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_handles_concurrent_search_updates() {
+        init_tracing();
+        let dir = tempfile::tempdir().unwrap();
+        let collection = "concurrent_metrics_docs";
+        let storage = seeded_search_storage(dir.path(), collection);
+        let (addr, shutdown, handle) = start_test_server_with_storage_and_cluster(
+            storage,
+            ClusterRouter::from_config(ClusterConfig::single_node()).unwrap(),
+        )
+        .await;
+
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let client = Client::new();
+            let search_url = format!("http://{}/collections/{collection}/search", addr);
+            let metrics_url = format!("http://{}/metrics", addr);
+            tasks.push(tokio::spawn(async move {
+                client
+                    .post(&search_url)
+                    .json(&serde_json::json!({"vector": [0.0, 1.0, 0.0], "top_k": 1}))
+                    .send()
+                    .await
+                    .unwrap()
+                    .error_for_status()
+                    .unwrap();
+                client
+                    .get(&metrics_url)
+                    .send()
+                    .await
+                    .unwrap()
+                    .error_for_status()
+                    .unwrap();
+            }));
+        }
+
+        for task in tasks {
+            task.await.unwrap();
+        }
+
+        let metrics_text = Client::new()
+            .get(format!("http://{}/metrics", addr))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        let concurrent_counter = metrics_text
+            .lines()
+            .find(|line| {
+                line.starts_with("search_requests_total{")
+                    && line.contains("type=\"vector\"")
+                    && line.contains("planner_path=\"vector_full_scan\"")
+                    && line.contains(&format!("collection=\"{collection}\""))
+            })
+            .expect("concurrent vector search counter line");
+        assert!(metric_value(concurrent_counter) >= 8.0);
 
         shutdown.send(()).unwrap();
         handle.await.unwrap().unwrap();

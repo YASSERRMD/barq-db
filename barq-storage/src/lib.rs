@@ -6,15 +6,19 @@ use barq_index::{DocumentId, IndexType, VectorIndex};
 use chrono::{DateTime, Utc};
 use metrics::{counter, gauge};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::Arc;
 #[cfg(test)]
 use std::sync::Mutex;
+#[cfg(test)]
+use std::sync::OnceLock;
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -179,6 +183,22 @@ impl SegmentState {
             )))
         }
     }
+
+    fn metric_label(self) -> &'static str {
+        match self {
+            SegmentState::Growing => "growing",
+            SegmentState::Sealed => "sealed",
+            SegmentState::Compacted => "compacted",
+        }
+    }
+
+    fn metric_order(self) -> u8 {
+        match self {
+            SegmentState::Growing => 0,
+            SegmentState::Sealed => 1,
+            SegmentState::Compacted => 2,
+        }
+    }
 }
 
 pub struct StorageOptions {
@@ -192,6 +212,335 @@ impl Default for StorageOptions {
             tiering_manager: None,
             auto_seal_threshold: usize::MAX,
         }
+    }
+}
+
+/// Per-collection resident vector memory gauge sample captured for tests and admin surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CollectionMemorySample {
+    tenant: String,
+    collection: String,
+    resident_vector_memory_bytes: u64,
+}
+
+/// Per-tenant resident vector memory gauge sample captured for tests and admin surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TenantMemorySample {
+    tenant: String,
+    resident_vector_memory_bytes: u64,
+}
+
+/// Per-collection WAL gauge sample captured for deterministic tests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CollectionWalSample {
+    tenant: String,
+    collection: String,
+    entries: u64,
+    bytes: u64,
+}
+
+/// Per-collection segment file count captured for deterministic tests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CollectionSegmentFileSample {
+    tenant: String,
+    collection: String,
+    state: SegmentState,
+    count: u64,
+}
+
+/// Per-collection current segment lifecycle state captured for deterministic tests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CollectionSegmentStateSample {
+    tenant: String,
+    collection: String,
+    state: SegmentState,
+    active: bool,
+}
+
+/// Snapshot of storage-level metrics used by deterministic tests.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+struct StorageMetricsSnapshot {
+    refresh_count: u64,
+    total_resident_vector_memory_bytes: u64,
+    wal_appends_total: u64,
+    wal_bytes_written_total: u64,
+    compactions_total: u64,
+    tenant_memory_bytes: Vec<TenantMemorySample>,
+    collection_memory_bytes: Vec<CollectionMemorySample>,
+    collection_wal: Vec<CollectionWalSample>,
+    collection_segment_files: Vec<CollectionSegmentFileSample>,
+    collection_segment_states: Vec<CollectionSegmentStateSample>,
+}
+
+impl StorageMetricsSnapshot {
+    #[cfg(test)]
+    fn collection_memory_bytes(&self, tenant: &str, collection: &str) -> Option<u64> {
+        self.collection_memory_bytes
+            .iter()
+            .find(|sample| sample.tenant == tenant && sample.collection == collection)
+            .map(|sample| sample.resident_vector_memory_bytes)
+    }
+
+    #[cfg(test)]
+    fn tenant_memory_bytes(&self, tenant: &str) -> Option<u64> {
+        self.tenant_memory_bytes
+            .iter()
+            .find(|sample| sample.tenant == tenant)
+            .map(|sample| sample.resident_vector_memory_bytes)
+    }
+
+    #[cfg(test)]
+    fn collection_wal_entries(&self, tenant: &str, collection: &str) -> Option<u64> {
+        self.collection_wal
+            .iter()
+            .find(|sample| sample.tenant == tenant && sample.collection == collection)
+            .map(|sample| sample.entries)
+    }
+
+    #[cfg(test)]
+    fn collection_wal_bytes(&self, tenant: &str, collection: &str) -> Option<u64> {
+        self.collection_wal
+            .iter()
+            .find(|sample| sample.tenant == tenant && sample.collection == collection)
+            .map(|sample| sample.bytes)
+    }
+
+    #[cfg(test)]
+    fn collection_segment_file_count(
+        &self,
+        tenant: &str,
+        collection: &str,
+        state: SegmentState,
+    ) -> Option<u64> {
+        self.collection_segment_files
+            .iter()
+            .find(|sample| {
+                sample.tenant == tenant && sample.collection == collection && sample.state == state
+            })
+            .map(|sample| sample.count)
+    }
+
+    #[cfg(test)]
+    fn collection_segment_state_active(
+        &self,
+        tenant: &str,
+        collection: &str,
+        state: SegmentState,
+    ) -> bool {
+        self.collection_segment_states
+            .iter()
+            .find(|sample| {
+                sample.tenant == tenant && sample.collection == collection && sample.state == state
+            })
+            .map(|sample| sample.active)
+            .unwrap_or(false)
+    }
+}
+
+/// Storage-owned metric state that mirrors emitted Prometheus gauges for deterministic tests.
+#[derive(Debug)]
+struct StorageMetrics {
+    snapshot: Arc<RwLock<StorageMetricsSnapshot>>,
+    wal_appends_total: AtomicU64,
+    wal_bytes_written_total: AtomicU64,
+    compactions_total: AtomicU64,
+}
+
+impl Default for StorageMetrics {
+    fn default() -> Self {
+        Self {
+            snapshot: Arc::new(RwLock::new(StorageMetricsSnapshot::default())),
+            wal_appends_total: AtomicU64::new(0),
+            wal_bytes_written_total: AtomicU64::new(0),
+            compactions_total: AtomicU64::new(0),
+        }
+    }
+}
+
+impl StorageMetrics {
+    fn record_wal_append(&self, bytes: u64) {
+        self.wal_appends_total.fetch_add(1, Ordering::Relaxed);
+        self.wal_bytes_written_total
+            .fetch_add(bytes, Ordering::Relaxed);
+        metrics::counter!("storage_wal_appends_total").increment(1);
+        metrics::counter!("storage_wal_bytes_written_total").increment(bytes);
+    }
+
+    fn record_compaction(&self) {
+        self.compactions_total.fetch_add(1, Ordering::Relaxed);
+        metrics::counter!("storage_compactions_total").increment(1);
+    }
+
+    fn refresh(&self, storage: &Storage) {
+        let mut tenant_samples = Vec::new();
+        let mut collection_samples = Vec::new();
+        let mut wal_samples = Vec::new();
+        let mut segment_file_samples = Vec::new();
+        let mut segment_state_samples = Vec::new();
+        let mut total_resident_vector_memory_bytes = 0u64;
+
+        for (tenant, collections) in storage.catalog.tenants() {
+            let tenant_label = tenant.to_string();
+            let mut tenant_total = 0u64;
+            for (collection_name, collection) in collections {
+                let resident_bytes = collection.resident_vector_memory_bytes() as u64;
+                gauge!(
+                    "resident_vector_memory_bytes",
+                    "tenant" => tenant_label.clone(),
+                    "collection" => collection_name.clone(),
+                )
+                .set(resident_bytes as f64);
+                collection_samples.push(CollectionMemorySample {
+                    tenant: tenant_label.clone(),
+                    collection: collection_name.clone(),
+                    resident_vector_memory_bytes: resident_bytes,
+                });
+                tenant_total = tenant_total.saturating_add(resident_bytes);
+
+                let wal_path = storage.wal_path(tenant, collection_name);
+                let (wal_entries, wal_bytes) = match std::fs::read_to_string(&wal_path) {
+                    Ok(contents) => (
+                        contents
+                            .lines()
+                            .filter(|line| !line.trim().is_empty())
+                            .count() as u64,
+                        contents.len() as u64,
+                    ),
+                    Err(_) => (0, 0),
+                };
+                gauge!(
+                    "storage_wal_entries",
+                    "tenant" => tenant_label.clone(),
+                    "collection" => collection_name.clone(),
+                )
+                .set(wal_entries as f64);
+                gauge!(
+                    "storage_wal_bytes",
+                    "tenant" => tenant_label.clone(),
+                    "collection" => collection_name.clone(),
+                )
+                .set(wal_bytes as f64);
+                wal_samples.push(CollectionWalSample {
+                    tenant: tenant_label.clone(),
+                    collection: collection_name.clone(),
+                    entries: wal_entries,
+                    bytes: wal_bytes,
+                });
+
+                let mut sealed_files = 0u64;
+                let mut compacted_files = 0u64;
+                if let Ok(segment_files) = storage.segment_files(tenant, collection_name) {
+                    for segment in segment_files {
+                        let state = Storage::segment_file_state(&segment);
+                        match state {
+                            SegmentState::Sealed => sealed_files += 1,
+                            SegmentState::Compacted => compacted_files += 1,
+                            SegmentState::Growing => {}
+                        }
+                    }
+                }
+                for (state, count) in [
+                    (SegmentState::Growing, 0u64),
+                    (SegmentState::Sealed, sealed_files),
+                    (SegmentState::Compacted, compacted_files),
+                ] {
+                    gauge!(
+                        "storage_segment_files_count",
+                        "tenant" => tenant_label.clone(),
+                        "collection" => collection_name.clone(),
+                        "state" => state.metric_label(),
+                    )
+                    .set(count as f64);
+                    segment_file_samples.push(CollectionSegmentFileSample {
+                        tenant: tenant_label.clone(),
+                        collection: collection_name.clone(),
+                        state,
+                        count,
+                    });
+                }
+
+                let current_state = storage.collection_segment_state(tenant, collection_name);
+                for state in [
+                    SegmentState::Growing,
+                    SegmentState::Sealed,
+                    SegmentState::Compacted,
+                ] {
+                    let active = current_state == state;
+                    gauge!(
+                        "storage_collection_segment_state",
+                        "tenant" => tenant_label.clone(),
+                        "collection" => collection_name.clone(),
+                        "state" => state.metric_label(),
+                    )
+                    .set(u64::from(active) as f64);
+                    segment_state_samples.push(CollectionSegmentStateSample {
+                        tenant: tenant_label.clone(),
+                        collection: collection_name.clone(),
+                        state,
+                        active,
+                    });
+                }
+            }
+            gauge!(
+                "tenant_resident_vector_memory_bytes",
+                "tenant" => tenant_label.clone(),
+            )
+            .set(tenant_total as f64);
+            tenant_samples.push(TenantMemorySample {
+                tenant: tenant_label,
+                resident_vector_memory_bytes: tenant_total,
+            });
+            total_resident_vector_memory_bytes =
+                total_resident_vector_memory_bytes.saturating_add(tenant_total);
+        }
+
+        gauge!("resident_vector_memory_bytes_total").set(total_resident_vector_memory_bytes as f64);
+
+        tenant_samples.sort_by(|left, right| left.tenant.cmp(&right.tenant));
+        collection_samples.sort_by(|left, right| {
+            left.tenant
+                .cmp(&right.tenant)
+                .then_with(|| left.collection.cmp(&right.collection))
+        });
+        wal_samples.sort_by(|left, right| {
+            left.tenant
+                .cmp(&right.tenant)
+                .then_with(|| left.collection.cmp(&right.collection))
+        });
+        segment_file_samples.sort_by(|left, right| {
+            left.tenant
+                .cmp(&right.tenant)
+                .then_with(|| left.collection.cmp(&right.collection))
+                .then_with(|| left.state.metric_order().cmp(&right.state.metric_order()))
+        });
+        segment_state_samples.sort_by(|left, right| {
+            left.tenant
+                .cmp(&right.tenant)
+                .then_with(|| left.collection.cmp(&right.collection))
+                .then_with(|| left.state.metric_order().cmp(&right.state.metric_order()))
+        });
+
+        let mut snapshot = self
+            .snapshot
+            .write()
+            .expect("storage metrics snapshot lock poisoned");
+        snapshot.refresh_count = snapshot.refresh_count.saturating_add(1);
+        snapshot.total_resident_vector_memory_bytes = total_resident_vector_memory_bytes;
+        snapshot.wal_appends_total = self.wal_appends_total.load(Ordering::Relaxed);
+        snapshot.wal_bytes_written_total = self.wal_bytes_written_total.load(Ordering::Relaxed);
+        snapshot.compactions_total = self.compactions_total.load(Ordering::Relaxed);
+        snapshot.tenant_memory_bytes = tenant_samples;
+        snapshot.collection_memory_bytes = collection_samples;
+        snapshot.collection_wal = wal_samples;
+        snapshot.collection_segment_files = segment_file_samples;
+        snapshot.collection_segment_states = segment_state_samples;
+    }
+
+    fn snapshot(&self) -> StorageMetricsSnapshot {
+        self.snapshot
+            .read()
+            .expect("storage metrics snapshot lock poisoned")
+            .clone()
     }
 }
 
@@ -212,6 +561,9 @@ pub struct Storage {
     index_builds: IndexBuildCoordinator,
     pending_index_builds: usize,
     auto_seal_threshold: usize,
+    metrics: StorageMetrics,
+    #[cfg(test)]
+    fail_next_compaction: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -249,6 +601,8 @@ struct IndexBuildCoordinator {
     request_tx: Sender<IndexBuildRequest>,
     result_rx: Receiver<IndexBuildResult>,
     #[cfg(test)]
+    fail_next_build: Arc<AtomicBool>,
+    #[cfg(test)]
     pause_before_build: Arc<Mutex<Option<Arc<PauseBeforeIndexBuild>>>>,
 }
 
@@ -264,6 +618,10 @@ impl IndexBuildCoordinator {
         let (request_tx, request_rx) = mpsc::channel::<IndexBuildRequest>();
         let (result_tx, result_rx) = mpsc::channel::<IndexBuildResult>();
         #[cfg(test)]
+        let fail_next_build = Arc::new(AtomicBool::new(false));
+        #[cfg(test)]
+        let worker_fail_next_build = Arc::clone(&fail_next_build);
+        #[cfg(test)]
         let pause_before_build = Arc::new(Mutex::new(None::<Arc<PauseBeforeIndexBuild>>));
         #[cfg(test)]
         let worker_pause_before_build = Arc::clone(&pause_before_build);
@@ -278,7 +636,11 @@ impl IndexBuildCoordinator {
                     hook.pause();
                 }
                 let index_type = request.snapshot.index_type.clone();
-                let index = if std::env::var("BARQ_FAIL_INDEX_BUILD").ok().as_deref() == Some("1") {
+                #[cfg(test)]
+                let should_fail = worker_fail_next_build.swap(false, Ordering::Relaxed);
+                #[cfg(not(test))]
+                let should_fail = false;
+                let index = if should_fail {
                     Err("forced index build failure".to_string())
                 } else {
                     request.snapshot.build().map_err(|err| err.to_string())
@@ -303,6 +665,8 @@ impl IndexBuildCoordinator {
             request_tx,
             result_rx,
             #[cfg(test)]
+            fail_next_build,
+            #[cfg(test)]
             pause_before_build,
         }
     }
@@ -315,6 +679,49 @@ impl IndexBuildCoordinator {
             .lock()
             .expect("pause hook lock poisoned") = Some(Arc::clone(&hook));
         hook
+    }
+
+    #[cfg(test)]
+    fn fail_next_build(&self) {
+        self.fail_next_build.store(true, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static PROCESS_ENV_LOCK_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+struct ProcessEnvLockGuard {
+    _guard: Option<std::sync::MutexGuard<'static, ()>>,
+}
+
+#[cfg(test)]
+fn process_env_lock() -> ProcessEnvLockGuard {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let mut outermost = false;
+    PROCESS_ENV_LOCK_DEPTH.with(|depth| {
+        let current = depth.get();
+        outermost = current == 0;
+        depth.set(current + 1);
+    });
+
+    let guard = if outermost {
+        Some(LOCK.get_or_init(|| Mutex::new(())).lock().unwrap())
+    } else {
+        None
+    };
+
+    ProcessEnvLockGuard { _guard: guard }
+}
+
+#[cfg(test)]
+impl Drop for ProcessEnvLockGuard {
+    fn drop(&mut self) {
+        PROCESS_ENV_LOCK_DEPTH.with(|depth| {
+            depth.set(depth.get().saturating_sub(1));
+        });
     }
 }
 
@@ -337,6 +744,8 @@ impl Storage {
         root: impl AsRef<Path>,
         options: StorageOptions,
     ) -> Result<Self, StorageError> {
+        #[cfg(test)]
+        let _env_guard = process_env_lock();
         let root = root.as_ref().to_path_buf();
         let mut storage = Self {
             root,
@@ -354,6 +763,9 @@ impl Storage {
             index_builds: IndexBuildCoordinator::new(),
             pending_index_builds: 0,
             auto_seal_threshold: options.auto_seal_threshold,
+            metrics: StorageMetrics::default(),
+            #[cfg(test)]
+            fail_next_compaction: Arc::new(AtomicBool::new(false)),
         };
 
         if let Some(tm) = options.tiering_manager {
@@ -365,6 +777,7 @@ impl Storage {
         storage.recalculate_usage();
         storage.recalculate_usage();
         storage.recalculate_usage();
+        storage.refresh_memory_metrics();
         Ok(storage)
     }
 
@@ -383,6 +796,37 @@ impl Storage {
 
     pub fn catalog(&self) -> &Catalog {
         &self.catalog
+    }
+
+    fn refresh_memory_metrics(&self) {
+        self.metrics.refresh(self);
+    }
+
+    #[cfg(test)]
+    fn memory_metrics_snapshot(&self) -> StorageMetricsSnapshot {
+        self.metrics.snapshot()
+    }
+
+    #[cfg(test)]
+    fn fail_next_index_build(&self) {
+        self.index_builds.fail_next_build();
+    }
+
+    #[cfg(test)]
+    fn fail_next_background_compaction(&self) {
+        self.fail_next_compaction.store(true, Ordering::Relaxed);
+    }
+
+    fn segment_file_state(path: &Path) -> SegmentState {
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if file_name.starts_with("segment_compacted_") {
+            SegmentState::Compacted
+        } else {
+            SegmentState::Sealed
+        }
     }
 
     pub fn open_with_snapshot(
@@ -1144,6 +1588,8 @@ impl Storage {
             }
         }
 
+        self.refresh_memory_metrics();
+
         Ok(SegmentMetadata {
             file_name,
             created_at: Utc::now(),
@@ -1229,6 +1675,9 @@ impl Storage {
             }
         }
 
+        self.metrics.record_compaction();
+        self.refresh_memory_metrics();
+
         Ok(SegmentMetadata {
             file_name,
             created_at: Utc::now(),
@@ -1265,6 +1714,8 @@ impl Storage {
         min_segments: usize,
     ) -> thread::JoinHandle<Result<Vec<String>, StorageError>> {
         let root = self.root.clone();
+        #[cfg(test)]
+        let fail_next_compaction = Arc::clone(&self.fail_next_compaction);
         thread::spawn(move || {
             let mut storage = Storage::open(root)?;
             let collections_dir = storage.collections_root(&tenant);
@@ -1282,7 +1733,8 @@ impl Storage {
                 if segments.len() < min_segments {
                     continue;
                 }
-                if std::env::var("BARQ_FAIL_COMPACTION").ok().as_deref() == Some("1") {
+                #[cfg(test)]
+                if fail_next_compaction.swap(false, Ordering::Relaxed) {
                     return Err(StorageError::ObjectStore(
                         "simulated background compaction failure".to_string(),
                     ));
@@ -1341,6 +1793,8 @@ impl Storage {
         tenant: impl Into<TenantId>,
         mut schema: CollectionSchema,
     ) -> Result<(), StorageError> {
+        #[cfg(test)]
+        let _env_guard = process_env_lock();
         self.apply_completed_index_builds()?;
         let tenant = tenant.into();
         self.ensure_tenant_state(&tenant);
@@ -1365,6 +1819,7 @@ impl Storage {
         self.collection_write_counts
             .insert((tenant.clone(), schema.name.clone()), 0);
         self.adjust_usage(&tenant, 1, 0, 0);
+        self.refresh_memory_metrics();
         Ok(())
     }
 
@@ -1403,6 +1858,7 @@ impl Storage {
         self.collection_write_counts
             .remove(&(tenant.clone(), name.to_string()));
         self.adjust_usage(tenant, -1, -(docs as isize), -(bytes as isize));
+        self.refresh_memory_metrics();
         Ok(())
     }
 
@@ -1447,6 +1903,7 @@ impl Storage {
             }
         }
         self.adjust_usage(tenant, 0, projected_docs, delta_bytes);
+        self.refresh_memory_metrics();
         self.append_wal(
             tenant,
             collection,
@@ -1484,6 +1941,7 @@ impl Storage {
         };
         if removed {
             self.adjust_usage(tenant, 0, -1, -(existing_bytes as isize));
+            self.refresh_memory_metrics();
             self.append_wal(
                 tenant,
                 collection,
@@ -1663,6 +2121,12 @@ impl Storage {
         Ok(self.catalog.collection(tenant, name)?.schema())
     }
 
+    /// Returns the current storage metrics snapshot as JSON for admin endpoints.
+    pub fn metrics_report_json(&self) -> serde_json::Value {
+        serde_json::to_value(self.metrics.snapshot())
+            .expect("storage metrics snapshot serialization should succeed")
+    }
+
     pub fn collection_names(&self) -> Result<Vec<String>, StorageError> {
         self.collection_names_for_tenant(&self.default_tenant)
     }
@@ -1748,8 +2212,10 @@ impl Storage {
                     .insert((tenant.clone(), name.clone()), persisted_state.index_state);
                 self.collection_index_generations
                     .insert((tenant.clone(), name.clone()), 0);
-                self.collection_index_versions
-                    .insert((tenant.clone(), name.clone()), persisted_state.index_version);
+                self.collection_index_versions.insert(
+                    (tenant.clone(), name.clone()),
+                    persisted_state.index_version,
+                );
                 self.collection_stale_segments.insert(
                     (tenant.clone(), name.clone()),
                     persisted_state.stale_segments.into_iter().collect(),
@@ -1830,6 +2296,8 @@ impl Storage {
         let line = serde_json::to_string(&entry)?;
         writeln!(file, "{}", line)?;
         file.flush()?;
+        self.metrics.record_wal_append((line.len() + 1) as u64);
+        self.refresh_memory_metrics();
         Ok(())
     }
 
@@ -2009,12 +2477,30 @@ mod tests {
     use barq_core::{FieldSchema, FieldType, PayloadValue};
     use barq_index::{DistanceMetric, DocumentId, HnswParams, IndexType};
     use proptest::prelude::*;
+    use std::ffi::OsString;
     use std::path::Path;
-    use std::sync::{Mutex as StdMutex, OnceLock};
 
-    fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| StdMutex::new(())).lock().unwrap()
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
     }
 
     fn sample_schema(name: &str) -> CollectionSchema {
@@ -2050,16 +2536,39 @@ mod tests {
         }
     }
 
+    fn sample_wide_schema(name: &str, dimension: usize) -> CollectionSchema {
+        CollectionSchema {
+            name: name.to_string(),
+            fields: vec![FieldSchema {
+                name: "vector".to_string(),
+                field_type: FieldType::Vector {
+                    dimension,
+                    metric: DistanceMetric::L2,
+                    index: None,
+                },
+                required: true,
+            }],
+            bm25_config: None,
+            tenant_id: TenantId::default(),
+        }
+    }
+
+    fn sample_wide_document(id: u64, dimension: usize) -> Document {
+        Document {
+            id: DocumentId::U64(id),
+            vector: vec![1.0; dimension],
+            payload: None,
+        }
+    }
+
     fn read_segment_index_metadata(
         root: &tempfile::TempDir,
         collection: &str,
         file_name: &str,
     ) -> SegmentIndexMetadata {
-        let metadata_path = root
-            .path()
-            .join(format!(
-                "tenants/default/collections/{collection}/segments/{file_name}.meta.json"
-            ));
+        let metadata_path = root.path().join(format!(
+            "tenants/default/collections/{collection}/segments/{file_name}.meta.json"
+        ));
         serde_json::from_str(&std::fs::read_to_string(metadata_path).unwrap()).unwrap()
     }
 
@@ -2155,7 +2664,9 @@ mod tests {
         storage.create_collection(sample_schema("items")).unwrap();
         storage.insert("items", sample_document(1), false).unwrap();
 
-        storage.rebuild_index("items", Some(IndexType::Flat)).unwrap();
+        storage
+            .rebuild_index("items", Some(IndexType::Flat))
+            .unwrap();
         storage.wait_for_pending_index_builds().unwrap();
         assert_eq!(
             storage.collection_index_state(&TenantId::default(), "items"),
@@ -2215,7 +2726,9 @@ mod tests {
 
         let baseline = storage.search("items", &[0.0, 1.0, 0.0], 2, None).unwrap();
 
-        storage.rebuild_index("items", Some(IndexType::Flat)).unwrap();
+        storage
+            .rebuild_index("items", Some(IndexType::Flat))
+            .unwrap();
         storage.wait_for_pending_index_builds().unwrap();
 
         let rebuilt = storage.search("items", &[0.0, 1.0, 0.0], 2, None).unwrap();
@@ -2226,8 +2739,12 @@ mod tests {
     fn index_version_increments_after_successful_rebuilds() {
         let dir = tempfile::tempdir().unwrap();
         let mut storage = Storage::open(dir.path()).unwrap();
-        storage.create_collection(sample_schema("versioned")).unwrap();
-        storage.insert("versioned", sample_document(1), false).unwrap();
+        storage
+            .create_collection(sample_schema("versioned"))
+            .unwrap();
+        storage
+            .insert("versioned", sample_document(1), false)
+            .unwrap();
 
         storage
             .rebuild_index("versioned", Some(IndexType::Flat))
@@ -2768,12 +3285,61 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_index_build_recovery_loads_persisted_building_state_safely() {
+        let root = tempfile::tempdir().unwrap();
+        let tenant = TenantId::default();
+        let hook;
+        let sealed_file_name;
+        {
+            let mut storage = Storage::open(root.path()).unwrap();
+            storage
+                .create_collection(sample_schema("indexed_restart"))
+                .unwrap();
+            storage
+                .insert("indexed_restart", sample_document(22), false)
+                .unwrap();
+            hook = storage.install_pause_before_index_build();
+            let sealed = storage
+                .seal_segment_for_tenant(&tenant, "indexed_restart")
+                .unwrap();
+            sealed_file_name = sealed.file_name.clone();
+            hook.wait_until_reached();
+
+            let lifecycle = storage
+                .load_collection_lifecycle_state(&tenant, "indexed_restart")
+                .unwrap()
+                .unwrap();
+            assert_eq!(lifecycle.index_state, IndexState::Building);
+            let metadata = read_segment_index_metadata(&root, "indexed_restart", &sealed_file_name);
+            assert_eq!(metadata.index_state, IndexState::Building);
+            assert!(!metadata.index_built);
+        }
+
+        let mut reopened = Storage::open(root.path()).unwrap();
+        assert_eq!(
+            reopened.collection_index_state(&tenant, "indexed_restart"),
+            IndexState::Building
+        );
+        let results = reopened
+            .search("indexed_restart", &[1.0, 0.0, 0.0], 1, None)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, DocumentId::U64(22));
+
+        hook.release();
+    }
+
+    #[test]
     fn newly_sealed_segment_is_marked_stale_until_build_completes() {
         let root = tempfile::tempdir().unwrap();
         let tenant = TenantId::default();
         let mut storage = Storage::open(root.path()).unwrap();
-        storage.create_collection(sample_schema("stale_plan")).unwrap();
-        storage.insert("stale_plan", sample_document(1), false).unwrap();
+        storage
+            .create_collection(sample_schema("stale_plan"))
+            .unwrap();
+        storage
+            .insert("stale_plan", sample_document(1), false)
+            .unwrap();
         let first = storage
             .seal_current_segment_for_tenant(&tenant, "stale_plan", true)
             .unwrap();
@@ -2818,8 +3384,12 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let tenant = TenantId::default();
         let mut storage = Storage::open(root.path()).unwrap();
-        storage.create_collection(sample_schema("stale_apply")).unwrap();
-        storage.insert("stale_apply", sample_document(1), false).unwrap();
+        storage
+            .create_collection(sample_schema("stale_apply"))
+            .unwrap();
+        storage
+            .insert("stale_apply", sample_document(1), false)
+            .unwrap();
         let first = storage
             .seal_current_segment_for_tenant(&tenant, "stale_apply", true)
             .unwrap();
@@ -2860,7 +3430,9 @@ mod tests {
         let tenant = TenantId::default();
         let root = tempfile::tempdir().unwrap();
         let mut storage = Storage::open(root.path()).unwrap();
-        storage.create_collection(sample_schema("search_during_build")).unwrap();
+        storage
+            .create_collection(sample_schema("search_during_build"))
+            .unwrap();
         storage
             .insert("search_during_build", sample_document(1), false)
             .unwrap();
@@ -2898,7 +3470,6 @@ mod tests {
 
     #[test]
     fn index_build_failure_falls_back_without_breaking_search() {
-        let _guard = env_test_lock();
         let root = tempfile::tempdir().unwrap();
         let mut storage = Storage::open(root.path()).unwrap();
         storage
@@ -2907,12 +3478,11 @@ mod tests {
         storage
             .insert("indexed_fallback", sample_document(10), false)
             .unwrap();
-        std::env::set_var("BARQ_FAIL_INDEX_BUILD", "1");
+        storage.fail_next_index_build();
         let sealed = storage
             .seal_segment_for_tenant(&TenantId::default(), "indexed_fallback")
             .unwrap();
         storage.wait_for_pending_index_builds().unwrap();
-        std::env::remove_var("BARQ_FAIL_INDEX_BUILD");
 
         let metadata_path = root
             .path()
@@ -3049,7 +3619,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let tenant = TenantId::default();
         let mut storage = Storage::open(root.path()).unwrap();
-        storage.create_collection(sample_schema("tie_segments")).unwrap();
+        storage
+            .create_collection(sample_schema("tie_segments"))
+            .unwrap();
 
         storage
             .insert(
@@ -3182,12 +3754,11 @@ mod tests {
 
         let before = storage.segment_files(&tenant, "bg_fail").unwrap().len();
         assert!(before >= 2, "test requires at least two segments");
-        std::env::set_var("BARQ_FAIL_COMPACTION", "1");
+        storage.fail_next_background_compaction();
         let outcome = storage
             .run_background_compaction_once(tenant.clone(), 2)
             .join()
             .unwrap();
-        std::env::remove_var("BARQ_FAIL_COMPACTION");
         assert!(outcome.is_err());
         let after = storage.segment_files(&tenant, "bg_fail").unwrap().len();
         assert_eq!(
@@ -3329,6 +3900,309 @@ mod tests {
 
         let second = storage.insert("mem_limit", sample_large_document(2, 900), false);
         assert!(matches!(second, Err(StorageError::QuotaExceeded { .. })));
+    }
+
+    #[test]
+    fn memory_gauge_updates_on_insert() {
+        let root = tempfile::tempdir().unwrap();
+        let mut storage = Storage::open(root.path()).unwrap();
+        storage
+            .create_collection(sample_schema("memory_insert"))
+            .unwrap();
+
+        let before = storage.memory_metrics_snapshot();
+        storage
+            .insert("memory_insert", sample_document(1), false)
+            .unwrap();
+        let after = storage.memory_metrics_snapshot();
+
+        assert!(after.refresh_count > before.refresh_count);
+        assert_eq!(
+            after
+                .collection_memory_bytes("default", "memory_insert")
+                .unwrap(),
+            3 * std::mem::size_of::<f32>() as u64
+        );
+        assert_eq!(
+            after.tenant_memory_bytes("default").unwrap(),
+            after.total_resident_vector_memory_bytes
+        );
+    }
+
+    #[test]
+    fn memory_gauge_refreshes_on_wal_flush() {
+        let root = tempfile::tempdir().unwrap();
+        let tenant = TenantId::default();
+        let mut storage = Storage::open(root.path()).unwrap();
+        storage
+            .create_collection(sample_schema("memory_flush"))
+            .unwrap();
+        storage
+            .insert("memory_flush", sample_document(1), false)
+            .unwrap();
+
+        let before = storage.memory_metrics_snapshot();
+        storage
+            .flush_wal_to_segment(&tenant, "memory_flush")
+            .unwrap();
+        let after = storage.memory_metrics_snapshot();
+
+        assert!(after.refresh_count > before.refresh_count);
+        assert_eq!(
+            after.collection_memory_bytes("default", "memory_flush"),
+            before.collection_memory_bytes("default", "memory_flush")
+        );
+    }
+
+    #[test]
+    fn memory_gauge_tracks_budgeted_vector_eviction() {
+        let _guard = process_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        let _mode = EnvVarGuard::set("BARQ_VECTOR_STORE_MODE", "mmap");
+        let _path = EnvVarGuard::set("BARQ_VECTOR_STORE_PATH", root.path());
+        let _memory = EnvVarGuard::set("BARQ_MAX_MEMORY_MB", "1");
+
+        let mut storage = Storage::open(root.path()).unwrap();
+        storage
+            .create_collection(sample_wide_schema("memory_evict", 150_000))
+            .unwrap();
+        storage
+            .insert("memory_evict", sample_wide_document(1, 150_000), false)
+            .unwrap();
+        storage
+            .insert("memory_evict", sample_wide_document(2, 150_000), false)
+            .unwrap();
+        let snapshot = storage.memory_metrics_snapshot();
+
+        let resident = snapshot
+            .collection_memory_bytes("default", "memory_evict")
+            .unwrap();
+        let inserted_bytes = 2 * 150_000 * std::mem::size_of::<f32>() as u64;
+        assert!(resident > 0);
+        assert!(resident < inserted_bytes);
+        assert!(resident <= 1_024 * 1_024);
+    }
+
+    #[test]
+    fn wal_metrics_increment_on_append() {
+        let root = tempfile::tempdir().unwrap();
+        let mut storage = Storage::open(root.path()).unwrap();
+        storage
+            .create_collection(sample_schema("wal_metrics"))
+            .unwrap();
+
+        let before = storage.memory_metrics_snapshot();
+        storage
+            .insert("wal_metrics", sample_document(1), false)
+            .unwrap();
+        let after = storage.memory_metrics_snapshot();
+
+        assert_eq!(after.wal_appends_total, before.wal_appends_total + 1);
+        assert!(
+            after.wal_bytes_written_total > before.wal_bytes_written_total,
+            "WAL byte counter should grow after an append"
+        );
+        assert_eq!(
+            after.collection_wal_entries("default", "wal_metrics"),
+            Some(1)
+        );
+        assert!(
+            after
+                .collection_wal_bytes("default", "wal_metrics")
+                .unwrap_or_default()
+                > 0
+        );
+    }
+
+    #[test]
+    fn segment_metrics_track_file_counts_and_current_state() {
+        let root = tempfile::tempdir().unwrap();
+        let tenant = TenantId::default();
+        let mut storage = Storage::open(root.path()).unwrap();
+        storage
+            .create_collection(sample_schema("segment_metrics"))
+            .unwrap();
+
+        let created = storage.memory_metrics_snapshot();
+        assert!(created.collection_segment_state_active(
+            "default",
+            "segment_metrics",
+            SegmentState::Growing,
+        ));
+        assert_eq!(
+            created.collection_segment_file_count(
+                "default",
+                "segment_metrics",
+                SegmentState::Sealed,
+            ),
+            Some(0)
+        );
+
+        storage
+            .insert("segment_metrics", sample_document(1), false)
+            .unwrap();
+        storage
+            .seal_segment_for_tenant(&tenant, "segment_metrics")
+            .unwrap();
+        let sealed = storage.memory_metrics_snapshot();
+
+        assert!(sealed.collection_segment_state_active(
+            "default",
+            "segment_metrics",
+            SegmentState::Sealed,
+        ));
+        assert!(!sealed.collection_segment_state_active(
+            "default",
+            "segment_metrics",
+            SegmentState::Growing,
+        ));
+        assert_eq!(
+            sealed.collection_segment_file_count(
+                "default",
+                "segment_metrics",
+                SegmentState::Sealed,
+            ),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn compaction_metrics_increment_and_update_segment_counts() {
+        let root = tempfile::tempdir().unwrap();
+        let tenant = TenantId::default();
+        let mut storage = Storage::open(root.path()).unwrap();
+        storage
+            .create_collection(sample_schema("compaction_metrics"))
+            .unwrap();
+        storage
+            .insert("compaction_metrics", sample_document(1), false)
+            .unwrap();
+        storage
+            .flush_wal_to_segment(&tenant, "compaction_metrics")
+            .unwrap();
+        storage
+            .insert("compaction_metrics", sample_document(2), false)
+            .unwrap();
+        storage
+            .flush_wal_to_segment(&tenant, "compaction_metrics")
+            .unwrap();
+
+        let before = storage.memory_metrics_snapshot();
+        storage
+            .compact_segments(&tenant, "compaction_metrics")
+            .unwrap();
+        let after = storage.memory_metrics_snapshot();
+
+        assert_eq!(after.compactions_total, before.compactions_total + 1);
+        assert_eq!(
+            after.collection_segment_file_count(
+                "default",
+                "compaction_metrics",
+                SegmentState::Sealed,
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            after.collection_segment_file_count(
+                "default",
+                "compaction_metrics",
+                SegmentState::Compacted,
+            ),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn metrics_report_json_includes_expected_storage_fields() {
+        let root = tempfile::tempdir().unwrap();
+        let mut storage = Storage::open(root.path()).unwrap();
+        storage
+            .create_collection(sample_schema("report_metrics"))
+            .unwrap();
+        storage
+            .insert("report_metrics", sample_document(1), false)
+            .unwrap();
+
+        let report = storage.metrics_report_json();
+        assert_eq!(report["wal_appends_total"], serde_json::json!(1));
+        assert!(
+            report["total_resident_vector_memory_bytes"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert!(report["collection_memory_bytes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|sample| {
+                sample["tenant"] == serde_json::json!("default")
+                    && sample["collection"] == serde_json::json!("report_metrics")
+                    && sample["resident_vector_memory_bytes"].as_u64().unwrap() > 0
+            }));
+        assert!(report["collection_wal"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|sample| {
+                sample["tenant"] == serde_json::json!("default")
+                    && sample["collection"] == serde_json::json!("report_metrics")
+                    && sample["entries"].as_u64().unwrap() >= 1
+            }));
+    }
+
+    #[test]
+    fn metrics_report_json_reloads_persisted_wal_and_segment_state_after_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let tenant = TenantId::default();
+        {
+            let mut storage = Storage::open(root.path()).unwrap();
+            storage
+                .create_collection(sample_schema("restart_metrics"))
+                .unwrap();
+            storage
+                .insert("restart_metrics", sample_document(1), false)
+                .unwrap();
+            storage
+                .flush_wal_to_segment(&tenant, "restart_metrics")
+                .unwrap();
+            storage
+                .insert("restart_metrics", sample_document(2), false)
+                .unwrap();
+        }
+
+        let reopened = Storage::open(root.path()).unwrap();
+        let report = reopened.metrics_report_json();
+
+        assert!(report["collection_wal"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|sample| {
+                sample["tenant"] == serde_json::json!("default")
+                    && sample["collection"] == serde_json::json!("restart_metrics")
+                    && sample["entries"].as_u64().unwrap() >= 1
+            }));
+        assert!(report["collection_segment_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|sample| {
+                sample["tenant"] == serde_json::json!("default")
+                    && sample["collection"] == serde_json::json!("restart_metrics")
+                    && sample["state"] == serde_json::json!("Sealed")
+                    && sample["count"].as_u64().unwrap() >= 1
+            }));
+        assert!(report["collection_segment_states"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|sample| {
+                sample["tenant"] == serde_json::json!("default")
+                    && sample["collection"] == serde_json::json!("restart_metrics")
+                    && sample["state"] == serde_json::json!("Growing")
+                    && sample["active"] == serde_json::json!(true)
+            }));
     }
 
     proptest! {
