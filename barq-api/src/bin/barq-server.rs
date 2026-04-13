@@ -123,6 +123,7 @@ async fn main() -> anyhow::Result<()> {
         &cli.storage_dir, 
         barq_storage::StorageOptions {
             tiering_manager,
+            ..Default::default()
         }
     )?;
 
@@ -238,4 +239,3 @@ fn init_observability() {
 
 // Helper to access start_server_with_auth since it is not pub in lib.rs?
 // Check lib.rs visibility. start_server_with_auth is pub.
-
