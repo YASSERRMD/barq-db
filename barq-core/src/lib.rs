@@ -578,6 +578,8 @@ impl QueryVariant {
 pub struct QueryPlan {
     variant: QueryVariant,
     top_k: usize,
+    vector_path: Option<QueryExecutionPath>,
+    text_path: Option<QueryExecutionPath>,
 }
 
 impl QueryPlan {
@@ -619,7 +621,12 @@ impl QueryPlan {
             }
         };
 
-        Ok(Self { variant, top_k })
+        Ok(Self {
+            variant,
+            top_k,
+            vector_path: None,
+            text_path: None,
+        })
     }
 
     /// Returns the planned high-level query variant.
@@ -645,6 +652,86 @@ impl QueryPlan {
     /// Returns whether the plan applies a metadata filter.
     pub fn has_filter(self) -> bool {
         self.variant.has_filter()
+    }
+
+    /// Returns the chosen vector execution path, when vector search is part of the plan.
+    pub fn vector_path(self) -> Option<QueryExecutionPath> {
+        self.vector_path
+    }
+
+    /// Returns the chosen text execution path, when text search is part of the plan.
+    pub fn text_path(self) -> Option<QueryExecutionPath> {
+        self.text_path
+    }
+
+    fn with_paths(
+        mut self,
+        vector_path: Option<QueryExecutionPath>,
+        text_path: Option<QueryExecutionPath>,
+    ) -> Self {
+        self.vector_path = vector_path;
+        self.text_path = text_path;
+        self
+    }
+}
+
+/// Concrete execution path chosen for a planned query branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryExecutionPath {
+    /// Use the vector index directly and post-filter if needed.
+    VectorIndex,
+    /// Score only the filter-selected candidate vectors.
+    VectorFilterScan,
+    /// Score every vector because the vector index is not ready.
+    VectorFullScan,
+    /// Use the BM25 index directly and post-filter if needed.
+    TextIndex,
+    /// Score only the filter-selected candidate text documents.
+    TextFilterScan,
+}
+
+/// Heuristic knobs for the rule-based query planner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueryPlannerOptions {
+    filter_candidate_threshold: usize,
+}
+
+impl Default for QueryPlannerOptions {
+    fn default() -> Self {
+        Self {
+            filter_candidate_threshold: 64,
+        }
+    }
+}
+
+impl QueryPlannerOptions {
+    /// Returns the configured filter candidate threshold.
+    pub fn filter_candidate_threshold(self) -> usize {
+        self.filter_candidate_threshold
+    }
+
+    /// Overrides the candidate threshold used for filter pushdown planning.
+    pub fn with_filter_candidate_threshold(mut self, threshold: usize) -> Self {
+        self.filter_candidate_threshold = threshold.max(1);
+        self
+    }
+}
+
+/// Rule-based planner that chooses stable execution paths for query branches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct QueryPlanner {
+    options: QueryPlannerOptions,
+}
+
+impl QueryPlanner {
+    /// Creates a planner with the provided options.
+    pub fn new(options: QueryPlannerOptions) -> Self {
+        Self { options }
+    }
+
+    /// Returns the planner options.
+    pub fn options(self) -> QueryPlannerOptions {
+        self.options
     }
 }
 
@@ -956,25 +1043,26 @@ impl Collection {
         top_k: usize,
         filter: Option<&Filter>,
     ) -> Result<Vec<SearchResult>, CatalogError> {
-        let plan = QueryPlan::new(Some(vector), None, filter, top_k)?;
+        let plan = QueryPlanner::default().plan_collection(self, Some(vector), None, filter, top_k)?;
         let top_k = plan.top_k();
         if let Some(f) = filter {
             self.validate_filter(f)?;
         }
         let candidates = self.filter_candidates(filter);
-        let use_vector_fallback = self.index_state != IndexState::Ready;
-
-        let mut results = if let Some(ids) = &candidates {
-            self.search_over_candidates(vector, ids)?
-        } else if use_vector_fallback {
-            // During index builds or stale windows we preserve correctness by scoring every vector.
-            self.search_all_vectors(vector)
-        } else {
-            self.index.search(vector, top_k * 2)?
+        let mut results = match plan.vector_path() {
+            Some(QueryExecutionPath::VectorFilterScan) => {
+                self.search_over_candidates(vector, candidates.as_ref().expect("candidate set"))?
+            }
+            Some(QueryExecutionPath::VectorFullScan) => {
+                // During index builds or stale windows we preserve correctness by scoring every vector.
+                self.search_all_vectors(vector)
+            }
+            Some(QueryExecutionPath::VectorIndex) => self.index.search(vector, top_k * 2)?,
+            path => panic!("unexpected vector execution path: {path:?}"),
         };
 
         results = self.filter_results(results, filter);
-        if results.len() < top_k && !use_vector_fallback {
+        if results.len() < top_k && matches!(plan.vector_path(), Some(QueryExecutionPath::VectorIndex)) {
             // Simple fallback strategy (could be improved with FilteredVectorSearch in future)
             let search_k = if candidates.is_some() {
                 top_k * 10
@@ -1114,7 +1202,7 @@ impl Collection {
         top_k: usize,
         filter: Option<&Filter>,
     ) -> Result<Vec<SearchResult>, CatalogError> {
-        let plan = QueryPlan::new(None, Some(query), filter, top_k)?;
+        let plan = QueryPlanner::default().plan_collection(self, None, Some(query), filter, top_k)?;
         let top_k = plan.top_k();
         if let Some(f) = filter {
             self.validate_filter(f)?;
@@ -1124,11 +1212,22 @@ impl Collection {
             .as_ref()
             .ok_or_else(|| CatalogError::InvalidSchema("collection has no text index".into()))?;
         let candidates = self.filter_candidates(filter);
-        let mut results = index.search_with_candidates(query, top_k * 2, candidates.as_ref())?;
+        let mut results = match plan.text_path() {
+            Some(QueryExecutionPath::TextFilterScan) => {
+                index.search_with_candidates(query, top_k * 2, candidates.as_ref())?
+            }
+            Some(QueryExecutionPath::TextIndex) => index.search(query, top_k * 2)?,
+            path => panic!("unexpected text execution path: {path:?}"),
+        };
         results = self.filter_results(results, filter);
         if results.len() < top_k {
-            let mut fallback =
-                index.search_with_candidates(query, top_k * 4, candidates.as_ref())?;
+            let mut fallback = match plan.text_path() {
+                Some(QueryExecutionPath::TextFilterScan) => {
+                    index.search_with_candidates(query, top_k * 4, candidates.as_ref())?
+                }
+                Some(QueryExecutionPath::TextIndex) => index.search(query, top_k * 4)?,
+                path => panic!("unexpected text execution path: {path:?}"),
+            };
             fallback = self.filter_results(fallback, filter);
             results.extend(fallback);
         }
@@ -1150,7 +1249,8 @@ impl Collection {
         weights: Option<HybridWeights>,
         filter: Option<&Filter>,
     ) -> Result<Vec<HybridSearchResult>, CatalogError> {
-        let plan = QueryPlan::new(Some(vector), Some(query), filter, top_k)?;
+        let plan =
+            QueryPlanner::default().plan_collection(self, Some(vector), Some(query), filter, top_k)?;
         let top_k = plan.top_k();
         if let Some(f) = filter {
             self.validate_filter(f)?;
@@ -1470,6 +1570,62 @@ impl Catalog {
                     .sum()
             })
             .unwrap_or(0)
+    }
+}
+
+impl QueryPlanner {
+    /// Builds a query plan for the provided collection and query inputs.
+    pub fn plan_collection(
+        &self,
+        collection: &Collection,
+        vector: Option<&[f32]>,
+        text: Option<&str>,
+        filter: Option<&Filter>,
+        top_k: usize,
+    ) -> Result<QueryPlan, CatalogError> {
+        let plan = QueryPlan::new(vector, text, filter, top_k)?;
+        if plan.uses_text() && collection.text_index.is_none() {
+            return Err(CatalogError::InvalidSchema(
+                "collection has no text index".into(),
+            ));
+        }
+
+        let candidates = collection.filter_candidates(filter);
+        let vector_path = if plan.uses_vector() {
+            Some(self.plan_vector_path(collection, candidates.as_ref()))
+        } else {
+            None
+        };
+        let text_path = if plan.uses_text() {
+            Some(self.plan_text_path(candidates.as_ref()))
+        } else {
+            None
+        };
+
+        Ok(plan.with_paths(vector_path, text_path))
+    }
+
+    fn plan_vector_path(
+        &self,
+        collection: &Collection,
+        candidates: Option<&HashSet<DocumentId>>,
+    ) -> QueryExecutionPath {
+        if collection.index_state != IndexState::Ready {
+            QueryExecutionPath::VectorFullScan
+        } else if matches!(candidates, Some(set) if set.len() <= self.options.filter_candidate_threshold())
+        {
+            QueryExecutionPath::VectorFilterScan
+        } else {
+            QueryExecutionPath::VectorIndex
+        }
+    }
+
+    fn plan_text_path(&self, candidates: Option<&HashSet<DocumentId>>) -> QueryExecutionPath {
+        if matches!(candidates, Some(set) if set.len() <= self.options.filter_candidate_threshold()) {
+            QueryExecutionPath::TextFilterScan
+        } else {
+            QueryExecutionPath::TextIndex
+        }
     }
 }
 
@@ -1931,6 +2087,126 @@ mod tests {
 
         let empty_vector_err = QueryPlan::new(Some(&empty_vector), None, None, 5).unwrap_err();
         assert!(matches!(empty_vector_err, CatalogError::InvalidSchema(_)));
+    }
+
+    #[test]
+    fn planner_picks_expected_paths_for_known_scenarios() {
+        let mut schema = text_schema();
+        schema.name = "planner_articles".to_string();
+        schema.fields.push(FieldSchema {
+            name: "meta".to_string(),
+            field_type: FieldType::Json,
+            required: false,
+        });
+
+        let mut catalog = Catalog::new();
+        let tenant = default_tenant();
+        catalog.create_collection(tenant.clone(), schema).unwrap();
+        let collection = catalog.collection_mut(&tenant, "planner_articles").unwrap();
+
+        for (id, body, category) in [
+            (1, "rust systems", "tech"),
+            (2, "rust cookbook", "tech"),
+            (3, "garden tools", "home"),
+        ] {
+            let mut payload = HashMap::new();
+            payload.insert("body".to_string(), PayloadValue::String(body.into()));
+            payload.insert(
+                "meta".to_string(),
+                PayloadValue::Object({
+                    let mut meta = HashMap::new();
+                    meta.insert("category".to_string(), PayloadValue::String(category.into()));
+                    meta
+                }),
+            );
+            collection
+                .insert(Document {
+                    id: DocumentId::U64(id),
+                    vector: vec![id as f32, 0.0, 0.0],
+                    payload: Some(PayloadValue::Object(payload)),
+                })
+                .unwrap();
+        }
+
+        let planner =
+            QueryPlanner::new(QueryPlannerOptions::default().with_filter_candidate_threshold(2));
+        let small_filter = Filter::Eq {
+            field: "meta.category".to_string(),
+            value: PayloadValue::String("home".into()),
+        };
+        let small_plan = planner
+            .plan_collection(
+                collection,
+                Some(&[1.0, 0.0, 0.0]),
+                Some("rust"),
+                Some(&small_filter),
+                2,
+            )
+            .unwrap();
+        assert_eq!(small_plan.vector_path(), Some(QueryExecutionPath::VectorFilterScan));
+        assert_eq!(small_plan.text_path(), Some(QueryExecutionPath::TextFilterScan));
+
+        let broad_filter = Filter::Exists {
+            field: "body".to_string(),
+        };
+        let broad_plan = QueryPlanner::new(
+            QueryPlannerOptions::default().with_filter_candidate_threshold(1),
+        )
+        .plan_collection(
+            collection,
+            Some(&[1.0, 0.0, 0.0]),
+            Some("rust"),
+            Some(&broad_filter),
+            2,
+        )
+        .unwrap();
+        assert_eq!(broad_plan.vector_path(), Some(QueryExecutionPath::VectorIndex));
+        assert_eq!(broad_plan.text_path(), Some(QueryExecutionPath::TextIndex));
+
+        collection.set_index_state(IndexState::Building).unwrap();
+        let fallback_plan = planner
+            .plan_collection(collection, Some(&[1.0, 0.0, 0.0]), None, Some(&small_filter), 2)
+            .unwrap();
+        assert_eq!(fallback_plan.vector_path(), Some(QueryExecutionPath::VectorFullScan));
+        assert_eq!(fallback_plan.text_path(), None);
+    }
+
+    #[test]
+    fn planner_remains_deterministic() {
+        let mut catalog = Catalog::new();
+        let tenant = default_tenant();
+        catalog
+            .create_collection(tenant.clone(), text_schema())
+            .unwrap();
+        let collection = catalog.collection_mut(&tenant, "articles").unwrap();
+
+        let mut payload = HashMap::new();
+        payload.insert(
+            "body".to_string(),
+            PayloadValue::String("rust systems programming".into()),
+        );
+        collection
+            .insert(Document {
+                id: DocumentId::U64(1),
+                vector: vec![1.0, 0.0, 0.0],
+                payload: Some(PayloadValue::Object(payload)),
+            })
+            .unwrap();
+
+        let filter = Filter::Exists {
+            field: "body".to_string(),
+        };
+        let planner =
+            QueryPlanner::new(QueryPlannerOptions::default().with_filter_candidate_threshold(4));
+
+        let first = planner
+            .plan_collection(collection, Some(&[1.0, 0.0, 0.0]), Some("rust"), Some(&filter), 2)
+            .unwrap();
+        let second = planner
+            .plan_collection(collection, Some(&[1.0, 0.0, 0.0]), Some("rust"), Some(&filter), 2)
+            .unwrap();
+
+        assert_eq!(first, second);
     }
 
     #[test]
