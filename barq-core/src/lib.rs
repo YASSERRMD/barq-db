@@ -827,6 +827,11 @@ impl Collection {
         self.search_with_filter(vector, top_k, None)
     }
 
+    /// Searches the collection with an optional metadata filter.
+    ///
+    /// When the vector index is `Building` or `Stale`, this falls back to
+    /// brute-force scoring over the stored vectors so reads remain correct while
+    /// rebuilds are in flight.
     pub fn search_with_filter(
         &self,
         vector: &[f32],
@@ -837,15 +842,19 @@ impl Collection {
             self.validate_filter(f)?;
         }
         let candidates = filter.and_then(|f| self.metadata_index.candidates(f));
+        let use_vector_fallback = self.index_state != IndexState::Ready;
 
         let mut results = if let Some(ids) = &candidates {
             self.search_over_candidates(vector, ids)?
+        } else if use_vector_fallback {
+            // During index builds or stale windows we preserve correctness by scoring every vector.
+            self.search_all_vectors(vector)
         } else {
             self.index.search(vector, top_k * 2)?
         };
 
         results = self.filter_results(results, filter);
-        if results.len() < top_k {
+        if results.len() < top_k && !use_vector_fallback {
             // Simple fallback strategy (could be improved with FilteredVectorSearch in future)
             let search_k = if candidates.is_some() {
                 top_k * 10
@@ -931,6 +940,24 @@ impl Collection {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         Ok(scored)
+    }
+
+    fn search_all_vectors(&self, vector: &[f32]) -> Vec<SearchResult> {
+        let mut scored: Vec<SearchResult> = self
+            .vector_ids
+            .par_iter()
+            .filter_map(|id| self.vector_slice(id).map(|vec| (id, vec)))
+            .map(|(id, vec)| SearchResult {
+                id: id.clone(),
+                score: score_with_metric(self.metric, vector, vec),
+            })
+            .collect();
+        scored.par_sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        scored
     }
 
     fn filter_results(
@@ -1549,6 +1576,37 @@ mod tests {
     }
 
     #[test]
+    fn search_fallback_matches_ready_results_while_index_is_building() {
+        let mut catalog = Catalog::new();
+        let tenant = default_tenant();
+        catalog
+            .create_collection(tenant.clone(), sample_schema())
+            .unwrap();
+        let collection = catalog.collection_mut(&tenant, "products").unwrap();
+
+        for (id, vector) in [
+            (1, vec![1.0, 0.0, 0.0]),
+            (2, vec![0.0, 1.0, 0.0]),
+            (3, vec![0.5, 0.5, 0.0]),
+        ] {
+            collection
+                .insert(Document {
+                    id: DocumentId::U64(id),
+                    vector,
+                    payload: None,
+                })
+                .unwrap();
+        }
+
+        let ready = collection.search(&[0.8, 0.2, 0.0], 3).unwrap();
+        collection.set_index_state(IndexState::Building).unwrap();
+
+        let fallback = collection.search(&[0.8, 0.2, 0.0], 3).unwrap();
+
+        assert_eq!(fallback, ready);
+    }
+
+    #[test]
     fn delete_document() {
         let mut catalog = Catalog::new();
         let tenant = default_tenant();
@@ -1652,6 +1710,53 @@ mod tests {
         let first = &results[0];
         assert!(first.bm25_score.is_some());
         assert!(first.vector_score.is_some());
+    }
+
+    #[test]
+    fn hybrid_search_remains_correct_while_vector_index_is_building() {
+        let mut catalog = Catalog::new();
+        let tenant = default_tenant();
+        catalog
+            .create_collection(tenant.clone(), text_schema())
+            .unwrap();
+        let collection = catalog.collection_mut(&tenant, "articles").unwrap();
+
+        let mut payload1 = HashMap::new();
+        payload1.insert(
+            "body".to_string(),
+            PayloadValue::String("rust systems programming".into()),
+        );
+        let mut payload2 = HashMap::new();
+        payload2.insert(
+            "body".to_string(),
+            PayloadValue::String("distributed database guide".into()),
+        );
+
+        collection
+            .insert(Document {
+                id: DocumentId::U64(1),
+                vector: vec![0.9, 0.1, 0.0],
+                payload: Some(PayloadValue::Object(payload1)),
+            })
+            .unwrap();
+        collection
+            .insert(Document {
+                id: DocumentId::U64(2),
+                vector: vec![0.0, 1.0, 0.0],
+                payload: Some(PayloadValue::Object(payload2)),
+            })
+            .unwrap();
+
+        let ready = collection
+            .search_hybrid(&[0.8, 0.2, 0.0], "rust", 2, None, None)
+            .unwrap();
+        collection.set_index_state(IndexState::Building).unwrap();
+
+        let fallback = collection
+            .search_hybrid(&[0.8, 0.2, 0.0], "rust", 2, None, None)
+            .unwrap();
+
+        assert_eq!(fallback, ready);
     }
 
     #[test]
