@@ -21,6 +21,14 @@ export interface InsertOptions {
     waitForCommit?: boolean;
 }
 
+export type InsertState = "queued" | "processing" | "succeeded" | "failed";
+
+export interface InsertStatus {
+    requestId: string;
+    state: InsertState;
+    errorMessage?: string;
+}
+
 export type SearchConsistency = "primary" | "followers" | "any";
 
 export interface SearchOptions {
@@ -77,6 +85,28 @@ function grpcSearchOptions(
         consistency,
         allowFallback: options.allowFallback ?? true,
     };
+}
+
+function insertStateFromProto(
+    state?: "INSERT_STATUS_STATE_UNSPECIFIED" | 0 | "INSERT_STATUS_STATE_QUEUED" | 1 | "INSERT_STATUS_STATE_PROCESSING" | 2 | "INSERT_STATUS_STATE_SUCCEEDED" | 3 | "INSERT_STATUS_STATE_FAILED" | 4,
+): InsertState {
+    switch (state) {
+        case 2:
+        case "INSERT_STATUS_STATE_PROCESSING":
+            return "processing";
+        case 3:
+        case "INSERT_STATUS_STATE_SUCCEEDED":
+            return "succeeded";
+        case 4:
+        case "INSERT_STATUS_STATE_FAILED":
+            return "failed";
+        case 1:
+        case "INSERT_STATUS_STATE_QUEUED":
+        case 0:
+        case "INSERT_STATUS_STATE_UNSPECIFIED":
+        default:
+            return "queued";
+    }
 }
 
 function grpcTargetFromBaseUrl(baseUrl: string): string {
@@ -168,6 +198,16 @@ export class Collection {
         await this.client.grpc().insert(this.name, id, vector, payload ?? {}, options);
     }
 
+    async insertAsync(id: string | number, vector: number[], payload?: any, options?: InsertOptions): Promise<string> {
+        ensureSupportedApiVersion();
+        return this.client.grpc().insertAsync(this.name, id, vector, payload ?? {}, options);
+    }
+
+    async getInsertStatus(requestId: string): Promise<InsertStatus> {
+        ensureSupportedApiVersion();
+        return this.client.grpc().getInsertStatus(requestId);
+    }
+
     async search(
         vector?: number[],
         query?: string,
@@ -212,6 +252,7 @@ import * as protoLoader from '@grpc/proto-loader';
 import * as path from 'path';
 import type { ProtoGrpcType } from './generated/barq';
 import type { BarqClient as GeneratedBarqClient } from './generated/barq/Barq';
+import type { GetInsertStatusResponse__Output } from './generated/barq/GetInsertStatusResponse';
 import type { InsertRequest } from './generated/barq/InsertRequest';
 import type { SearchResponse__Output } from './generated/barq/SearchResponse';
 import type { StatusResponse__Output } from './generated/barq/StatusResponse';
@@ -279,6 +320,36 @@ export class GrpcClient {
             this.client.insert(request, this.metadata, (err) => {
                 if (err) return reject(err);
                 resolve();
+            });
+        });
+    }
+
+    insertAsync(collection: string, id: string | number, vector: number[], payload: any = {}, options?: InsertOptions): Promise<string> {
+        const request: InsertRequest = {
+            collection,
+            id: String(id),
+            vector,
+            payloadJson: JSON.stringify(payload),
+            options: grpcInsertOptions(options),
+        };
+
+        return new Promise((resolve, reject) => {
+            this.client.insertAsync(request, this.metadata, (err, response?: { requestId?: string }) => {
+                if (err) return reject(err);
+                resolve(response?.requestId ?? "");
+            });
+        });
+    }
+
+    getInsertStatus(requestId: string): Promise<InsertStatus> {
+        return new Promise((resolve, reject) => {
+            this.client.getInsertStatus({ requestId }, this.metadata, (err, response?: GetInsertStatusResponse__Output) => {
+                if (err) return reject(err);
+                resolve({
+                    requestId: response?.requestId ?? requestId,
+                    state: insertStateFromProto(response?.state),
+                    errorMessage: response?.errorMessage || undefined,
+                });
             });
         });
     }

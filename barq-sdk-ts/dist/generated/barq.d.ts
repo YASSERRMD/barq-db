@@ -14,13 +14,17 @@ export interface ProtoGrpcType {
         Consistency: EnumTypeDefinition;
         CreateCollectionRequest: MessageTypeDefinition;
         CreateCollectionResponse: MessageTypeDefinition;
+        GetInsertStatusRequest: MessageTypeDefinition;
+        GetInsertStatusResponse: MessageTypeDefinition;
         HealthRequest: MessageTypeDefinition;
         HealthResponse: MessageTypeDefinition;
+        InsertAsyncResponse: MessageTypeDefinition;
         InsertDocumentRequest: MessageTypeDefinition;
         InsertDocumentResponse: MessageTypeDefinition;
         InsertOptions: MessageTypeDefinition;
         InsertRequest: MessageTypeDefinition;
         InsertResponse: MessageTypeDefinition;
+        InsertStatusState: EnumTypeDefinition;
         QueryResults: MessageTypeDefinition;
         SearchOptions: MessageTypeDefinition;
         SearchQuery: MessageTypeDefinition;

@@ -3,8 +3,10 @@ pub use barq_core::{
 };
 use barq_proto::barq::barq_client::BarqClient as TonicBarqClient;
 use barq_proto::barq::{
-    Consistency as ProtoConsistency, CreateCollectionRequest, InsertOptions as ProtoInsertOptions,
-    InsertRequest, SearchOptions as ProtoSearchOptions, SearchRequest, StatusRequest,
+    Consistency as ProtoConsistency, CreateCollectionRequest, GetInsertStatusRequest,
+    InsertOptions as ProtoInsertOptions, InsertRequest,
+    InsertStatusState as ProtoInsertStatusState, SearchOptions as ProtoSearchOptions,
+    SearchRequest, StatusRequest,
 };
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -147,6 +149,23 @@ impl SearchOptions {
     }
 }
 
+/// Current lifecycle state of a tracked asynchronous insert.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InsertState {
+    Queued,
+    Processing,
+    Succeeded,
+    Failed,
+}
+
+/// Snapshot returned when polling the state of an asynchronous insert.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InsertStatus {
+    pub request_id: String,
+    pub state: InsertState,
+    pub error_message: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct BarqClient {
     base_url: String,
@@ -255,6 +274,29 @@ impl Collection {
             .await
     }
 
+    pub async fn insert_async(
+        &self,
+        id: impl Into<DocumentId>,
+        vector: Vec<f32>,
+        payload: Option<serde_json::Value>,
+    ) -> Result<String> {
+        ensure_supported_api_version()?;
+        let id_obj = id.into();
+        let mut client = BarqGrpcClient::connect_with_api_key(
+            grpc_endpoint(&self.client.base_url)?,
+            self.client.api_key.clone(),
+        )
+        .await?;
+        client
+            .insert_async(
+                &self.name,
+                id_obj,
+                vector,
+                payload.unwrap_or_else(|| json!({})),
+            )
+            .await
+    }
+
     pub async fn insert_with_options(
         &self,
         id: impl Into<DocumentId>,
@@ -278,6 +320,16 @@ impl Collection {
                 options.into_proto(),
             )
             .await
+    }
+
+    pub async fn get_insert_status(&self, request_id: &str) -> Result<InsertStatus> {
+        ensure_supported_api_version()?;
+        let mut client = BarqGrpcClient::connect_with_api_key(
+            grpc_endpoint(&self.client.base_url)?,
+            self.client.api_key.clone(),
+        )
+        .await?;
+        client.get_insert_status(request_id).await
     }
 
     pub async fn search(
@@ -407,7 +459,10 @@ impl Collection {
 
 #[cfg(test)]
 mod tests {
-    use super::{InsertOptions, ProtoConsistency, SearchConsistency, SearchOptions};
+    use super::{
+        InsertOptions, InsertState, ProtoConsistency, ProtoInsertStatusState, SearchConsistency,
+        SearchOptions,
+    };
 
     #[test]
     fn insert_options_encode_wait_for_commit() {
@@ -440,6 +495,22 @@ mod tests {
 
         assert_eq!(proto.consistency, ProtoConsistency::Primary as i32);
         assert!(!proto.allow_fallback);
+    }
+
+    #[test]
+    fn insert_status_maps_proto_states() {
+        let state =
+            match ProtoInsertStatusState::try_from(ProtoInsertStatusState::Processing as i32)
+                .unwrap()
+            {
+                ProtoInsertStatusState::Queued => InsertState::Queued,
+                ProtoInsertStatusState::Processing => InsertState::Processing,
+                ProtoInsertStatusState::Succeeded => InsertState::Succeeded,
+                ProtoInsertStatusState::Failed => InsertState::Failed,
+                ProtoInsertStatusState::Unspecified => InsertState::Queued,
+            };
+
+        assert_eq!(state, InsertState::Processing);
     }
 }
 
@@ -556,6 +627,31 @@ impl BarqGrpcClient {
             .await
     }
 
+    pub async fn insert_async(
+        &mut self,
+        collection: &str,
+        id: impl Into<DocumentId>,
+        vector: Vec<f32>,
+        payload: serde_json::Value,
+    ) -> Result<String> {
+        let id_str = match id.into() {
+            DocumentId::U64(v) => v.to_string(),
+            DocumentId::Str(v) => v,
+        };
+
+        let response = self
+            .client
+            .insert_async(self.request(InsertRequest {
+                collection: collection.to_string(),
+                id: id_str,
+                vector,
+                payload_json: payload.to_string(),
+                options: None,
+            })?)
+            .await?;
+        Ok(response.into_inner().request_id)
+    }
+
     pub async fn insert_with_options(
         &mut self,
         collection: &str,
@@ -630,6 +726,34 @@ impl BarqGrpcClient {
         }
 
         Ok(json_results)
+    }
+
+    pub async fn get_insert_status(&mut self, request_id: &str) -> Result<InsertStatus> {
+        let response = self
+            .client
+            .get_insert_status(self.request(GetInsertStatusRequest {
+                request_id: request_id.to_string(),
+            })?)
+            .await?
+            .into_inner();
+
+        Ok(InsertStatus {
+            request_id: response.request_id,
+            state: match ProtoInsertStatusState::try_from(response.state)
+                .unwrap_or(ProtoInsertStatusState::Unspecified)
+            {
+                ProtoInsertStatusState::Queued => InsertState::Queued,
+                ProtoInsertStatusState::Processing => InsertState::Processing,
+                ProtoInsertStatusState::Succeeded => InsertState::Succeeded,
+                ProtoInsertStatusState::Failed => InsertState::Failed,
+                ProtoInsertStatusState::Unspecified => InsertState::Queued,
+            },
+            error_message: if response.error_message.is_empty() {
+                None
+            } else {
+                Some(response.error_message)
+            },
+        })
     }
 
     pub async fn batch_search(

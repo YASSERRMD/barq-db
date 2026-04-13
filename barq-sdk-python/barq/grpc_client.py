@@ -55,6 +55,27 @@ class GrpcClient:
             req.options.CopyFrom(insert_options)
         self.stub.Insert(req, metadata=self.metadata)
 
+    def insert_async(
+        self,
+        collection: str,
+        id: Any,
+        vector: List[float],
+        payload: Optional[Dict] = None,
+        options: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        payload_json = json.dumps(payload) if payload else "{}"
+        req = barq_pb2.InsertRequest(
+            collection=collection,
+            id=str(id),
+            vector=vector,
+            payload_json=payload_json,
+        )
+        insert_options = self._insert_options(options)
+        if insert_options is not None:
+            req.options.CopyFrom(insert_options)
+        response = self.stub.InsertAsync(req, metadata=self.metadata)
+        return response.request_id
+
     def insert_document(
         self,
         collection: str,
@@ -95,6 +116,20 @@ class GrpcClient:
                 "payload": payload
             })
         return results
+
+    def get_insert_status(self, request_id: str) -> Dict[str, Any]:
+        response = self.stub.GetInsertStatus(
+            barq_pb2.GetInsertStatusRequest(request_id=request_id),
+            metadata=self.metadata,
+        )
+        state_name = barq_pb2.InsertStatusState.Name(response.state)
+        if state_name.startswith("INSERT_STATUS_STATE_"):
+            state_name = state_name[len("INSERT_STATUS_STATE_") :]
+        return {
+            "request_id": response.request_id,
+            "state": state_name.lower(),
+            "error_message": response.error_message or None,
+        }
 
     def _insert_options(self, options: Optional[Dict[str, Any]]):
         if not options or "wait_for_commit" not in options:

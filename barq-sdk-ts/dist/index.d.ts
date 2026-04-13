@@ -21,6 +21,12 @@ export interface SearchResult {
 export interface InsertOptions {
     waitForCommit?: boolean;
 }
+export type InsertState = "queued" | "processing" | "succeeded" | "failed";
+export interface InsertStatus {
+    requestId: string;
+    state: InsertState;
+    errorMessage?: string;
+}
 export type SearchConsistency = "primary" | "followers" | "any";
 export interface SearchOptions {
     consistency?: SearchConsistency;
@@ -41,6 +47,8 @@ export declare class Collection {
     private name;
     constructor(client: BarqClient, name: string);
     insert(id: string | number, vector: number[], payload?: any, options?: InsertOptions): Promise<void>;
+    insertAsync(id: string | number, vector: number[], payload?: any, options?: InsertOptions): Promise<string>;
+    getInsertStatus(requestId: string): Promise<InsertStatus>;
     search(vector?: number[], query?: string, topK?: number, filter?: any, options?: SearchOptions): Promise<SearchResult[]>;
 }
 export declare class GrpcClient {
@@ -51,6 +59,8 @@ export declare class GrpcClient {
     health(): Promise<boolean>;
     createCollection(name: string, dimension: number, metric?: string): Promise<void>;
     insert(collection: string, id: string | number, vector: number[], payload?: any, options?: InsertOptions): Promise<void>;
+    insertAsync(collection: string, id: string | number, vector: number[], payload?: any, options?: InsertOptions): Promise<string>;
+    getInsertStatus(requestId: string): Promise<InsertStatus>;
     insertDocument(collection: string, id: string | number, vector: number[], payload?: any, options?: InsertOptions): Promise<void>;
     search(collection: string, vector: number[], topK?: number, options?: SearchOptions): Promise<SearchResult[]>;
 }
