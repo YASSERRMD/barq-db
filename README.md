@@ -50,6 +50,7 @@ Barq-DB is designed as a retrieval system rather than a standalone vector store.
 
 Ingestion, indexing, and querying are treated as coordinated stages of a single pipeline, enabling better control over performance, memory usage, and long-running stability.
 
+
 ---
 
 ## Key Highlights (v2)
